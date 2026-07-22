@@ -251,7 +251,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                             $stopped += $s
                         }
                     }
-                    $stopped -join ',' | Out-File "$env:TEMP\vault_svcs.txt"
+                    $stopped -join ',' | Out-File "$env:TEMP\silo_svcs.txt"
                     
                     # Stop telemetry permanently for this session
                     Stop-Service -Name DiagTrack -Force -ErrorAction SilentlyContinue
@@ -427,7 +427,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                     
                     // Restart only the services that were previously running
                     let ps_script = r#"
-                        $txt = "$env:TEMP\vault_svcs.txt"
+                        $txt = "$env:TEMP\silo_svcs.txt"
                         if (Test-Path $txt) {
                             $stopped = Get-Content $txt
                             foreach ($s in ($stopped -split ',')) {
@@ -492,59 +492,157 @@ pub struct ScannedGame {
 #[tauri::command]
 pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String> {
     use walkdir::WalkDir;
-    let mut results = Vec::new();
+    use std::collections::HashMap;
+    
     let folder = std::path::Path::new(&folder_path);
     
     if !folder.exists() || !folder.is_dir() {
         return Err("Invalid folder path".into());
     }
 
-    // Don't recurse too deep to avoid scanning the entire C drive by accident
-    for entry in WalkDir::new(&folder_path).max_depth(4).into_iter().filter_map(|e| e.ok()) {
+    // Expanded blacklist of non-game executables
+    let blacklist = [
+        "unins", "setup", "crash", "redist", "dxwebsetup", "vcredist",
+        "cef", "bootstrap", "dotnet", "directx", "dxsetup",
+        "installer", "updater", "reporter", "helper", "service",
+        "vc_redist", "oalinst", "physx", "easyanticheat",
+        "battleye", "beclient", "beservice", "eac_launcher",
+        "ue4prereqsetup", "unrealcefsubprocess", "steamwebhelper",
+    ];
+
+    // Collect all candidate exes
+    struct ExeCandidate {
+        path: PathBuf,
+        depth: usize,
+        game_dir: String,      // top-level subfolder name (the "game folder")
+        display_name: String,  // cleaned up name for display
+    }
+
+    let mut candidates: Vec<ExeCandidate> = Vec::new();
+
+    for entry in WalkDir::new(&folder_path).max_depth(5).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if ext.to_string_lossy().to_lowercase() == "exe" {
-                    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-                    
-                    if file_name.contains("unins") || 
-                       file_name.contains("setup") || 
-                       file_name.contains("crash") || 
-                       file_name.contains("redist") ||
-                       file_name.contains("dxwebsetup") ||
-                       file_name.contains("vcredist") ||
-                       file_name.contains("cef") ||
-                       file_name.contains("launcher") ||
-                       file_name.contains("bootstrap") {
-                        continue;
-                    }
+        if !path.is_file() { continue; }
+        
+        let ext = match path.extension() {
+            Some(e) => e.to_string_lossy().to_lowercase(),
+            None => continue,
+        };
+        if ext != "exe" { continue; }
 
-                    let parent_name = path.parent()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "Unknown Game".to_string());
-                    
-                    let exe_name = path.file_stem().unwrap_or_default().to_string_lossy();
-                    
-                    let mut display_name = parent_name;
-                    let p_lower = display_name.to_lowercase();
-                    if p_lower == "bin" || p_lower == "win64" || p_lower == "binaries" || p_lower == "system32" {
-                        display_name = path.parent()
-                            .and_then(|p| p.parent())
-                            .and_then(|p| p.file_name())
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or(exe_name.to_string());
-                    }
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        let file_stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
 
-                    results.push(ScannedGame {
-                        name: display_name,
-                        exe_path: path.to_string_lossy().into_owned(),
-                    });
-                }
+        // Skip blacklisted names
+        if blacklist.iter().any(|b| file_name.contains(b)) {
+            continue;
+        }
+
+        // Skip very small exes (< 500KB) — usually launchers or stubs
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() < 500_000 {
+                continue;
             }
         }
+
+        // Determine the top-level game directory relative to the scanned folder
+        let relative = match path.strip_prefix(folder) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let components: Vec<_> = relative.components().collect();
+        if components.is_empty() { continue; }
+
+        // If the exe is directly in the scanned folder (no subfolder), use exe stem as game dir
+        let game_dir = if components.len() == 1 {
+            file_stem.to_string()
+        } else {
+            components[0].as_os_str().to_string_lossy().to_string()
+        };
+
+        let depth = entry.depth();
+
+        // Build display name from the game directory, cleaning up common folder patterns
+        let parent_name = path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| game_dir.clone());
+
+        let display_name = {
+            let p_lower = parent_name.to_lowercase();
+            if ["bin", "win64", "win32", "binaries", "system32", "x64", "x86", "game", "shipping"].contains(&p_lower.as_str()) {
+                // Walk up to find a better name
+                path.parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or(game_dir.clone())
+            } else {
+                parent_name
+            }
+        };
+
+        candidates.push(ExeCandidate {
+            path: path.to_path_buf(),
+            depth,
+            game_dir: game_dir.to_lowercase(),
+            display_name,
+        });
     }
-    
+
+    // Group by game directory and pick the best exe per group
+    let mut groups: HashMap<String, Vec<ExeCandidate>> = HashMap::new();
+    for c in candidates {
+        groups.entry(c.game_dir.clone()).or_default().push(c);
+    }
+
+    let mut results = Vec::new();
+    for (_game_dir, mut exes) in groups {
+        // Score each exe — higher is better
+        exes.sort_by(|a, b| {
+            let score = |c: &ExeCandidate| -> i32 {
+                let stem = c.path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+                let mut s: i32 = 0;
+
+                // Prefer exe name matching the game folder name
+                if stem == c.game_dir || c.game_dir.contains(&stem) || stem.contains(&c.game_dir) {
+                    s += 50;
+                }
+
+                // Prefer shallower depth
+                s -= (c.depth as i32) * 5;
+
+                // Deprioritize variant suffixes
+                let deprioritize = ["_be", "_dx12", "_dx11", "_vulkan", "_debug", "_server",
+                                    "_shipping", "_launcher", "-win64", "-shipping", "dedicated"];
+                for suffix in &deprioritize {
+                    if stem.contains(suffix) {
+                        s -= 30;
+                    }
+                }
+
+                // Prefer larger files (likely the main game binary)
+                if let Ok(meta) = std::fs::metadata(&c.path) {
+                    s += (meta.len() / (10 * 1024 * 1024)) as i32; // +1 per 10MB
+                }
+
+                s
+            };
+
+            score(b).cmp(&score(a))
+        });
+
+        if let Some(best) = exes.into_iter().next() {
+            results.push(ScannedGame {
+                name: best.display_name,
+                exe_path: best.path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+
+    // Sort results alphabetically by name
+    results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
     Ok(results)
 }
 
@@ -895,4 +993,26 @@ pub fn run_uninstaller(uninstaller_path: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn backup_library(app: AppHandle) -> Result<String, String> {
+    let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).set_file_name("silo_backup.zip").blocking_save_file();
+    if let Some(dest_path) = file_path {
+        let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
+        zip_dir(&app_data_dir, std::path::Path::new(&dest_path.to_string()))?;
+        return Ok(dest_path.to_string());
+    }
+    Err("Backup cancelled".into())
+}
+
+#[tauri::command]
+pub async fn restore_library(app: AppHandle) -> Result<String, String> {
+    let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).blocking_pick_file();
+    if let Some(src_path) = file_path {
+        let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
+        unzip_file(std::path::Path::new(&src_path.to_string()), &app_data_dir)?;
+        return Ok("Library restored successfully".into());
+    }
+    Err("Restore cancelled".into())
 }

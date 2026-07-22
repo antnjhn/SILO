@@ -74,6 +74,8 @@ window.vault = {
   windowStartDragging: () => invoke('window_start_dragging'),
   getGameBackups: (gameId) => invoke('get_game_backups', { gameId }),
   restoreBackup: (gameId, backupName) => invoke('restore_backup', { gameId, backupName }),
+  backupLibrary: () => invoke('backup_library'),
+  restoreLibrary: () => invoke('restore_library'),
 };
 function getFileSrc(path, imgElement) {
   if (!path) return;
@@ -705,7 +707,7 @@ function renderDetails(g) {
         try {
           await window.__TAURI__.core.invoke('delete_game_folder', { gameId: g.id });
           showToast('success', 'Deleted', 'Game folder deleted permanently.');
-          const removeYes = await ask("The game files have been deleted. Do you also want to remove this game from your Vault library?", { title: 'Remove from Launcher?', kind: 'info' });
+          const removeYes = await ask("The game files have been deleted. Do you also want to remove this game from your Silo library?", { title: 'Remove from Launcher?', kind: 'info' });
           if (removeYes) {
             await finishRemoval(g);
           } else {
@@ -735,7 +737,7 @@ function renderDetails(g) {
         try {
           await window.__TAURI__.core.invoke('run_uninstaller', { uninstallerPath: uninstaller });
           const { ask } = window.__TAURI__.dialog;
-          const removeYes = await ask("The uninstaller has been launched. Do you also want to remove this game from your Vault library?", { title: 'Remove from Launcher?', kind: 'info' });
+          const removeYes = await ask("The uninstaller has been launched. Do you also want to remove this game from your Silo library?", { title: 'Remove from Launcher?', kind: 'info' });
           if (removeYes) {
             await finishRemoval(g);
           } else {
@@ -989,6 +991,35 @@ document.getElementById('btn-autofill').addEventListener('click', async () => {
   btn.textContent = '✨ Auto-Fill Metadata';
 });
 
+// Browse for .exe — pick a single file and auto-fill the form
+document.getElementById('btn-browse-exe').addEventListener('click', async () => {
+  const p = await window.vault.pickExe();
+  if (p) {
+    document.getElementById('input-exe').value = p;
+    // Auto-fill game name from parent folder or exe stem
+    const parts = p.replace(/\\/g, '/').split('/');
+    const exeFile = parts[parts.length - 1] || '';
+    const parentFolder = parts[parts.length - 2] || '';
+    // Use parent folder name unless it's a generic folder like 'bin', 'win64', etc.
+    const genericFolders = ['bin', 'win64', 'win32', 'binaries', 'x64', 'x86', 'game', 'shipping'];
+    let gameName = parentFolder;
+    if (genericFolders.includes(parentFolder.toLowerCase())) {
+      gameName = parts[parts.length - 3] || exeFile.replace(/\.exe$/i, '');
+    }
+    if (!gameName) gameName = exeFile.replace(/\.exe$/i, '');
+    
+    const nameInput = document.getElementById('input-name');
+    if (!nameInput.value.trim()) {
+      nameInput.value = gameName;
+      // Trigger autofill button visibility
+      nameInput.dispatchEvent(new Event('input'));
+    }
+  }
+});
+
+// Scan folder — show checklist overlay for selection
+let pendingScanResults = [];
+
 document.getElementById('btn-scan-folder').addEventListener('click', async () => {
   const { open } = window.__TAURI__.dialog;
   const { invoke } = window.__TAURI__.core;
@@ -1006,56 +1037,94 @@ document.getElementById('btn-scan-folder').addEventListener('click', async () =>
       btn.innerHTML = '⏳ Scanning...';
       
       const results = await invoke('scan_folder', { folderPath: selectedPath });
+      btn.innerHTML = originalText;
       
       if (results && results.length > 0) {
-        // Just pre-fill the form with the first found game for manual confirmation, or auto-add them.
-        // Let's auto-add them!
-        let addedCount = 0;
-        for (const game of results) {
-          if (!games.find(g => g.exePath === game.exe_path)) {
-            let wallpaper = null;
-            let logo = null;
-            let finalName = game.name;
-            
-            // Automatic metadata fetching disabled per user request
-            // Only manual logo autofill in edits is allowed.
-            
-            const newGame = {
-              name: finalName,
-              exePath: game.exe_path,
-              fontColor: '#ffffff',
-              fontFamily: '',
-              status: 'Backlog',
-              lastPlayed: null,
-              sessionCount: 0,
-              playtimeMinutes: 0,
-              wallpaper: wallpaper,
-              logoPath: logo
-            };
-            const added = await window.vault.addGame(newGame);
-            if (added) {
-              games.push(added);
-              allGames.push(added);
-              addedCount++;
-            }
-          }
+        // Filter out games we already have
+        const newResults = results.filter(r => !allGames.find(g => g.exePath === r.exe_path));
+        
+        if (newResults.length === 0) {
+          showToast('info', 'Scan Complete', 'All games from that folder are already in your library.');
+          return;
         }
         
-        if (addedCount > 0) {
-          showToast('success', 'Scan Complete', `Added ${addedCount} new games!`);
-          document.getElementById('modal-overlay').classList.add('hidden');
-          renderGameList();
-        } else {
-          showToast('info', 'Scan Complete', 'No new games were found.');
-        }
+        pendingScanResults = newResults;
+        
+        // Build the checklist
+        const listEl = document.getElementById('scan-results-list');
+        listEl.innerHTML = newResults.map((r, i) => {
+          const exeFile = r.exe_path.replace(/\\/g, '/').split('/').pop();
+          return `
+          <label class="scan-result-item" style="display: flex; align-items: center; gap: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; cursor: pointer;">
+            <input type="checkbox" checked data-scan-index="${i}" style="accent-color: #66ccff; width: 18px; height: 18px; flex-shrink: 0;" />
+            <div style="flex: 1; min-width: 0;">
+              <div style="font-weight: bold; font-size: 14px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${esc(r.name)}</div>
+              <div style="font-size: 11px; color: rgba(255,255,255,0.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(r.exe_path)}">${esc(exeFile)}</div>
+            </div>
+          </label>`;
+        }).join('');
+        
+        updateScanCount();
+        
+        // Listen for checkbox changes to update count
+        listEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+          cb.addEventListener('change', updateScanCount);
+        });
+        
+        // Close the add modal and show scan results
+        document.getElementById('modal-overlay').classList.add('hidden');
+        document.getElementById('scan-results-overlay').classList.remove('hidden');
       } else {
-        showToast('error', 'Scan Failed', 'No valid executables found in that folder.');
+        showToast('error', 'Scan Failed', 'No valid game executables found in that folder.');
       }
-      btn.innerHTML = originalText;
     }
   } catch (err) {
     console.error(err);
     showToast('error', 'Scan Error', 'Something went wrong while scanning.');
+  }
+});
+
+function updateScanCount() {
+  const checked = document.querySelectorAll('#scan-results-list input[type="checkbox"]:checked').length;
+  const total = document.querySelectorAll('#scan-results-list input[type="checkbox"]').length;
+  document.getElementById('scan-selected-count').textContent = `${checked} of ${total} selected`;
+  document.getElementById('btn-scan-add').disabled = checked === 0;
+}
+
+document.getElementById('btn-scan-cancel').addEventListener('click', () => {
+  document.getElementById('scan-results-overlay').classList.add('hidden');
+  pendingScanResults = [];
+});
+
+document.getElementById('btn-scan-add').addEventListener('click', async () => {
+  const checkboxes = document.querySelectorAll('#scan-results-list input[type="checkbox"]:checked');
+  const indices = Array.from(checkboxes).map(cb => parseInt(cb.dataset.scanIndex));
+  
+  let addedCount = 0;
+  for (const idx of indices) {
+    const game = pendingScanResults[idx];
+    if (!game) continue;
+    
+    const newGame = {
+      name: game.name,
+      exePath: game.exe_path,
+      fontColor: '#ffffff',
+      fontFamily: '',
+    };
+    const added = await window.vault.addGame(newGame);
+    if (added) {
+      allGames.push(added);
+      addedCount++;
+    }
+  }
+  
+  document.getElementById('scan-results-overlay').classList.add('hidden');
+  pendingScanResults = [];
+  
+  if (addedCount > 0) {
+    applyCategoryFilter(false);
+    renderGameList();
+    showToast('success', 'Added', `${addedCount} game${addedCount > 1 ? 's' : ''} added to SILO!`);
   }
 });
 
@@ -1133,7 +1202,7 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
     allGames.push(g);
     applyCategoryFilter(false);
     selectedIndex = games.length - 1;
-    showToast('success', 'Added', `${name} added to VAULT`);
+    showToast('success', 'Added', `${name} added to SILO`);
   }
 
   updateGameListSelection();
@@ -1329,6 +1398,41 @@ function fmtDate(iso) {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+/* ── Settings & Backup ─────────────────────────────────────────────────────*/
+document.getElementById('btn-settings').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.remove('hidden');
+});
+document.getElementById('btn-settings-close').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.add('hidden');
+});
+
+document.getElementById('btn-export-backup').addEventListener('click', async () => {
+  try {
+    const dest = await window.vault.backupLibrary();
+    if (dest) {
+      showToast('success', 'Export Complete', `Library backed up to ${dest}`);
+      document.getElementById('settings-overlay').classList.add('hidden');
+    }
+  } catch (e) {
+    if (e !== 'Backup cancelled') showToast('error', 'Export Failed', e);
+  }
+});
+
+document.getElementById('btn-import-backup').addEventListener('click', async () => {
+  const confirmed = await ask("Restoring a backup will overwrite your current library and settings. Proceed?", { title: 'Import Backup', kind: 'warning' });
+  if (!confirmed) return;
+  
+  try {
+    const res = await window.vault.restoreLibrary();
+    if (res) {
+      showToast('success', 'Import Complete', `Library restored. Reloading...`);
+      setTimeout(() => window.location.reload(), 1500);
+    }
+  } catch (e) {
+    if (e !== 'Restore cancelled') showToast('error', 'Import Failed', e);
+  }
+});
 
 /* ── Go ────────────────────────────────────────────────────────────────────*/
 init();

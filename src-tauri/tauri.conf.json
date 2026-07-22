@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "vault-launcher",
-  "version": "0.1.0",
-  "identifier": "com.vault.launcher",
+  "productName": "SILO",
+  "version": "0.1.1",
+  "identifier": "com.silo.launcher",
   "build": {
     "frontendDist": "../src/renderer",
     "beforeDevCommand": "",
@@ -11,12 +11,13 @@
   "app": {
     "windows": [
       {
-        "title": "VAULT",
+        "title": "SILO",
         "width": 1280,
         "height": 720,
         "resizable": true,
-        "fullscreen": true,
-        "decorations": false
+        "maximized": true,
+        "fullscreen": false,
+        "decorations": true
       }
     ],
     "security": {

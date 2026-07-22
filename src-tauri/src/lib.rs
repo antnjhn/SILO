@@ -30,7 +30,9 @@ pub fn run() {
         commands::backup_now,
         commands::check_uninstaller,
         commands::delete_game_folder,
-        commands::run_uninstaller
+        commands::run_uninstaller,
+        commands::backup_library,
+        commands::restore_library
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
