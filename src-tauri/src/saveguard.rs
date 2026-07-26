@@ -4,14 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 use notify::{Watcher, RecursiveMode, EventKind};
-use sysinfo::{System, Process, Pid};
+use sysinfo::{System, Pid};
 use tauri::{AppHandle, Manager};
+#[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::RestartManager::*;
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::*;
 use zip::write::FileOptions;
 use std::io::{Write, Read};
 
+#[cfg(target_os = "windows")]
 pub fn get_locking_pids(path: &Path) -> Vec<u32> {
     let mut pids = Vec::new();
     unsafe {
@@ -61,9 +65,14 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
             }
         }
         
-        RmEndSession(session_handle);
+        let _ = RmEndSession(session_handle);
     }
     pids
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn get_locking_pids(_path: &Path) -> Vec<u32> {
+    Vec::new()
 }
 
 pub fn is_descendant(system: &System, target_pid: u32, ancestor_pid: u32) -> bool {
@@ -149,7 +158,7 @@ pub fn start_watcher(pid: u32, game_id: String, app_handle: AppHandle) {
         let mut system = System::new();
         
         loop {
-            system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
             if system.process(Pid::from_u32(pid)).is_none() {
                 break; // Game exited
             }

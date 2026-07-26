@@ -21,10 +21,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://*.steamstatic.com https://*.steampowered.com;",
+      "csp": "default-src 'self' 'unsafe-inline' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://*.steamstatic.com https://*.steampowered.com;",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**", "$APPDATA/**", "$APPCONFIG/**", "$APPDATA/com.tauri.dev/**", "C:/**", "*"]
+        "scope": ["$APPDATA/**", "$APPCONFIG/**", "$APPDATA/com.tauri.dev/**"]
       }
     },
     "withGlobalTauri": true

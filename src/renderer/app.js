@@ -110,6 +110,13 @@ async function init() {
   applyCategoryFilter();
   requestAnimationFrame(pollGamepad);
 
+  listen('library-corrupt-recovered', (event) => {
+    showToast('error', 'Library Recovered', event.payload);
+  });
+  listen('library-corrupt-failed', (event) => {
+    showToast('error', 'Library Corrupted', event.payload);
+  });
+
   window.vault.getSystemFonts().then(fonts => {
     const fontSelect = document.getElementById('input-font');
     if (fontSelect && fonts && fonts.length > 0) {
@@ -1135,26 +1142,30 @@ document.getElementById('btn-pick-exe').addEventListener('click', async () => {
 
 document.getElementById('btn-pick-logo').addEventListener('click', async () => {
   if (!editingGameId) return;
-  const p = await window.vault.pickLogo(editingGameId);
-  if (p && p.error) {
-    showToast('error', 'Logo Error', p.error);
-    return;
-  }
-  if (p) {
-    modalLogoPath = p;
-    const img = document.getElementById('edit-logo-preview-img');
-    getFileSrc(modalLogoPath, img);
-    img.style.display = 'block';
+  try {
+    const p = await window.vault.pickLogo(editingGameId);
+    if (p) {
+      modalLogoPath = p;
+      const img = document.getElementById('edit-logo-preview-img');
+      getFileSrc(modalLogoPath, img);
+      img.style.display = 'block';
+    }
+  } catch (err) {
+    showToast('error', 'Logo Error', err);
   }
 });
 
 document.getElementById('btn-pick-wallpaper-modal').addEventListener('click', async () => {
-  const p = await window.vault.pickWallpaper(editingGameId || 'new_' + Date.now());
-  if (p) { 
-    modalWallpaperPath = p; 
-    const img = document.getElementById('edit-wallpaper-preview-img');
-    getFileSrc(modalWallpaperPath, img);
-    img.style.display = 'block';
+  try {
+    const p = await window.vault.pickWallpaper(editingGameId || 'new_' + Date.now());
+    if (p) { 
+      modalWallpaperPath = p; 
+      const img = document.getElementById('edit-wallpaper-preview-img');
+      getFileSrc(modalWallpaperPath, img);
+      img.style.display = 'block';
+    }
+  } catch (err) {
+    showToast('error', 'Wallpaper Error', err);
   }
 });
 
@@ -1184,31 +1195,35 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
   const inp = document.getElementById('input-name');
   if (!name) { inp.style.borderColor = 'rgba(255,100,100,0.6)'; setTimeout(() => inp.style.borderColor = '', 1500); inp.focus(); return; }
 
-  if (editingGameId) {
-    const u = await window.vault.updateGame(editingGameId, {
-      name, exePath: exePath || undefined,
-      wallpaper: modalWallpaperPath || undefined,
-      logoPath: modalLogoPath || undefined,
-      fontFamily: fontFamily || undefined,
-      fontColor: fontColor || undefined,
-    });
-    const idx = allGames.findIndex(g => g.id === editingGameId);
-    if (idx !== -1 && u) allGames[idx] = u;
-    applyCategoryFilter(false);
-    if (detailsOpen && games[selectedIndex]?.id === editingGameId) renderDetails(u);
-    showToast('success', 'Updated', `${name} saved`);
-  } else {
-    const g = await window.vault.addGame({ name, exePath, wallpaper: modalWallpaperPath, logoPath: modalLogoPath, fontFamily: fontFamily || undefined, fontColor: fontColor || undefined });
-    allGames.push(g);
-    applyCategoryFilter(false);
-    selectedIndex = games.length - 1;
-    showToast('success', 'Added', `${name} added to SILO`);
-  }
+  try {
+    if (editingGameId) {
+      const u = await window.vault.updateGame(editingGameId, {
+        name, exePath: exePath || undefined,
+        wallpaper: modalWallpaperPath || undefined,
+        logoPath: modalLogoPath || undefined,
+        fontFamily: fontFamily || undefined,
+        fontColor: fontColor || undefined,
+      });
+      const idx = allGames.findIndex(g => g.id === editingGameId);
+      if (idx !== -1 && u) allGames[idx] = u;
+      applyCategoryFilter(false);
+      if (detailsOpen && games[selectedIndex]?.id === editingGameId) renderDetails(u);
+      showToast('success', 'Updated', `${name} saved`);
+    } else {
+      const g = await window.vault.addGame({ name, exePath, wallpaper: modalWallpaperPath, logoPath: modalLogoPath, fontFamily: fontFamily || undefined, fontColor: fontColor || undefined });
+      allGames.push(g);
+      applyCategoryFilter(false);
+      selectedIndex = games.length - 1;
+      showToast('success', 'Added', `${name} added to SILO`);
+    }
 
-  updateGameListSelection();
-  centerActiveItem(true);
-  crossfadeWallpaper();
-  document.getElementById('modal-overlay').classList.add('hidden');
+    updateGameListSelection();
+    centerActiveItem(true);
+    crossfadeWallpaper();
+    document.getElementById('modal-overlay').classList.add('hidden');
+  } catch (err) {
+    showToast('error', 'Save Failed', err);
+  }
 });
 
 /* ── Delete ────────────────────────────────────────────────────────────────*/

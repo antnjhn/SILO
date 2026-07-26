@@ -7,6 +7,7 @@ pub fn run() {
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_log::Builder::default().build())
     .invoke_handler(tauri::generate_handler![
         commands::get_games,
         commands::add_game,
@@ -34,10 +35,7 @@ pub fn run() {
         commands::backup_library,
         commands::restore_library
     ])
-    .setup(|app| {
-      if cfg!(debug_assertions) {
-        // app.handle().plugin(tauri_plugin_log::Builder::default().build())?;
-      }
+    .setup(|_app| {
       Ok(())
     })
     .run(tauri::generate_context!())

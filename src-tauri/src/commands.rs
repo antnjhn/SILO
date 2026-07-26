@@ -3,14 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Emitter};
 use std::process::Command;
+#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::sync::mpsc::channel;
 use notify::{Watcher, RecursiveMode, EventKind};
 use walkdir::WalkDir;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::time::{SystemTime, Instant};
-use std::collections::HashSet;
+use std::time::Instant;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,36 +53,80 @@ fn get_wallpapers_dir(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap().join("wallpapers")
 }
 
+fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), String> {
+    let data_path = get_data_path(app);
+    if let Some(parent) = data_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    
+    let json_str = serde_json::to_string_pretty(games).map_err(|e| e.to_string())?;
+    let tmp_path = data_path.with_extension("json.tmp");
+    let bak_path = data_path.with_extension("json.bak");
+
+    {
+        let mut file = File::create(&tmp_path).map_err(|e| e.to_string())?;
+        file.write_all(json_str.as_bytes()).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+
+    if data_path.exists() {
+        let _ = fs::copy(&data_path, &bak_path);
+    }
+
+    fs::rename(&tmp_path, &data_path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_games(app: AppHandle) -> Vec<Game> {
     let data_path = get_data_path(&app);
-    println!("DATA PATH IS: {:?}", data_path);
+    let bak_path = data_path.with_extension("json.bak");
+
     if !data_path.exists() {
-        println!("DATA PATH DOES NOT EXIST");
+        if bak_path.exists() {
+            if let Ok(data) = fs::read_to_string(&bak_path) {
+                if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&data) {
+                    let _ = app.emit("library-corrupt-recovered", "Primary library missing. Recovered from backup.");
+                    for game in &mut games {
+                        game.is_installed = Some(game.exe_path.as_ref().map_or(false, |p| Path::new(p).exists()));
+                    }
+                    return games;
+                }
+            }
+        }
         return vec![];
     }
-    let data = fs::read_to_string(data_path).unwrap_or_default();
+
+    let data = fs::read_to_string(&data_path).unwrap_or_default();
     match serde_json::from_str::<Vec<Game>>(&data) {
         Ok(mut games) => {
-            // Check installed status dynamically
             for game in &mut games {
-                if let Some(ref path) = game.exe_path {
-                    game.is_installed = Some(Path::new(path).exists());
-                } else {
-                    game.is_installed = Some(false);
-                }
+                game.is_installed = Some(game.exe_path.as_ref().map_or(false, |p| Path::new(p).exists()));
             }
             games
         },
         Err(e) => {
-            println!("Failed to parse games.json: {}", e);
+            log::error!("Failed to parse games.json: {}", e);
+            if bak_path.exists() {
+                if let Ok(bak_data) = fs::read_to_string(&bak_path) {
+                    if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&bak_data) {
+                        let _ = app.emit("library-corrupt-recovered", format!("Primary library corrupt ({}). Recovered from backup.", e));
+                        for game in &mut games {
+                            game.is_installed = Some(game.exe_path.as_ref().map_or(false, |p| Path::new(p).exists()));
+                        }
+                        return games;
+                    }
+                }
+            }
+            let _ = app.emit("library-corrupt-failed", format!("Primary library corrupt and backup recovery failed: {}", e));
             vec![]
         }
     }
 }
 
 #[tauri::command]
-pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>) -> Game {
+pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>) -> Result<Game, String> {
     let mut games = get_games(app.clone());
     let new_game = Game {
         id: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string(),
@@ -97,20 +141,17 @@ pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpape
         last_played: None,
         is_installed: Some(true),
         status: Some("Playing".to_string()),
-        added_at: format!("{:?}", std::time::SystemTime::now()), // simple placeholder
+        added_at: format!("{:?}", std::time::SystemTime::now()),
         save_path: None,
         backup_count: Some(5),
     };
     games.push(new_game.clone());
-    
-    let data_path = get_data_path(&app);
-    fs::create_dir_all(data_path.parent().unwrap()).ok();
-    fs::write(data_path, serde_json::to_string_pretty(&games).unwrap()).ok();
-    new_game
+    save_games_atomic(&app, &games)?;
+    Ok(new_game)
 }
 
 #[tauri::command]
-pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Option<Game> {
+pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Result<Option<Game>, String> {
     let mut games = get_games(app.clone());
     if let Some(game) = games.iter_mut().find(|g| g.id == id) {
         if let Some(name) = updates.get("name").and_then(|v| v.as_str()) { game.name = name.to_string(); }
@@ -133,40 +174,51 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Op
         }
         
         let updated = game.clone();
-        fs::write(get_data_path(&app), serde_json::to_string_pretty(&games).unwrap()).ok();
-        Some(updated)
+        save_games_atomic(&app, &games)?;
+        Ok(Some(updated))
     } else {
-        None
+        Ok(None)
     }
 }
 
 #[tauri::command]
-pub fn delete_game(app: AppHandle, id: String) -> bool {
+pub fn delete_game(app: AppHandle, id: String) -> Result<bool, String> {
     let mut games = get_games(app.clone());
+    let initial_len = games.len();
     games.retain(|g| g.id != id);
-    fs::write(get_data_path(&app), serde_json::to_string_pretty(&games).unwrap()).ok();
-    true
+    if games.len() != initial_len {
+        save_games_atomic(&app, &games)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
+
+static SYSTEM_FONTS_CACHE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 #[tauri::command]
 pub fn get_system_fonts() -> Vec<String> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Add-Type -AssemblyName PresentationCore; [System.Windows.Media.Fonts]::SystemFontFamilies | Select-Object -ExpandProperty Source"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut fonts: Vec<String> = stdout.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        fonts.sort();
-        fonts
-    } else {
+    SYSTEM_FONTS_CACHE.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Add-Type -AssemblyName PresentationCore; [System.Windows.Media.Fonts]::SystemFontFamilies | Select-Object -ExpandProperty Source"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            
+            if let Ok(output) = output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut fonts: Vec<String> = stdout.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                fonts.sort();
+                if !fonts.is_empty() {
+                    return fonts;
+                }
+            }
+        }
         vec!["Arial".to_string()]
-    }
+    }).clone()
 }
-
-
 
 use tauri_plugin_dialog::DialogExt;
 
@@ -177,35 +229,33 @@ pub async fn pick_exe(app: AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn pick_wallpaper(app: AppHandle, game_id: String) -> Option<String> {
+pub async fn pick_wallpaper(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
     let file_path = app.dialog().file().add_filter("Images", &["jpg", "jpeg", "png", "webp", "gif"]).blocking_pick_file();
     if let Some(src) = file_path {
         let src_str = src.to_string();
         let ext = std::path::Path::new(&src_str).extension().and_then(|s| s.to_str()).unwrap_or("png");
         let wallpapers_dir = get_wallpapers_dir(&app);
-        fs::create_dir_all(&wallpapers_dir).ok();
+        fs::create_dir_all(&wallpapers_dir).map_err(|e| e.to_string())?;
         let dest = wallpapers_dir.join(format!("{}.{}", game_id, ext));
-        if fs::copy(src.to_string(), &dest).is_ok() {
-            return Some(dest.to_string_lossy().to_string());
-        }
+        fs::copy(src.to_string(), &dest).map_err(|e| format!("Failed to copy wallpaper: {}", e))?;
+        return Ok(Some(dest.to_string_lossy().to_string()));
     }
-    None
+    Ok(None)
 }
 
 #[tauri::command]
-pub async fn pick_logo(app: AppHandle, game_id: String) -> Option<String> {
+pub async fn pick_logo(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
     let file_path = app.dialog().file().add_filter("Images", &["jpg", "jpeg", "png", "webp"]).blocking_pick_file();
     if let Some(src) = file_path {
         let src_str = src.to_string();
         let ext = std::path::Path::new(&src_str).extension().and_then(|s| s.to_str()).unwrap_or("png");
         let wallpapers_dir = get_wallpapers_dir(&app);
-        fs::create_dir_all(&wallpapers_dir).ok();
+        fs::create_dir_all(&wallpapers_dir).map_err(|e| e.to_string())?;
         let dest = wallpapers_dir.join(format!("logo_{}.{}", game_id, ext));
-        if fs::copy(src.to_string(), &dest).is_ok() {
-            return Some(dest.to_string_lossy().to_string());
-        }
+        fs::copy(src.to_string(), &dest).map_err(|e| format!("Failed to copy logo: {}", e))?;
+        return Ok(Some(dest.to_string_lossy().to_string()));
     }
-    None
+    Ok(None)
 }
 
 #[tauri::command]
@@ -219,10 +269,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
     let backup_count_clone = game.backup_count.unwrap_or(5);
     
     tauri::async_runtime::spawn(async move {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let start = std::time::Instant::now();
-        #[cfg(target_os = "windows")]
-        use std::os::windows::process::CommandExt;
         
         let window = app.get_webview_window("main");
         
@@ -232,15 +279,12 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             }
             #[cfg(target_os = "windows")]
             {
-                // Kill bloatware apps and explorer (which also mutes notifications)
-                // Note: Removed msedgewebview2.exe because that kills the launcher's own UI!
                 for app in &["OneDrive.exe", "PhoneExperienceHost.exe", "explorer.exe"] {
                     let mut kill_cmd = std::process::Command::new("taskkill");
                     kill_cmd.creation_flags(0x08000000);
                     let _ = kill_cmd.args(&["/F", "/IM", app]).spawn();
                 }
                 
-                // Stop services and track which were running
                 let ps_script = r#"
                     $svcs = @('SysMain', 'WSearch')
                     $stopped = @()
@@ -252,8 +296,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                         }
                     }
                     $stopped -join ',' | Out-File "$env:TEMP\silo_svcs.txt"
-                    
-                    # Stop telemetry permanently for this session
                     Stop-Service -Name DiagTrack -Force -ErrorAction SilentlyContinue
                 "#;
                 let mut ps_cmd = std::process::Command::new("powershell");
@@ -262,14 +304,23 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             }
         }
         
-        let mut cmd = Command::new("cmd");
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        
         let working_dir = std::path::Path::new(&exe_path).parent().unwrap_or(std::path::Path::new(""));
-        
-        cmd.current_dir(working_dir)
-           .raw_arg(format!("/C start \"\" /HIGH /WAIT \"{}\"", exe_path));
+
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.creation_flags(0x08000000);
+            c.current_dir(working_dir);
+            c.raw_arg(format!("/C start \"\" /HIGH /WAIT \"{}\"", exe_path));
+            c
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = {
+            let mut c = Command::new(&exe_path);
+            c.current_dir(working_dir);
+            c
+        };
 
         if let Ok(mut child) = cmd.spawn() {
             let exe_name = Path::new(&exe_path)
@@ -278,7 +329,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 .to_string_lossy()
                 .into_owned();
 
-            // Set up watcher channel and watch directories if save path is not set yet
             let run_detection = save_path_clone.is_none();
             let mut detected_path: Option<PathBuf> = None;
             let mut watcher_opt = None;
@@ -309,19 +359,21 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let watch_dirs = get_watch_directories();
             
             while is_running {
-                system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                
-                // Try to find the game PID if we haven't yet
                 if game_pid.is_none() {
+                    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
                     for (pid, proc) in system.processes() {
                         if proc.name().to_string_lossy().to_lowercase() == exe_name.to_lowercase() {
                             game_pid = Some(pid.as_u32());
                             break;
                         }
                     }
+                } else {
+                    system.refresh_processes(
+                        sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid.unwrap())]),
+                        true,
+                    );
                 }
                 
-                // Poll watcher events if active
                 if let Some(rx) = &rx_opt {
                     while let Ok(event) = rx.try_recv() {
                         let is_write = match event.kind {
@@ -348,7 +400,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                     }
                 }
                 
-                std::thread::sleep(std::time::Duration::from_millis(1000));
+                std::thread::sleep(std::time::Duration::from_millis(2500));
                 
                 let child_exited = match child.try_wait() {
                     Ok(Some(_)) => true,
@@ -356,11 +408,14 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 };
                 
                 if child_exited {
-                    let running_in_system = is_process_running(&exe_name);
+                    let running_in_system = if let Some(pid) = game_pid {
+                        system.process(sysinfo::Pid::from_u32(pid)).is_some()
+                    } else {
+                        system.processes().values().any(|p| p.name().to_string_lossy().to_lowercase() == exe_name.to_lowercase())
+                    };
                     if running_in_system {
                         found_process = true;
                     } else {
-                        // Startup tolerance: wait up to 12s for process to register on slow loads or launcher redirects
                         if !found_process && check_start.elapsed().as_secs() < 12 {
                             is_running = true;
                         } else {
@@ -373,7 +428,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 }
             }
             
-            // Cleanup watcher and process candidates
             if let Some(watcher) = watcher_opt {
                 drop(watcher);
             }
@@ -385,7 +439,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 let mut games = get_games(app.clone());
                 if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
                     g.save_path = Some(path_str.clone());
-                    let _ = fs::write(get_data_path(&app), serde_json::to_string_pretty(&games).unwrap());
+                    let _ = save_games_atomic(&app, &games);
                     
                     let _ = app.emit("saveguard-path-detected", serde_json::json!({
                         "gameId": game_id_clone,
@@ -395,7 +449,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 final_save_path = Some(path_str);
             }
             
-            // Auto-backup on exit
             if let Some(ref path_str) = final_save_path {
                 let save_path = Path::new(path_str);
                 if save_path.exists() {
@@ -420,12 +473,10 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             if xbox_mode {
                 #[cfg(target_os = "windows")]
                 {
-                    // Restart explorer
                     let mut start_cmd = std::process::Command::new("explorer.exe");
                     start_cmd.creation_flags(0x08000000);
                     let _ = start_cmd.spawn();
                     
-                    // Restart only the services that were previously running
                     let ps_script = r#"
                         $txt = "$env:TEMP\silo_svcs.txt"
                         if (Test-Path $txt) {
@@ -446,15 +497,13 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 }
             }
             
-            // Update playtime...
             let mut games = get_games(app.clone());
             if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
                 g.playtime_minutes += elapsed as u32;
                 g.session_count += 1;
-                // Emit event
                 let _ = app.emit("playtime-updated", g.clone());
             }
-            fs::write(get_data_path(&app), serde_json::to_string_pretty(&games).unwrap()).ok();
+            let _ = save_games_atomic(&app, &games);
         }
     });
     
@@ -692,19 +741,7 @@ fn get_backups_dir(app: &AppHandle, game_id: &str) -> PathBuf {
     app.path().app_data_dir().unwrap().join("backups").join(game_id)
 }
 
-fn is_process_running(exe_name: &str) -> bool {
-    let output = Command::new("tasklist")
-        .args(&["/FI", &format!("IMAGENAME eq {}", exe_name), "/FO", "CSV", "/NH"])
-        .creation_flags(0x08000000)
-        .output();
-    
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.to_lowercase().contains(&exe_name.to_lowercase())
-    } else {
-        false
-    }
-}
+
 
 
 
@@ -895,6 +932,38 @@ pub fn backup_now(app: AppHandle, game_id: String) -> Result<(), String> {
     }
 }
 
+fn validate_backup_name(app: &AppHandle, game_id: &str, backup_name: &str) -> Result<PathBuf, String> {
+    if backup_name.contains('/') || backup_name.contains('\\') || backup_name.contains("..") {
+        return Err("Invalid backup name: path traversal characters detected".to_string());
+    }
+
+    let backups_dir = get_backups_dir(app, game_id);
+    let target_path = backups_dir.join(backup_name);
+
+    if !backups_dir.exists() {
+        return Err("Backups directory does not exist".to_string());
+    }
+
+    let canonical_backups = backups_dir.canonicalize().map_err(|e| format!("Invalid backups directory: {}", e))?;
+    
+    if target_path.exists() {
+        let canonical_target = target_path.canonicalize().map_err(|e| format!("Invalid backup file: {}", e))?;
+        if !canonical_target.starts_with(&canonical_backups) {
+            return Err("Invalid backup name: path outside backup directory".to_string());
+        }
+    } else {
+        if let Some(parent) = target_path.parent() {
+            if let Ok(canonical_parent) = parent.canonicalize() {
+                if !canonical_parent.starts_with(&canonical_backups) {
+                    return Err("Invalid backup name: path outside backup directory".to_string());
+                }
+            }
+        }
+    }
+
+    Ok(target_path)
+}
+
 #[tauri::command]
 pub async fn restore_backup(app: AppHandle, game_id: String, backup_name: String) -> Result<(), String> {
     let games = get_games(app.clone());
@@ -902,7 +971,7 @@ pub async fn restore_backup(app: AppHandle, game_id: String, backup_name: String
     let save_path_str = game.save_path.ok_or("No save path configured for this game")?;
     let save_path = Path::new(&save_path_str);
     
-    let backup_file = get_backups_dir(&app, &game_id).join(&backup_name);
+    let backup_file = validate_backup_name(&app, &game_id, &backup_name)?;
     if !backup_file.exists() {
         return Err("Backup file does not exist".to_string());
     }
@@ -913,7 +982,7 @@ pub async fn restore_backup(app: AppHandle, game_id: String, backup_name: String
 
 #[tauri::command]
 pub fn delete_backup(app: AppHandle, game_id: String, backup_name: String) -> Result<(), String> {
-    let backup_file = get_backups_dir(&app, &game_id).join(&backup_name);
+    let backup_file = validate_backup_name(&app, &game_id, &backup_name)?;
     if backup_file.exists() {
         fs::remove_file(backup_file).map_err(|e| e.to_string())?;
     }
@@ -972,6 +1041,50 @@ pub fn check_uninstaller(app: AppHandle, game_id: String) -> Result<Option<Strin
     Ok(None)
 }
 
+fn is_protected_dir(path: &Path) -> bool {
+    if path.parent().is_none() {
+        return true;
+    }
+
+    let canonical = match path.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let mut protected = Vec::new();
+
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let h = PathBuf::from(home);
+        protected.push(h.clone());
+        protected.push(h.join("Desktop"));
+        protected.push(h.join("Documents"));
+        protected.push(h.join("Downloads"));
+        protected.push(h.join("Videos"));
+        protected.push(h.join("Pictures"));
+        protected.push(h.join("Music"));
+    }
+
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        protected.push(PathBuf::from(pf));
+    }
+    if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+        protected.push(PathBuf::from(pf86));
+    }
+    if let Ok(sys) = std::env::var("SystemRoot") {
+        protected.push(PathBuf::from(sys));
+    }
+
+    for p in protected {
+        if let Ok(c) = p.canonicalize() {
+            if canonical == c {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[tauri::command]
 pub fn delete_game_folder(app: AppHandle, game_id: String) -> Result<(), String> {
     let games = get_games(app);
@@ -979,6 +1092,9 @@ pub fn delete_game_folder(app: AppHandle, game_id: String) -> Result<(), String>
     let exe_path_str = game.exe_path.unwrap_or_default();
     let exe_path = Path::new(&exe_path_str);
     if let Some(parent) = exe_path.parent() {
+        if is_protected_dir(parent) {
+            return Err("Cannot delete protected system or root directory".to_string());
+        }
         if parent.exists() {
             fs::remove_dir_all(parent).map_err(|e| e.to_string())?;
         }
