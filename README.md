@@ -61,7 +61,8 @@ Download the latest build from the [Releases](https://github.com/antnjhn/vault-l
 
 | File | Type |
 |------|------|
-| `silo_0.1.1_x64-setup.exe` | NSIS installer |
+| `silo_0.1.2_x64-setup.exe` | NSIS installer |
+| `silo_0.1.2_x64_en-US.msi` | MSI installer |
 > Windows may show a SmartScreen warning since the binary is unsigned. Click **More info** then **Run anyway**. This is expected for indie software without a code signing certificate.
 
 ---
