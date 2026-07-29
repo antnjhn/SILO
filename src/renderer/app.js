@@ -566,7 +566,6 @@ function renderDetails(g) {
     img.onerror = () => {
       img.classList.remove('visible');
       document.getElementById('details-panel').classList.remove('has-logo');
-      showToast('error', 'Logo Failed', `Could not load: ${g.logoPath}`);
     };
   } else {
     img.classList.remove('visible');
@@ -981,13 +980,17 @@ document.getElementById('btn-autofill').addEventListener('click', async () => {
     if (data) {
       document.getElementById('input-name').value = data.name;
       
-      modalLogoPath = data.logo;
-      
       const lImg = document.getElementById('edit-logo-preview-img');
-      lImg.src = modalLogoPath;
-      lImg.style.display = 'block';
-      
-      showToast('success', 'Logo Found', `Found Steam logo for ${data.name}`);
+      if (data.logo) {
+        modalLogoPath = data.logo;
+        lImg.src = modalLogoPath;
+        lImg.style.display = 'block';
+        showToast('success', 'Logo Found', `Found Steam logo for ${data.name}`);
+      } else {
+        modalLogoPath = null;
+        lImg.style.display = 'none';
+        showToast('info', 'Metadata Found', `Found Steam entry for ${data.name}`);
+      }
     } else {
       showToast('error', 'Not Found', `Could not find Steam assets for "${name}"`);
     }

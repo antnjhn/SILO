@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Manager, Emitter};
 use std::process::Command;
 #[cfg(target_os = "windows")]
@@ -39,6 +39,8 @@ pub struct Game {
     pub added_at: String,
     #[serde(rename = "savePath", default)]
     pub save_path: Option<String>,
+    #[serde(rename = "savePathSource", default)]
+    pub save_path_source: Option<String>,
     #[serde(rename = "backupCount", default)]
     pub backup_count: Option<u32>,
     #[serde(rename = "isInstalled", default)]
@@ -51,6 +53,29 @@ fn get_data_path(app: &AppHandle) -> PathBuf {
 
 fn get_wallpapers_dir(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap().join("wallpapers")
+}
+
+fn normalize_save_path(path: Option<&str>) -> Result<Option<String>, String> {
+    let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+
+    let path = Path::new(path);
+    if !path.exists() {
+        return Err("Save folder does not exist".to_string());
+    }
+    if !path.is_dir() {
+        return Err("Save path must point to a folder".to_string());
+    }
+
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve save folder: {}", e))?;
+    if canonical.file_name().is_none() {
+        return Err("The root of a drive cannot be used as a save folder".to_string());
+    }
+
+    Ok(Some(canonical.to_string_lossy().into_owned()))
 }
 
 fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), String> {
@@ -126,8 +151,9 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
 }
 
 #[tauri::command]
-pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>) -> Result<Game, String> {
+pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>, save_path: Option<String>) -> Result<Game, String> {
     let mut games = get_games(app.clone());
+    let save_path = normalize_save_path(save_path.as_deref())?;
     let new_game = Game {
         id: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string(),
         name,
@@ -142,7 +168,8 @@ pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpape
         is_installed: Some(true),
         status: Some("Playing".to_string()),
         added_at: format!("{:?}", std::time::SystemTime::now()),
-        save_path: None,
+        save_path_source: save_path.as_ref().map(|_| "manual".to_string()),
+        save_path,
         backup_count: Some(5),
     };
     games.push(new_game.clone());
@@ -165,8 +192,10 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
         if let Some(save_path) = updates.get("savePath") {
             if save_path.is_null() {
                 game.save_path = None;
+                game.save_path_source = None;
             } else if let Some(s) = save_path.as_str() {
-                game.save_path = if s.trim().is_empty() { None } else { Some(s.to_string()) };
+                game.save_path = normalize_save_path(Some(s))?;
+                game.save_path_source = game.save_path.as_ref().map(|_| "manual".to_string());
             }
         }
         if let Some(backup_count) = updates.get("backupCount").and_then(|v| v.as_u64()) {
@@ -229,6 +258,12 @@ pub async fn pick_exe(app: AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
+pub async fn pick_save_folder(app: AppHandle) -> Option<String> {
+    let folder = app.dialog().file().set_title("Select Save Folder").blocking_pick_folder();
+    folder.map(|path| path.to_string())
+}
+
+#[tauri::command]
 pub async fn pick_wallpaper(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
     let file_path = app.dialog().file().add_filter("Images", &["jpg", "jpeg", "png", "webp", "gif"]).blocking_pick_file();
     if let Some(src) = file_path {
@@ -273,37 +308,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
         
         let window = app.get_webview_window("main");
         
-        if xbox_mode {
-            if let Some(win) = &window {
-                let _ = win.hide();
-            }
-            #[cfg(target_os = "windows")]
-            {
-                for app in &["OneDrive.exe", "PhoneExperienceHost.exe", "explorer.exe"] {
-                    let mut kill_cmd = std::process::Command::new("taskkill");
-                    kill_cmd.creation_flags(0x08000000);
-                    let _ = kill_cmd.args(&["/F", "/IM", app]).spawn();
-                }
-                
-                let ps_script = r#"
-                    $svcs = @('SysMain', 'WSearch')
-                    $stopped = @()
-                    foreach ($s in $svcs) {
-                        $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
-                        if ($svc.Status -eq 'Running') {
-                            Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
-                            $stopped += $s
-                        }
-                    }
-                    $stopped -join ',' | Out-File "$env:TEMP\silo_svcs.txt"
-                    Stop-Service -Name DiagTrack -Force -ErrorAction SilentlyContinue
-                "#;
-                let mut ps_cmd = std::process::Command::new("powershell");
-                ps_cmd.creation_flags(0x08000000);
-                let _ = ps_cmd.args(&["-NoProfile", "-Command", ps_script]).spawn();
-            }
-        }
-        
         let working_dir = std::path::Path::new(&exe_path).parent().unwrap_or(std::path::Path::new(""));
 
         #[cfg(target_os = "windows")]
@@ -323,6 +327,13 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
         };
 
         if let Ok(mut child) = cmd.spawn() {
+            // Immersive mode is deliberately non-destructive: it only hides SILO while the
+            // game is running. Windows processes and services are left exactly as they are.
+            if xbox_mode {
+                if let Some(win) = &window {
+                    let _ = win.hide();
+                }
+            }
             let exe_name = Path::new(&exe_path)
                 .file_name()
                 .unwrap_or_default()
@@ -439,6 +450,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 let mut games = get_games(app.clone());
                 if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
                     g.save_path = Some(path_str.clone());
+                    g.save_path_source = Some("auto".to_string());
                     let _ = save_games_atomic(&app, &games);
                     
                     let _ = app.emit("saveguard-path-detected", serde_json::json!({
@@ -471,26 +483,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let elapsed = start.elapsed().as_secs() / 60;
             
             if xbox_mode {
-                #[cfg(target_os = "windows")]
-                {
-                    let mut start_cmd = std::process::Command::new("explorer.exe");
-                    start_cmd.creation_flags(0x08000000);
-                    let _ = start_cmd.spawn();
-                    
-                    let ps_script = r#"
-                        $txt = "$env:TEMP\silo_svcs.txt"
-                        if (Test-Path $txt) {
-                            $stopped = Get-Content $txt
-                            foreach ($s in ($stopped -split ',')) {
-                                if ($s) { Start-Service -Name $s -ErrorAction SilentlyContinue }
-                            }
-                            Remove-Item $txt -ErrorAction SilentlyContinue
-                        }
-                    "#;
-                    let mut ps_cmd = std::process::Command::new("powershell");
-                    ps_cmd.creation_flags(0x08000000);
-                    let _ = ps_cmd.args(&["-NoProfile", "-Command", ps_script]).spawn();
-                }
                 if let Some(win) = &window {
                     let _ = win.show();
                     let _ = win.set_focus();
@@ -707,7 +699,13 @@ pub struct SteamMetadata {
 pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>, String> {
     let url = format!("https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US", urlencoding::encode(&name));
     
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .build() {
+            Ok(c) => c,
+            Err(e) => return Err(e.to_string()),
+        };
+
     match client.get(&url).send().await {
         Ok(response) => {
             if let Ok(json) = response.json::<serde_json::Value>().await {
@@ -717,8 +715,34 @@ pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>,
                             let id_str = id.as_i64().unwrap_or(0).to_string();
                             let game_name_str = game_name.as_str().unwrap_or(&name).to_string();
                             
-                            let wallpaper = format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/library_hero.jpg", id_str);
-                            let logo = format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/logo.png", id_str);
+                            let logo_candidates = [
+                                format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/logo.png", id_str),
+                                format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/logo.png", id_str),
+                            ];
+                            let mut logo = String::new();
+                            for cand in &logo_candidates {
+                                if let Ok(res) = client.get(cand).send().await {
+                                    if res.status().is_success() {
+                                        logo = cand.clone();
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let wallpaper_candidates = [
+                                format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/library_hero.jpg", id_str),
+                                format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/page_bg_generated_v6.jpg", id_str),
+                                format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/header.jpg", id_str),
+                            ];
+                            let mut wallpaper = String::new();
+                            for cand in &wallpaper_candidates {
+                                if let Ok(res) = client.get(cand).send().await {
+                                    if res.status().is_success() {
+                                        wallpaper = cand.clone();
+                                        break;
+                                    }
+                                }
+                            }
                             
                             return Ok(Some(SteamMetadata {
                                 name: game_name_str,
@@ -797,12 +821,20 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-        
-        // Handle broken backups that used backslashes
+
+        // Older SILO backups may use Windows separators, so normalize them before checking.
         let file_name = file.name().replace("\\", "/");
-        if file_name.contains("..") { continue; } // Basic path traversal protection
-        
-        let outpath = dest_dir.join(&file_name);
+        let archive_path = Path::new(&file_name);
+        if archive_path.as_os_str().is_empty()
+            || archive_path.is_absolute()
+            || archive_path.components().any(|component| {
+                matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            })
+        {
+            return Err(format!("Backup contains an unsafe path: {}", file.name()));
+        }
+
+        let outpath = dest_dir.join(archive_path);
 
         if file_name.ends_with('/') {
             fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
@@ -816,6 +848,61 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
             std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
         }
     }
+    Ok(())
+}
+
+fn temporary_sibling(path: &Path, purpose: &str) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or("Save folder has no parent directory")?;
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or("Save folder name is invalid")?;
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    Ok(parent.join(format!(".{}_silo_{}_{}", name, purpose, timestamp)))
+}
+
+fn restore_save_transactionally(backup_file: &Path, save_path: &Path, backups_dir: &Path) -> Result<(), String> {
+    let parent = save_path.parent().ok_or("Save folder has no parent directory")?;
+    fs::create_dir_all(parent).map_err(|e| format!("Could not prepare save folder: {}", e))?;
+
+    let staging_dir = temporary_sibling(save_path, "restore_staging")?;
+    fs::create_dir(&staging_dir).map_err(|e| format!("Could not create restore staging folder: {}", e))?;
+
+    if let Err(error) = unzip_file(backup_file, &staging_dir) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(format!("Backup could not be extracted safely: {}", error));
+    }
+
+    if save_path.exists() {
+        fs::create_dir_all(backups_dir).map_err(|e| format!("Could not prepare backup folder: {}", e))?;
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let safety_snapshot = backups_dir.join(format!("manual_{}_Before%20restore.zip", timestamp));
+        if let Err(error) = zip_dir(save_path, &safety_snapshot) {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(format!("Could not create the pre-restore safety backup: {}", error));
+        }
+    }
+
+    let previous_dir = temporary_sibling(save_path, "restore_previous")?;
+    let had_existing_save = save_path.exists();
+    if had_existing_save {
+        if let Err(error) = fs::rename(save_path, &previous_dir) {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(format!("Could not prepare current save for restore. Is the game still running? {}", error));
+        }
+    }
+
+    if let Err(error) = fs::rename(&staging_dir, save_path) {
+        if had_existing_save {
+            let _ = fs::rename(&previous_dir, save_path);
+        }
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(format!("Could not apply restored save: {}", error));
+    }
+
+    if had_existing_save {
+        if let Err(error) = fs::remove_dir_all(&previous_dir) {
+            log::warn!("Restored save successfully but could not remove temporary previous save at {:?}: {}", previous_dir, error);
+        }
+    }
+
     Ok(())
 }
 
@@ -976,7 +1063,8 @@ pub async fn restore_backup(app: AppHandle, game_id: String, backup_name: String
         return Err("Backup file does not exist".to_string());
     }
     
-    unzip_file(&backup_file, save_path)?;
+    let backups_dir = get_backups_dir(&app, &game_id);
+    restore_save_transactionally(&backup_file, save_path, &backups_dir)?;
     Ok(())
 }
 
