@@ -6,6 +6,7 @@ use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::sync::mpsc::channel;
+use std::collections::HashSet;
 use notify::{Watcher, RecursiveMode, EventKind};
 use walkdir::WalkDir;
 use std::fs::File;
@@ -45,6 +46,10 @@ pub struct Game {
     pub backup_count: Option<u32>,
     #[serde(rename = "isInstalled", default)]
     pub is_installed: Option<bool>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 fn get_data_path(app: &AppHandle) -> PathBuf {
@@ -166,15 +171,30 @@ pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpape
         session_count: 0,
         last_played: None,
         is_installed: Some(true),
-        status: Some("Playing".to_string()),
+        status: None,
         added_at: format!("{:?}", std::time::SystemTime::now()),
         save_path_source: save_path.as_ref().map(|_| "manual".to_string()),
         save_path,
         backup_count: Some(5),
+        favorite: false,
+        tags: vec![],
     };
     games.push(new_game.clone());
     save_games_atomic(&app, &games)?;
     Ok(new_game)
+}
+
+// Optional string fields on a game can be cleared by sending an explicit JSON null.
+fn apply_optional(value: Option<&serde_json::Value>, target: &mut Option<String>) {
+    match value {
+        Some(value) if value.is_null() => *target = None,
+        Some(value) => {
+            if let Some(s) = value.as_str() {
+                *target = Some(s.to_string());
+            }
+        }
+        None => {}
+    }
 }
 
 #[tauri::command]
@@ -182,12 +202,12 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
     let mut games = get_games(app.clone());
     if let Some(game) = games.iter_mut().find(|g| g.id == id) {
         if let Some(name) = updates.get("name").and_then(|v| v.as_str()) { game.name = name.to_string(); }
-        if let Some(exe_path) = updates.get("exePath").and_then(|v| v.as_str()) { game.exe_path = Some(exe_path.to_string()); }
-        if let Some(wallpaper) = updates.get("wallpaper").and_then(|v| v.as_str()) { game.wallpaper = Some(wallpaper.to_string()); }
-        if let Some(logo_path) = updates.get("logoPath").and_then(|v| v.as_str()) { game.logo_path = Some(logo_path.to_string()); }
-        if let Some(font_family) = updates.get("fontFamily").and_then(|v| v.as_str()) { game.font_family = Some(font_family.to_string()); }
-        if let Some(font_color) = updates.get("fontColor").and_then(|v| v.as_str()) { game.font_color = Some(font_color.to_string()); }
-        if let Some(status) = updates.get("status").and_then(|v| v.as_str()) { game.status = Some(status.to_string()); }
+        apply_optional(updates.get("exePath"), &mut game.exe_path);
+        apply_optional(updates.get("wallpaper"), &mut game.wallpaper);
+        apply_optional(updates.get("logoPath"), &mut game.logo_path);
+        apply_optional(updates.get("fontFamily"), &mut game.font_family);
+        apply_optional(updates.get("fontColor"), &mut game.font_color);
+        apply_optional(updates.get("status"), &mut game.status);
         
         if let Some(save_path) = updates.get("savePath") {
             if save_path.is_null() {
@@ -201,7 +221,22 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
         if let Some(backup_count) = updates.get("backupCount").and_then(|v| v.as_u64()) {
             game.backup_count = Some(backup_count as u32);
         }
-        
+        if let Some(favorite) = updates.get("favorite").and_then(|v| v.as_bool()) {
+            game.favorite = favorite;
+        }
+        match updates.get("tags") {
+            Some(v) if v.is_null() => game.tags = vec![],
+            Some(v) if v.is_array() => {
+                game.tags = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                    .collect();
+            }
+            _ => {}
+        }
+
         let updated = game.clone();
         save_games_atomic(&app, &games)?;
         Ok(Some(updated))
@@ -304,8 +339,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
     let backup_count_clone = game.backup_count.unwrap_or(5);
     
     tauri::async_runtime::spawn(async move {
-        let start = std::time::Instant::now();
-        
         let window = app.get_webview_window("main");
         
         let working_dir = std::path::Path::new(&exe_path).parent().unwrap_or(std::path::Path::new(""));
@@ -362,21 +395,47 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 }
             }
             
+            let spawned_child_pid = child.id();
             let mut system = sysinfo::System::new();
             let mut game_pid: Option<u32> = None;
+            let mut game_started_at: Option<Instant> = None;
             let mut is_running = true;
             let mut found_process = false;
+            let mut game_is_ours = false; // true only when game_pid is a descendant of our spawned cmd
             let check_start = Instant::now();
             let watch_dirs = get_watch_directories();
-            
+            let mut pending_paths: HashSet<PathBuf> = HashSet::new();
+            let mut detected_roots: HashSet<PathBuf> = HashSet::new();
+            let mut last_detection_check: Option<Instant> = None;
+
             while is_running {
                 if game_pid.is_none() {
                     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                    let mut name_match: Option<u32> = None;
                     for (pid, proc) in system.processes() {
-                        if proc.name().to_string_lossy().to_lowercase() == exe_name.to_lowercase() {
-                            game_pid = Some(pid.as_u32());
+                        if proc.name().to_string_lossy().to_lowercase() != exe_name.to_lowercase() {
+                            continue;
+                        }
+                        let candidate_pid = pid.as_u32();
+                        // Prefer a process spawned by our cmd instance (avoids matching a
+                        // second instance of the same game already running).
+                        if crate::saveguard::is_descendant(&system, candidate_pid, spawned_child_pid) {
+                            game_pid = Some(candidate_pid);
+                            game_is_ours = true;
                             break;
                         }
+                        if name_match.is_none() {
+                            name_match = Some(candidate_pid);
+                        }
+                    }
+                    // Fall back to name-only matching after a grace period (some games
+                    // launch through a launcher rather than directly from our cmd).
+                    if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
+                        game_pid = name_match;
+                        game_is_ours = false;
+                    }
+                    if game_pid.is_some() {
+                        game_started_at = Some(Instant::now());
                     }
                 } else {
                     system.refresh_processes(
@@ -391,20 +450,45 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                             EventKind::Modify(_) | EventKind::Create(_) => true,
                             _ => false,
                         };
-                        
+
+                        // Accumulate changed paths and skip ones under an already-detected
+                        // save root so Restart Manager isn't queried on every Modify event.
                         if is_write && detected_path.is_none() {
-                            if let Some(target_pid) = game_pid {
-                                for path in event.paths {
-                                    let pids = crate::saveguard::get_locking_pids(&path);
-                                    for locking_pid in pids {
-                                        if crate::saveguard::is_descendant(&system, locking_pid, target_pid) {
-                                            if let Some(root) = crate::saveguard::get_save_root(&path, &watch_dirs) {
-                                                log::info!("SaveGuard detected save root: {:?}", root);
-                                                detected_path = Some(root);
-                                                break;
-                                            }
+                            for path in event.paths {
+                                if detected_roots.iter().any(|root| path.starts_with(root)) {
+                                    continue;
+                                }
+                                pending_paths.insert(path);
+                            }
+                        }
+                    }
+
+                    // Coalesce detection runs to at most once every ~750ms.
+                    let due = match last_detection_check {
+                        Some(last) => last.elapsed().as_millis() >= 750,
+                        None => !pending_paths.is_empty(),
+                    };
+                    if due && detected_path.is_none() && !pending_paths.is_empty() {
+                        last_detection_check = Some(Instant::now());
+                        if let Some(target_pid) = game_pid {
+                            let paths: Vec<PathBuf> = pending_paths.drain().collect();
+                            for path in paths {
+                                if detected_roots.iter().any(|root| path.starts_with(root)) {
+                                    continue;
+                                }
+                                let pids = crate::saveguard::get_locking_pids(&path);
+                                for locking_pid in pids {
+                                    if crate::saveguard::is_descendant(&system, locking_pid, target_pid) {
+                                        if let Some(root) = crate::saveguard::get_save_root(&path, &watch_dirs) {
+                                            log::info!("SaveGuard detected save root: {:?}", root);
+                                            detected_path = Some(root.clone());
+                                            detected_roots.insert(root);
+                                            break;
                                         }
                                     }
+                                }
+                                if detected_path.is_some() {
+                                    break;
                                 }
                             }
                         }
@@ -419,10 +503,13 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 };
                 
                 if child_exited {
-                    let running_in_system = if let Some(pid) = game_pid {
-                        system.process(sysinfo::Pid::from_u32(pid)).is_some()
-                    } else {
-                        system.processes().values().any(|p| p.name().to_string_lossy().to_lowercase() == exe_name.to_lowercase())
+                    // Only keep the loop alive if the pinned PID is still running AND it is
+                    // a descendant of the cmd we spawned. The name-match fallback can pin an
+                    // unrelated already-running instance of the same game; trusting it here
+                    // would make this loop never terminate and the save backup never run.
+                    let running_in_system = match game_pid {
+                        Some(pid) => game_is_ours && system.process(sysinfo::Pid::from_u32(pid)).is_some(),
+                        None => false,
                     };
                     if running_in_system {
                         found_process = true;
@@ -480,19 +567,24 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 }
             }
             
-            let elapsed = start.elapsed().as_secs() / 60;
-            
+            // Playtime is measured from when the game process was first detected, not from spawn.
+            let elapsed_secs = game_started_at.map_or(0, |started| started.elapsed().as_secs());
+            let elapsed_minutes = if elapsed_secs > 0 { (elapsed_secs + 59) / 60 } else { 0 };
+
             if xbox_mode {
                 if let Some(win) = &window {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
             }
-            
+
             let mut games = get_games(app.clone());
             if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
-                g.playtime_minutes += elapsed as u32;
+                if elapsed_minutes > 0 {
+                    g.playtime_minutes += elapsed_minutes as u32;
+                }
                 g.session_count += 1;
+                g.last_played = Some(chrono::Local::now().to_rfc3339());
                 let _ = app.emit("playtime-updated", g.clone());
             }
             let _ = save_games_atomic(&app, &games);
@@ -524,6 +616,47 @@ pub fn window_start_dragging(window: tauri::Window) {
     window.start_dragging().ok();
 }
 
+// Expanded blacklist of non-game executables, shared by scan_folder and library import.
+pub const EXE_BLACKLIST: &[&str] = &[
+    "unins", "setup", "crash", "redist", "dxwebsetup", "vcredist",
+    "cef", "bootstrap", "dotnet", "directx", "dxsetup",
+    "installer", "updater", "reporter", "helper", "service",
+    "vc_redist", "oalinst", "physx", "easyanticheat",
+    "battleye", "beclient", "beservice", "eac_launcher",
+    "ue4prereqsetup", "unrealcefsubprocess", "steamwebhelper",
+];
+
+pub fn is_blacklisted_exe(lowercase_file_name: &str) -> bool {
+    EXE_BLACKLIST.iter().any(|b| lowercase_file_name.contains(b))
+}
+
+// Scores a candidate game executable — higher is better. Shared by scan_folder and library import.
+pub fn score_exe_candidate(stem: &str, game_dir: &str, depth: usize, size_bytes: u64) -> i32 {
+    let mut score: i32 = 0;
+
+    // Prefer exe name matching the game folder name
+    if stem == game_dir || game_dir.contains(stem) || stem.contains(game_dir) {
+        score += 50;
+    }
+
+    // Prefer shallower depth
+    score -= (depth as i32) * 5;
+
+    // Deprioritize variant suffixes
+    let deprioritize = ["_be", "_dx12", "_dx11", "_vulkan", "_debug", "_server",
+                        "_shipping", "_launcher", "-win64", "-shipping", "dedicated"];
+    for suffix in &deprioritize {
+        if stem.contains(suffix) {
+            score -= 30;
+        }
+    }
+
+    // Prefer larger files (likely the main game binary)
+    score += (size_bytes / (10 * 1024 * 1024)) as i32; // +1 per 10MB
+
+    score
+}
+
 #[derive(serde::Serialize)]
 pub struct ScannedGame {
     pub name: String,
@@ -540,16 +673,6 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
     if !folder.exists() || !folder.is_dir() {
         return Err("Invalid folder path".into());
     }
-
-    // Expanded blacklist of non-game executables
-    let blacklist = [
-        "unins", "setup", "crash", "redist", "dxwebsetup", "vcredist",
-        "cef", "bootstrap", "dotnet", "directx", "dxsetup",
-        "installer", "updater", "reporter", "helper", "service",
-        "vc_redist", "oalinst", "physx", "easyanticheat",
-        "battleye", "beclient", "beservice", "eac_launcher",
-        "ue4prereqsetup", "unrealcefsubprocess", "steamwebhelper",
-    ];
 
     // Collect all candidate exes
     struct ExeCandidate {
@@ -575,7 +698,7 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
         let file_stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
 
         // Skip blacklisted names
-        if blacklist.iter().any(|b| file_name.contains(b)) {
+        if is_blacklisted_exe(&file_name) {
             continue;
         }
 
@@ -643,31 +766,8 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
         exes.sort_by(|a, b| {
             let score = |c: &ExeCandidate| -> i32 {
                 let stem = c.path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
-                let mut s: i32 = 0;
-
-                // Prefer exe name matching the game folder name
-                if stem == c.game_dir || c.game_dir.contains(&stem) || stem.contains(&c.game_dir) {
-                    s += 50;
-                }
-
-                // Prefer shallower depth
-                s -= (c.depth as i32) * 5;
-
-                // Deprioritize variant suffixes
-                let deprioritize = ["_be", "_dx12", "_dx11", "_vulkan", "_debug", "_server",
-                                    "_shipping", "_launcher", "-win64", "-shipping", "dedicated"];
-                for suffix in &deprioritize {
-                    if stem.contains(suffix) {
-                        s -= 30;
-                    }
-                }
-
-                // Prefer larger files (likely the main game binary)
-                if let Ok(meta) = std::fs::metadata(&c.path) {
-                    s += (meta.len() / (10 * 1024 * 1024)) as i32; // +1 per 10MB
-                }
-
-                s
+                let size = std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0);
+                score_exe_candidate(&stem, &c.game_dir, c.depth, size)
             };
 
             score(b).cmp(&score(a))
@@ -775,17 +875,76 @@ fn get_watch_directories() -> Vec<PathBuf> {
         paths.push(PathBuf::from(roaming));
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        paths.push(PathBuf::from(local));
+        let local_dir = PathBuf::from(local);
+        paths.push(local_dir.clone());
+        // Unity and other engines keep saves in LocalLow — it is a sibling of LocalAppData.
+        paths.push(local_dir.join("LocalLow"));
     }
     if let Ok(userprofile) = std::env::var("USERPROFILE") {
         let userpath = PathBuf::from(userprofile);
         paths.push(userpath.join("Saved Games"));
+        #[cfg(target_os = "windows")]
+        {
+            // Documents may be OneDrive-redirected; the User Shell Folders value is the
+            // real path (possibly with %VAR% tokens). Fall back to USERPROFILE\Documents.
+            if let Some(docs) = windows_documents_dir() {
+                paths.push(docs);
+            } else {
+                paths.push(userpath.join("Documents"));
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
         paths.push(userpath.join("Documents"));
     }
     paths.into_iter().filter(|p| p.exists() && p.is_dir()).collect()
 }
 
+#[cfg(target_os = "windows")]
+fn windows_documents_dir() -> Option<PathBuf> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let shell = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+        .ok()?;
+    let personal: String = shell.get_value("Personal").ok()?;
+    let expanded = expand_env_vars(&personal);
+    let path = PathBuf::from(expanded);
+    if path.is_dir() { Some(path) } else { None }
+}
+
+// Expands the %VAR% tokens used by "User Shell Folders" values (e.g. %USERPROFILE%).
+#[cfg(target_os = "windows")]
+fn expand_env_vars(input: &str) -> String {
+    let mut out = String::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let Some(relative_end) = input[i + 1..].find('%') {
+                let key = &input[i + 1..i + 1 + relative_end];
+                if !key.is_empty() {
+                    if let Ok(value) = std::env::var(key) {
+                        out.push_str(&value);
+                        i += relative_end + 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 fn zip_dir(src_dir: &Path, dest_zip: &Path) -> Result<(), String> {
+    zip_dir_filtered(src_dir, dest_zip, |_| false)
+}
+
+fn zip_dir_filtered<F>(src_dir: &Path, dest_zip: &Path, exclude: F) -> Result<(), String>
+where
+    F: Fn(&Path) -> bool,
+{
     let file = File::create(dest_zip).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::FileOptions::default()
@@ -796,7 +955,11 @@ fn zip_dir(src_dir: &Path, dest_zip: &Path) -> Result<(), String> {
         let path = entry.path();
         let name = path.strip_prefix(src_dir)
             .map_err(|e| e.to_string())?;
-            
+
+        if exclude(name) {
+            continue;
+        }
+
         let zip_name = name.to_string_lossy().replace("\\", "/");
 
         if path.is_file() {
@@ -946,77 +1109,73 @@ pub struct BackupSnapshot {
     pub custom_name: Option<String>,
 }
 
+// Pure helper: parses a backup filename into its snapshot metadata. The caller fills
+// in size_bytes from filesystem metadata. Used by get_game_backups and get_all_backups.
+pub fn parse_backup_snapshot(filename: &str) -> Option<BackupSnapshot> {
+    if !filename.ends_with(".zip") {
+        return None;
+    }
+
+    // Parse format: auto_YYYYMMDD_HHMMSS.zip or manual_YYYYMMDD_HHMMSS_CustomName.zip
+    let is_auto = filename.starts_with("auto_");
+    let mut custom_name = None;
+
+    let name_without_ext = filename.strip_suffix(".zip").unwrap_or(filename);
+    let parts: Vec<&str> = name_without_ext.splitn(4, '_').collect();
+
+    let timestamp_str = if parts.len() >= 3 {
+        format!("{}_{}", parts[1], parts[2])
+    } else if name_without_ext.starts_with("backup_") {
+        name_without_ext.replace("backup_", "") // Legacy backups
+    } else {
+        "Unknown Time".to_string()
+    };
+
+    let mut formatted_time = timestamp_str.clone();
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&timestamp_str, "%Y%m%d_%H%M%S") {
+        formatted_time = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+
+    if parts.len() == 4 && !is_auto {
+        // Try to urldecode the custom name
+        let decoded = urlencoding::decode(parts[3]).unwrap_or_else(|_| std::borrow::Cow::Borrowed(parts[3]));
+        custom_name = Some(decoded.into_owned());
+    }
+
+    Some(BackupSnapshot {
+        name: filename.to_string(),
+        timestamp: formatted_time,
+        size_bytes: 0,
+        is_auto,
+        custom_name,
+    })
+}
+
 #[tauri::command]
 pub fn get_game_backups(app: AppHandle, game_id: String) -> Result<Vec<BackupSnapshot>, String> {
     let backups_dir = get_backups_dir(&app, &game_id);
     if !backups_dir.exists() {
         return Ok(vec![]);
     }
-    
+
     let mut snapshots = Vec::new();
     for entry in fs::read_dir(backups_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("zip") {
             if let Ok(metadata) = entry.metadata() {
-                let size_bytes = metadata.len();
                 let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                
-                // Parse format: auto_YYYYMMDD_HHMMSS.zip or manual_YYYYMMDD_HHMMSS_CustomName.zip
-                let is_auto = name.starts_with("auto_");
-                let mut custom_name = None;
-                
-                let name_without_ext = name.strip_suffix(".zip").unwrap_or(&name);
-                let parts: Vec<&str> = name_without_ext.splitn(4, '_').collect();
-                
-                let timestamp_str = if parts.len() >= 3 {
-                    format!("{}_{}", parts[1], parts[2])
-                } else if name_without_ext.starts_with("backup_") {
-                    name_without_ext.replace("backup_", "") // Legacy backups
-                } else {
-                    "Unknown Time".to_string()
-                };
-
-                let mut formatted_time = timestamp_str.clone();
-                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&timestamp_str, "%Y%m%d_%H%M%S") {
-                    formatted_time = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                if let Some(mut snapshot) = parse_backup_snapshot(&name) {
+                    snapshot.size_bytes = metadata.len();
+                    snapshots.push(snapshot);
                 }
-                
-                if parts.len() == 4 && !is_auto {
-                    // Try to urldecode the custom name
-                    let decoded = urlencoding::decode(parts[3]).unwrap_or_else(|_| std::borrow::Cow::Borrowed(parts[3]));
-                    custom_name = Some(decoded.into_owned());
-                }
-
-                snapshots.push(BackupSnapshot {
-                    name,
-                    timestamp: formatted_time,
-                    size_bytes,
-                    is_auto,
-                    custom_name,
-                });
             }
         }
     }
-    
+
     snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    
+
     Ok(snapshots)
-}
-
-#[tauri::command]
-pub fn backup_now(app: AppHandle, game_id: String) -> Result<(), String> {
-    let games = get_games(app.clone());
-    let game = games.iter().find(|g| g.id == game_id).ok_or("Game not found")?;
-
-    if let Some(save_path_str) = &game.save_path {
-        let mut roots = std::collections::HashSet::new();
-        roots.insert(PathBuf::from(save_path_str));
-        crate::saveguard::backup_saves(&roots, &game_id, &app);
-        Ok(())
-    } else {
-        Err("No save path recorded yet. Launch the game first to detect saves.".to_string())
-    }
 }
 
 fn validate_backup_name(app: &AppHandle, game_id: &str, backup_name: &str) -> Result<PathBuf, String> {
@@ -1073,6 +1232,69 @@ pub fn delete_backup(app: AppHandle, game_id: String, backup_name: String) -> Re
     let backup_file = validate_backup_name(&app, &game_id, &backup_name)?;
     if backup_file.exists() {
         fs::remove_file(backup_file).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupSummary {
+    #[serde(rename = "gameId")]
+    pub game_id: String,
+    #[serde(rename = "gameName")]
+    pub game_name: String,
+    pub name: String,
+    pub timestamp: String,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    #[serde(rename = "isAuto")]
+    pub is_auto: bool,
+    #[serde(rename = "customName")]
+    pub custom_name: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_all_backups(app: AppHandle) -> Result<Vec<BackupSummary>, String> {
+    let backups_root = app.path().app_data_dir().unwrap().join("backups");
+    let games = get_games(app.clone());
+    let mut summaries = Vec::new();
+
+    if backups_root.is_dir() {
+        for entry in fs::read_dir(&backups_root).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let game_dir = entry.path();
+            if !game_dir.is_dir() {
+                continue;
+            }
+            let game_id = entry.file_name().to_string_lossy().to_string();
+            let game_name = games.iter().find(|g| g.id == game_id).map(|g| g.name.clone()).unwrap_or_else(|| game_id.clone());
+            if let Ok(snapshots) = get_game_backups(app.clone(), game_id.clone()) {
+                for snapshot in snapshots {
+                    summaries.push(BackupSummary {
+                        game_id: game_id.clone(),
+                        game_name: game_name.clone(),
+                        name: snapshot.name,
+                        timestamp: snapshot.timestamp,
+                        size_bytes: snapshot.size_bytes,
+                        is_auto: snapshot.is_auto,
+                        custom_name: snapshot.custom_name,
+                    });
+                }
+            }
+        }
+    }
+
+    summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub fn delete_game_backups(app: AppHandle, game_id: String) -> Result<(), String> {
+    if game_id.contains('/') || game_id.contains('\\') || game_id.contains("..") {
+        return Err("Invalid game id: path traversal characters detected".to_string());
+    }
+    let backups_dir = get_backups_dir(&app, &game_id);
+    if backups_dir.exists() {
+        fs::remove_dir_all(&backups_dir).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1200,11 +1422,44 @@ pub fn run_uninstaller(uninstaller_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let logs_dir = app.path().app_log_dir().unwrap_or_else(|_| app.path().app_data_dir().unwrap().join("logs"));
+        if let Err(e) = fs::create_dir_all(&logs_dir) {
+            return Err(format!("Failed to create logs folder: {}", e));
+        }
+        std::process::Command::new("explorer.exe")
+            .arg(&logs_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("Not supported on this platform".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn backup_library(app: AppHandle) -> Result<String, String> {
     let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).set_file_name("silo_backup.zip").blocking_save_file();
     if let Some(dest_path) = file_path {
         let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
-        zip_dir(&app_data_dir, std::path::Path::new(&dest_path.to_string()))?;
+        // Do not recurse existing backup/save archives (avoids zip-of-zip bloat).
+        let exclude = |rel_path: &Path| {
+            let mut components = rel_path.components();
+            if let Some(first) = components.next() {
+                let folder = first.as_os_str().to_string_lossy().to_lowercase();
+                if (folder == "backups" || folder == "saves")
+                    && rel_path.extension().and_then(|e| e.to_str()) == Some("zip") {
+                    return true;
+                }
+            }
+            false
+        };
+        zip_dir_filtered(&app_data_dir, std::path::Path::new(&dest_path.to_string()), exclude)?;
         return Ok(dest_path.to_string());
     }
     Err("Backup cancelled".into())
@@ -1219,4 +1474,271 @@ pub async fn restore_library(app: AppHandle) -> Result<String, String> {
         return Ok("Library restored successfully".into());
     }
     Err("Restore cancelled".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "silo_cmd_test_{}_{}_{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn relative_paths(root: &Path) -> Vec<String> {
+        let mut paths: Vec<String> = WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(root)
+                    .ok()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    // ----- parse_backup_snapshot -----
+
+    #[test]
+    fn parse_backup_snapshot_auto() {
+        let snap = parse_backup_snapshot("auto_20240101_120000.zip").unwrap();
+        assert_eq!(snap.name, "auto_20240101_120000.zip");
+        assert_eq!(snap.timestamp, "2024-01-01 12:00:00");
+        assert!(snap.is_auto);
+        assert_eq!(snap.custom_name, None);
+        assert_eq!(snap.size_bytes, 0);
+    }
+
+    #[test]
+    fn parse_backup_snapshot_manual_urldecodes_custom_name() {
+        let snap = parse_backup_snapshot("manual_20240101_120000_My%20Save.zip").unwrap();
+        assert_eq!(snap.timestamp, "2024-01-01 12:00:00");
+        assert!(!snap.is_auto);
+        assert_eq!(snap.custom_name.as_deref(), Some("My Save"));
+    }
+
+    #[test]
+    fn parse_backup_snapshot_manual_without_custom_name() {
+        let snap = parse_backup_snapshot("manual_20240101_120000.zip").unwrap();
+        assert_eq!(snap.timestamp, "2024-01-01 12:00:00");
+        assert!(!snap.is_auto);
+        assert_eq!(snap.custom_name, None);
+    }
+
+    #[test]
+    fn parse_backup_snapshot_legacy() {
+        let snap = parse_backup_snapshot("backup_20240101.zip").unwrap();
+        assert_eq!(snap.name, "backup_20240101.zip");
+        assert_eq!(snap.timestamp, "20240101");
+        assert!(!snap.is_auto);
+        assert_eq!(snap.custom_name, None);
+    }
+
+    #[test]
+    fn parse_backup_snapshot_rejects_non_zip() {
+        assert!(parse_backup_snapshot("auto_20240101_120000.txt").is_none());
+        assert!(parse_backup_snapshot("backup_20240101").is_none());
+        assert!(parse_backup_snapshot("").is_none());
+    }
+
+    #[test]
+    fn parse_backup_snapshot_garbage_gets_unknown_time() {
+        let snap = parse_backup_snapshot("random_thing.zip").unwrap();
+        assert_eq!(snap.timestamp, "Unknown Time");
+        assert!(!snap.is_auto);
+        assert_eq!(snap.custom_name, None);
+    }
+
+    #[test]
+    fn parse_backup_snapshot_auto_ignores_extra_part() {
+        let snap = parse_backup_snapshot("auto_20240101_120000_Extra.zip").unwrap();
+        assert!(snap.is_auto);
+        assert_eq!(snap.timestamp, "2024-01-01 12:00:00");
+        assert_eq!(snap.custom_name, None);
+    }
+
+    // ----- is_blacklisted_exe -----
+
+    #[test]
+    fn is_blacklisted_exe_matches_known_tools() {
+        for name in [
+            "unins000.exe",
+            "vcredist_x64.exe",
+            "ue4prereqsetup.exe",
+            "battleye_launcher.exe",
+            "setup.exe",
+            "steamwebhelper.exe",
+        ] {
+            assert!(is_blacklisted_exe(name), "expected {} blacklisted", name);
+        }
+    }
+
+    #[test]
+    fn is_blacklisted_exe_allows_real_games() {
+        for name in ["witcher3.exe", "RDR2.exe", "borderlands3.exe", ""] {
+            assert!(!is_blacklisted_exe(name), "expected {} not blacklisted", name);
+        }
+    }
+
+    // ----- score_exe_candidate -----
+
+    #[test]
+    fn score_prefers_matching_stem() {
+        let a = score_exe_candidate("witcher3", "witcher3", 1, 100_000_000);
+        let b = score_exe_candidate("witcher3", "somethingelse", 1, 100_000_000);
+        assert!(a > b, "matching stem should score higher ({} vs {})", a, b);
+    }
+
+    #[test]
+    fn score_prefers_shallower_depth() {
+        let a = score_exe_candidate("game", "game", 1, 100_000_000);
+        let b = score_exe_candidate("game", "game", 4, 100_000_000);
+        assert!(a > b, "shallower depth should score higher ({} vs {})", a, b);
+    }
+
+    #[test]
+    fn score_prefers_larger_files() {
+        let a = score_exe_candidate("game", "game", 1, 200_000_000);
+        let b = score_exe_candidate("game", "game", 1, 100_000_000);
+        assert!(a > b, "larger file should score higher ({} vs {})", a, b);
+    }
+
+    #[test]
+    fn score_deprioritizes_variant_suffixes() {
+        let base = score_exe_candidate("game", "game", 1, 100_000_000);
+        for suffix in ["_be", "_launcher", "_server"] {
+            let variant = score_exe_candidate(&format!("game{}", suffix), "game", 1, 100_000_000);
+            assert!(base > variant, "{} should score lower", suffix);
+        }
+    }
+
+    // ----- apply_optional / normalize_save_path -----
+
+    #[test]
+    fn apply_optional_clears_on_null_sets_on_string() {
+        let mut t = Some("keep".to_string());
+        apply_optional(Some(&serde_json::Value::Null), &mut t);
+        assert_eq!(t, None);
+
+        apply_optional(Some(&serde_json::json!("v")), &mut t);
+        assert_eq!(t.as_deref(), Some("v"));
+
+        let mut untouched = Some("x".to_string());
+        apply_optional(None, &mut untouched);
+        assert_eq!(untouched.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn normalize_save_path_accepts_existing_dir() {
+        let tmp = TempDir::new("normsave");
+        let res = normalize_save_path(Some(tmp.path().to_str().unwrap())).unwrap();
+        let p = res.expect("existing dir should normalize");
+        assert!(Path::new(&p).is_dir());
+    }
+
+    #[test]
+    fn normalize_save_path_rejects_missing_or_file() {
+        let tmp = TempDir::new("normsave2");
+        let missing = tmp.path().join("nope");
+        assert!(normalize_save_path(Some(missing.to_str().unwrap())).is_err());
+
+        let file = tmp.path().join("f.txt");
+        fs::write(&file, "x").unwrap();
+        assert!(normalize_save_path(Some(file.to_str().unwrap())).is_err());
+
+        assert_eq!(normalize_save_path(Some("   ")), Ok(None));
+        assert_eq!(normalize_save_path(None), Ok(None));
+    }
+
+    // ----- zip_dir / unzip_file round trip -----
+
+    #[test]
+    fn zip_unzip_round_trip_preserves_tree() {
+        let src = TempDir::new("roundtrip_src");
+        let zip_out = TempDir::new("roundtrip_zip");
+        let dst = TempDir::new("roundtrip_dst");
+
+        fs::create_dir_all(src.path().join("sub/nested")).unwrap();
+        fs::create_dir_all(src.path().join("empty")).unwrap();
+        fs::write(src.path().join("root.txt"), "root file").unwrap();
+        fs::write(src.path().join("sub/one.bin"), vec![0u8, 1, 2, 3]).unwrap();
+        fs::write(src.path().join("sub/nested/two.txt"), "nested").unwrap();
+
+        let zip_path = zip_out.path().join("out.zip");
+        zip_dir(src.path(), &zip_path).unwrap();
+
+        let dest = dst.path().join("extracted");
+        unzip_file(&zip_path, &dest).unwrap();
+
+        assert_eq!(relative_paths(src.path()), relative_paths(&dest));
+        assert_eq!(fs::read(dest.join("root.txt")).unwrap(), b"root file");
+        assert_eq!(fs::read(dest.join("sub/one.bin")).unwrap(), vec![0u8, 1, 2, 3]);
+        assert_eq!(fs::read(dest.join("sub/nested/two.txt")).unwrap(), b"nested");
+        assert!(dest.join("empty").is_dir());
+    }
+
+    // ----- zip-slip security -----
+
+    fn write_zip_with_entry(zip_path: &Path, name: &str, content: &[u8]) {
+        let file = File::create(zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file(name, zip::write::FileOptions::default())
+            .unwrap();
+        writer.write_all(content).unwrap();
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn unzip_rejects_parent_dir_traversal() {
+        let zip_dir = TempDir::new("zipslip_zip");
+        let dst = TempDir::new("zipslip_dst");
+        let zip_path = zip_dir.path().join("evil.zip");
+        write_zip_with_entry(&zip_path, "../../evil.txt", b"pwned");
+
+        let err = unzip_file(&zip_path, &dst.path()).unwrap_err();
+        assert!(err.contains("unsafe path"), "unexpected error: {}", err);
+        assert!(
+            relative_paths(&dst.path()).is_empty(),
+            "dest should be untouched"
+        );
+    }
+
+    #[test]
+    fn unzip_rejects_backslash_traversal() {
+        let zip_dir = TempDir::new("zipslip_zip2");
+        let dst = TempDir::new("zipslip_dst2");
+        let zip_path = zip_dir.path().join("evil2.zip");
+        write_zip_with_entry(&zip_path, "..\\evil.txt", b"pwned");
+
+        assert!(unzip_file(&zip_path, &dst.path()).is_err());
+        assert!(relative_paths(&dst.path()).is_empty());
+    }
 }

@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/antnjhn/vault-launcher/releases/latest">
-    <img src="https://img.shields.io/github/v/release/antnjhn/vault-launcher?style=flat-square&color=7c4dff" alt="Latest Release" />
+  <a href="https://github.com/antnjhn/SILO/releases/latest">
+    <img src="https://img.shields.io/github/v/release/antnjhn/SILO?style=flat-square&color=7c4dff" alt="Latest Release" />
   </a>
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" />
   <img src="https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square" alt="Platform" />
@@ -57,7 +57,7 @@ SILO is a personal game launcher built for people who want something that feels 
 
 ## Installation
 
-Download the latest build from the [Releases](https://github.com/antnjhn/vault-launcher/releases/latest) page.
+Download the latest build from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page.
 
 | File | Type |
 |------|------|
@@ -72,8 +72,8 @@ Download the latest build from the [Releases](https://github.com/antnjhn/vault-l
 **Prerequisites:** Node.js (LTS), Rust, Windows 10 or 11.
 
 ```bash
-git clone https://github.com/antnjhn/vault-launcher.git
-cd vault-launcher
+git clone https://github.com/antnjhn/SILO.git
+cd SILO
 npm install
 npm run build
 ```

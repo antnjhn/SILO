@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://*.steamstatic.com https://*.steampowered.com;",
+      "csp": "default-src 'self' 'unsafe-inline' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://*.steamstatic.com https://*.steampowered.com https://*.steamgriddb.com;",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPDATA/**", "$APPCONFIG/**", "$APPDATA/com.tauri.dev/**"]
@@ -29,9 +29,18 @@
     },
     "withGlobalTauri": true
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/antnjhn/SILO/releases/latest/download/latest.json"
+      ],
+      "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

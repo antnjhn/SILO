@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use notify::{Watcher, RecursiveMode, EventKind};
 use sysinfo::{System, Pid};
 use tauri::{AppHandle, Manager};
@@ -93,7 +93,7 @@ pub fn is_descendant(system: &System, target_pid: u32, ancestor_pid: u32) -> boo
     false
 }
 
-pub fn get_save_root(path: &Path, base_dirs: &[PathBuf]) -> Option<PathBuf> {
+pub fn is_save_root_excluded(folder_name: &str) -> bool {
     let exclusions = [
         "d3dscache",
         "temp",
@@ -109,14 +109,17 @@ pub fn get_save_root(path: &Path, base_dirs: &[PathBuf]) -> Option<PathBuf> {
         "gpuconfig",
         "shadercache"
     ];
+    exclusions.contains(&folder_name)
+}
 
+pub fn get_save_root(path: &Path, base_dirs: &[PathBuf]) -> Option<PathBuf> {
     for base_dir in base_dirs {
         if path.starts_with(base_dir) {
             if let Ok(rel_path) = path.strip_prefix(base_dir) {
                 if let Some(first_component) = rel_path.components().next() {
                     let folder_name = first_component.as_os_str().to_string_lossy().to_lowercase();
-                    
-                    if exclusions.contains(&folder_name.as_str()) {
+
+                    if is_save_root_excluded(&folder_name) {
                         return None; // Ignore cache and temp folders
                     }
 
@@ -155,8 +158,10 @@ pub fn start_watcher(pid: u32, game_id: String, app_handle: AppHandle) {
         }
 
         let mut detected_roots = HashSet::new();
+        let mut pending_paths = HashSet::new();
+        let mut last_detection_check: Option<Instant> = None;
         let mut system = System::new();
-        
+
         loop {
             system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
             if system.process(Pid::from_u32(pid)).is_none() {
@@ -167,18 +172,39 @@ pub fn start_watcher(pid: u32, game_id: String, app_handle: AppHandle) {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         for path in event.paths {
-                            let pids = get_locking_pids(&path);
-                            for locking_pid in pids {
-                                if is_descendant(&system, locking_pid, pid) {
-                                    if let Some(root) = get_save_root(&path, &base_dirs) {
-                                        log::info!("SaveGuard detected save root: {:?}", root);
-                                        detected_roots.insert(root);
-                                    }
-                                }
+                            // Skip paths already under an already-detected root, and defer
+                            // detection so Restart Manager isn't queried on every event.
+                            if detected_roots.iter().any(|root| path.starts_with(root)) {
+                                continue;
                             }
+                            pending_paths.insert(path);
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // Coalesce detection runs to at most once every ~750ms.
+            let due = match last_detection_check {
+                Some(last) => last.elapsed().as_millis() >= 750,
+                None => !pending_paths.is_empty(),
+            };
+            if due && !pending_paths.is_empty() {
+                last_detection_check = Some(Instant::now());
+                let paths: Vec<PathBuf> = pending_paths.drain().collect();
+                for path in paths {
+                    if detected_roots.iter().any(|root| path.starts_with(root)) {
+                        continue;
+                    }
+                    let pids = get_locking_pids(&path);
+                    for locking_pid in pids {
+                        if is_descendant(&system, locking_pid, pid) {
+                            if let Some(root) = get_save_root(&path, &base_dirs) {
+                                log::info!("SaveGuard detected save root: {:?}", root);
+                                detected_roots.insert(root);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -243,4 +269,68 @@ pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHan
     
     let _ = zip.finish();
     log::info!("Backup created at {:?}", zip_path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_save_root_excluded_covers_known_cache_folders() {
+        for folder in ["temp", "cache", "crashpad", "crash_reports", "logs", "shadercache", "nvidia"] {
+            assert!(is_save_root_excluded(folder), "expected {:?} excluded", folder);
+        }
+    }
+
+    #[test]
+    fn is_save_root_excluded_allows_game_folders() {
+        assert!(!is_save_root_excluded("Witcher 3"));
+        assert!(!is_save_root_excluded("Borderlands 3"));
+        assert!(!is_save_root_excluded("My Games"));
+    }
+
+    #[test]
+    fn get_save_root_returns_first_component_under_base() {
+        let base = PathBuf::from(r"C:\Users\Test\Saved Games");
+        let path = PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3\saves\game0");
+        assert_eq!(
+            get_save_root(&path, &[base.clone()]),
+            Some(PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3"))
+        );
+    }
+
+    #[test]
+    fn get_save_root_returns_none_for_excluded_first_component() {
+        let base = PathBuf::from(r"C:\Users\Test\AppData\Local");
+        let path = PathBuf::from(r"C:\Users\Test\AppData\Local\Temp\save\game0");
+        assert_eq!(get_save_root(&path, &[base]), None);
+    }
+
+    #[test]
+    fn get_save_root_lowercases_before_exclusion_check() {
+        // "Temp" (mixed case) is excluded because get_save_root lowercases the first component.
+        let base = PathBuf::from(r"C:\Users\Test\AppData\Local");
+        let path = PathBuf::from(r"C:\Users\Test\AppData\Local\Temp\save");
+        assert_eq!(get_save_root(&path, &[base]), None);
+    }
+
+    #[test]
+    fn get_save_root_returns_none_outside_any_base() {
+        let base = PathBuf::from(r"C:\Users\Test\Saved Games");
+        let path = PathBuf::from(r"D:\Games\Witcher 3\saves");
+        assert_eq!(get_save_root(&path, &[base]), None);
+    }
+
+    #[test]
+    fn is_descendant_true_when_target_equals_ancestor() {
+        let system = System::new();
+        assert!(is_descendant(&system, 4321, 4321));
+    }
+
+    #[test]
+    fn is_descendant_false_for_unknown_pids() {
+        let system = System::new(); // no process table loaded -> process() returns None
+        assert!(!is_descendant(&system, 99_999_999, 1));
+        assert!(!is_descendant(&system, 1, 99_999_999));
+    }
 }

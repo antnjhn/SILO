@@ -315,7 +315,8 @@ html, body {
   object-fit: contain;
   pointer-events: none;
   filter: drop-shadow(0 3px 12px rgba(0,0,0,0.6));
-  transition: filter 250ms ease;
+  transition: filter 250ms ease, opacity 300ms ease, transform 300ms ease;
+  will-change: transform, opacity;
 }
 
 .game-item.active img {
@@ -750,7 +751,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #empty-sub { font-size: 10px; color: var(--text-dim); }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
-#modal-overlay, #launch-overlay, #restore-overlay, #uninstall-overlay, #backup-name-overlay, #scan-results-overlay, #settings-overlay {
+#modal-overlay, #launch-overlay, #restore-overlay, #uninstall-overlay, #backup-name-overlay, #scan-results-overlay, #settings-overlay, #metadata-overlay, #backup-manager-overlay, #online-art-overlay {
   position: fixed; inset: 0;
   background: rgba(0,0,0,0.35);
   backdrop-filter: blur(10px);
@@ -759,9 +760,11 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   display: flex; align-items: center; justify-content: center;
   transition: opacity 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-#modal-overlay.hidden, #launch-overlay.hidden, #restore-overlay.hidden, #uninstall-overlay.hidden, #backup-name-overlay.hidden, #scan-results-overlay.hidden, #settings-overlay.hidden {
+#modal-overlay.hidden, #launch-overlay.hidden, #restore-overlay.hidden, #uninstall-overlay.hidden, #backup-name-overlay.hidden, #scan-results-overlay.hidden, #settings-overlay.hidden, #metadata-overlay.hidden, #backup-manager-overlay.hidden, #online-art-overlay.hidden {
   opacity: 0; pointer-events: none;
 }
+/* The art picker opens over the still-visible add/edit modal, so it must sit above it. */
+#online-art-overlay { z-index: 600; }
 
 .glass-panel {
   background: rgba(255,255,255,0.08);
@@ -973,3 +976,105 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   transform: scale(1.1);
   box-shadow: 0 0 24px rgba(74, 222, 128, 0.3);
 }
+
+/* ── Sidebar search toggle + filter ──────────────────────────────────────── */
+.sidebar-toolbar { width: 100%; justify-content: center; }
+#search-input {
+  display: none;
+  flex: 1; min-width: 0;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 9px 12px;
+  font-size: 12px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+#game-list-panel.search-mode #search-input { display: block; animation: searchFade 200ms ease; }
+#search-input:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
+#search-input::placeholder { color: var(--text-dim); }
+
+/* While searching: hide the + add button, blur settings, highlight the X */
+#game-list-panel.search-mode #btn-add-game { display: none; }
+#game-list-panel.search-mode #btn-settings { filter: blur(2px); opacity: 0.35; pointer-events: none; }
+#game-list-panel.search-mode #btn-search-toggle { color: var(--green); border-color: var(--green); background: rgba(74,222,128,0.12); }
+
+/* Filter bar: hidden until search mode, then slides in under the search box */
+#filter-bar { display: none; align-items: center; width: 100%; margin: 2px 0 10px; }
+#game-list-panel.search-mode #filter-bar { display: flex; animation: searchFade 200ms ease; }
+#sort-select {
+  flex: 1;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 7px 12px;
+  font-size: 11px;
+  outline: none;
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+#sort-select:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
+@keyframes searchFade { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+
+/* Details panel crossfade (no flying-logo clone): the logo + content fade up on open,
+   and fade out again on close via the is-preview state below. */
+@keyframes detailsFade {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+#details-panel:not(.is-preview) #details-logo-area { animation: detailsFade 420ms cubic-bezier(0.22, 1, 0.36, 1); }
+#details-panel:not(.is-preview) #details-content { animation: detailsFade 460ms cubic-bezier(0.22, 1, 0.36, 1); }
+#details-panel.is-preview #details-logo-area { opacity: 0; transition: opacity 300ms ease; }
+
+/* ── Number inputs in the modal ──────────────────────────────────────────── */
+.field-group input[type="number"] {
+  width: 100%;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 10px; color: var(--text);
+  padding: 10px 13px; font-size: 12px;
+  outline: none; font-family: inherit;
+  transition: all 200ms ease;
+}
+.field-group input[type="number"]:focus {
+  border-color: rgba(255,255,255,0.4);
+  box-shadow: 0 0 16px rgba(255,255,255,0.08);
+}
+
+/* ── Favorite pill active state ──────────────────────────────────────────── */
+.pill-btn.fav-pill .pill-circle-icon { font-size: 14px; }
+.pill-btn.fav-pill.fav-active .pill-circle { background: #facc15; }
+.pill-btn.fav-pill.fav-active .pill-circle-icon { color: #000; }
+.pill-btn.fav-pill:hover .pill-circle-icon { color: #fff; }
+.pill-btn.fav-pill.fav-active:hover .pill-circle-icon { color: #000; }
+
+/* ── Metadata picker & backup manager list scrolling ─────────────────────── */
+#metadata-list, #backup-manager-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.15) transparent;
+}
+#metadata-list::-webkit-scrollbar, #backup-manager-list::-webkit-scrollbar { width: 4px; }
+#metadata-list::-webkit-scrollbar-track, #backup-manager-list::-webkit-scrollbar-track { background: transparent; }
+#metadata-list::-webkit-scrollbar-thumb, #backup-manager-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+
+/* ── Online art picker thumbnails ────────────────────────────────────────── */
+.online-art-thumb {
+  width: 96px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.15);
+  cursor: pointer;
+  transition: transform 150ms ease, border-color 150ms ease;
+}
+.online-art-thumb:hover { transform: scale(1.04); border-color: rgba(102,204,255,0.7); }
+#online-art-list { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent; }
+#online-art-list::-webkit-scrollbar { width: 4px; }
+#online-art-list::-webkit-scrollbar-track { background: transparent; }
+#online-art-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
