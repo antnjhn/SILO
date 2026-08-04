@@ -557,8 +557,9 @@ html, body {
 
 /* Launch pill: the icon spins inside on hover, and turns white by the end of the hold */
 .pill-btn.xbox-pill:hover .pill-circle-icon {
+  color: #fff;
   transform: rotate(45deg);
-  transition: transform 250ms ease;
+  transition: color 250ms ease, transform 250ms ease;
 }
 .pill-btn.xbox-pill.holding .pill-circle-icon {
   color: #fff;
