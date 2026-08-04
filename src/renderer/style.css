@@ -429,6 +429,7 @@ html, body {
   font-size: 22px; font-weight: 700; color: #fff;
   font-variant-numeric: tabular-nums; line-height: 1;
   text-shadow: 0 2px 16px rgba(0,0,0,0.6);
+  white-space: nowrap; /* keep "12h 3m" on one line */
 }
 
 .status-select {
@@ -546,12 +547,12 @@ html, body {
   transition: all 1s cubic-bezier(0.51, 0.026, 0.368, 1.016);
 }
 
-.pill-btn:hover .pill-circle-icon {
+.pill-btn:not(.xbox-pill):hover .pill-circle-icon {
   color: #fff;
   transform: rotate(-45deg);
 }
 
-.pill-btn.holding .pill-circle-icon {
+.pill-btn:not(.xbox-pill).holding .pill-circle-icon {
   color: #fff;
   transform: rotate(-45deg);
   transition: all 5s linear;
@@ -559,7 +560,7 @@ html, body {
 
 .pill-circle-icon svg {
   width: 100%; height: 100%;
-  fill: currentColor;
+  fill: none; /* outline (stroke) icons; the launch arrow keeps its own fill */
 }
 
 /* Label text */
@@ -978,10 +979,12 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 
 /* ── Sidebar search toggle + filter ──────────────────────────────────────── */
-.sidebar-toolbar { width: 100%; justify-content: center; }
+.sidebar-toolbar { width: 100%; justify-content: flex-start; }
 #search-input {
   display: none;
-  flex: 1; min-width: 0;
+  box-sizing: border-box;
+  flex: 0 0 auto; min-width: 0;
+  width: calc(100% - 112px);
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.15);
   border-radius: 10px;
@@ -992,7 +995,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   font-family: inherit;
   transition: border-color 200ms ease, box-shadow 200ms ease;
 }
-#game-list-panel.search-mode #search-input { display: block; animation: searchFade 200ms ease; }
+#game-list-panel.search-mode #search-input { display: block; animation: searchGrow 280ms cubic-bezier(0.4, 0, 0.2, 1); }
 #search-input:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
 #search-input::placeholder { color: var(--text-dim); }
 
@@ -1002,8 +1005,8 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #game-list-panel.search-mode #btn-search-toggle { color: var(--green); border-color: var(--green); background: rgba(74,222,128,0.12); }
 
 /* Filter bar: hidden until search mode, then slides in under the search box */
-#filter-bar { display: none; align-items: center; width: 100%; margin: 2px 0 10px; }
-#game-list-panel.search-mode #filter-bar { display: flex; animation: searchFade 200ms ease; }
+#filter-bar { display: none; box-sizing: border-box; align-items: center; width: calc(100% - 112px); margin: 2px 0 10px 112px; align-self: flex-start; }
+#game-list-panel.search-mode #filter-bar { display: flex; animation: searchFade 240ms ease; }
 #sort-select {
   flex: 1;
   background: rgba(255,255,255,0.06);
@@ -1020,6 +1023,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 #sort-select:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
 @keyframes searchFade { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@keyframes searchGrow { from { width: 0; opacity: 0; } to { width: calc(100% - 112px); opacity: 1; } }
 
 /* Details panel crossfade (no flying-logo clone): the logo + content fade up on open,
    and fade out again on close via the is-preview state below. */
