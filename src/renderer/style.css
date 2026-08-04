@@ -16,7 +16,7 @@
   --green:         #4ade80;
   --green-dark:    #22c55e;
   --titlebar-h:    36px;
-  --sidebar-w:     200px;
+  --sidebar-w:     260px;
 
   /* Glass */
   --glass-bg:         rgba(255, 255, 255, 0.08);
@@ -549,12 +549,20 @@ html, body {
 
 .pill-btn:not(.xbox-pill):hover .pill-circle-icon {
   color: #fff;
-  transform: rotate(-45deg);
 }
 
 .pill-btn:not(.xbox-pill).holding .pill-circle-icon {
   color: #fff;
-  transform: rotate(-45deg);
+}
+
+/* Launch pill: the icon spins inside on hover, and turns white by the end of the hold */
+.pill-btn.xbox-pill:hover .pill-circle-icon {
+  transform: rotate(45deg);
+  transition: transform 250ms ease;
+}
+.pill-btn.xbox-pill.holding .pill-circle-icon {
+  color: #fff;
+  transform: rotate(180deg);
   transition: all 5s linear;
 }
 
