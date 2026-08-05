@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="assets/icon.png" width="400" alt="VAULT" />
+  <img src="assets/icon.png" width="360" alt="SILO" />
 </p>
 
 <h1 align="center">SILO</h1>
 
 <p align="center">
-  A game launcher for Windows. Controller-first, no frills, keeps your saves safe.
+  A console-style game launcher for Windows — controller-first, distraction-free, and it never loses your saves.
 </p>
 
 <p align="center">
@@ -18,52 +18,47 @@
 </p>
 
 <p align="center">
-  <img src="assets/ss-1.png" width="49%" alt="VAULT Screenshot 1" />
-  <img src="assets/ss-2.png" width="49%" alt="VAULT Screenshot 2" />
+  <img src="assets/ss-1.png" width="49%" alt="SILO library" />
+  <img src="assets/ss-2.png" width="49%" alt="SILO game details" />
 </p>
 
 ---
 
-SILO is a personal game launcher built for people who want something that feels like a console dashboard on a PC. Navigate with a controller, set up your library however you want, and never think about saves again.
+SILO turns your PC into a console dashboard. Kick back with a gamepad, browse a library that looks the way you want it to, launch with one press — and never worry about losing a save again. Everything runs locally. Nothing leaves your machine.
 
 ---
 
-## What it does
+## Features
 
-**Controller navigation** — Full gamepad support with Xbox button layout. Browse and launch everything without touching a keyboard.
+**Controller-first** — Full Xbox gamepad support. Browse, launch, and manage your whole library without touching a keyboard.
 
-**Per-game backgrounds and cover art** — Custom background images that crossfade during navigation. Import logos and customize typography per game.
+**Import from Steam, Epic & GOG** — Pull in your installed titles with a few clicks, ready to launch.
 
-**Playtime tracking** — Tracks session count, total hours, and last played date. Stored locally, nothing sent anywhere.
+**Beautiful, and yours** — Per-game wallpapers that crossfade as you navigate, plus logos and custom typography. Grab art from **Steam and SteamGridDB** (logos, heroes, and grids) right from the picker.
 
-**Save management** — Detects save locations on first launch and backs them up automatically when you close a game. Manual backups are one click. Restoring is just picking from a list.
+**SaveGuard** — Save locations are detected automatically. SILO backs them up every time a game exits, keeps a rolling history, and restores transactionally — a restore can never leave you worse off.
 
-**State detection** — Games gray out if their executable is no longer found on disk.
+**Playtime tracking** — Sessions, total hours, and last played, tracked locally.
 
-**Uninstaller integration** — Detects `unins000.exe` and lets you uninstall directly from the launcher.
+**Stay organized** — Favorites, tags, live search, and sorting make a big library feel small.
 
-**Frameless fullscreen UI** — No window chrome, no taskbar bleed. Fills the screen and gets out of the way.
+**Back it all up** — Export your whole library (metadata, images, and save backups) to a single `.zip` and import it anywhere.
 
----
+**Uninstaller integration** — SILO detects `unins000.exe` and can uninstall or delete a game folder in one step.
 
-## Planned
-
-- [ ] Linux support (requires platform abstraction layer)
-- [ ] Cloud save sync (Google Drive / OneDrive)
-- [ ] Multi-monitor support
-- [ ] Auto-update on launch
+**Frameless fullscreen UI** — No window chrome, no taskbar bleed. It fills the screen and gets out of the way.
 
 ---
 
-## Installation
+## Install
 
-Download the latest build from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page.
+Download **`SILO_0.2.0_x64-setup.exe`** (the release's only asset) from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page and run it.
 
 | File | Type |
 |------|------|
-| `silo_0.1.2_x64-setup.exe` | NSIS installer |
-| `silo_0.1.2_x64_en-US.msi` | MSI installer |
-> Windows may show a SmartScreen warning since the binary is unsigned. Click **More info** then **Run anyway**. This is expected for indie software without a code signing certificate.
+| `SILO_0.2.0_x64-setup.exe` | NSIS installer |
+
+> Windows may show a SmartScreen warning because the binary is unsigned — click **More info** → **Run anyway**. That's expected for indie software without a code-signing certificate.
 
 ---
 
@@ -100,10 +95,13 @@ Automatic backups run every time a game exits.
 Everything stays local. Nothing leaves your machine.
 
 ```
-%APPDATA%\com.vault.launcher\
+%APPDATA%\com.silo.launcher\            # app data
 ├── games.json       # library metadata
-├── wallpapers/      # background images
+├── settings.json    # preferences (e.g. SteamGridDB API key)
+├── wallpapers/      # background images & logos
 └── backups/         # compressed save snapshots
+
+%LOCALAPPDATA%\com.silo.launcher\logs\  # diagnostic logs
 ```
 
 ---
@@ -113,7 +111,7 @@ Everything stays local. Nothing leaves your machine.
 | Layer | Technology |
 |-------|------------|
 | Shell | [Tauri 2](https://v2.tauri.app/) |
-| Backend | Rust — process management and filesystem ops |
+| Backend | Rust — process management, filesystem ops, save detection |
 | Frontend | Vanilla HTML / CSS / JS |
 
 ---
