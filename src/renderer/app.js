@@ -853,6 +853,7 @@ function openAddModal() {
 
   document.getElementById('edit-wallpaper-preview-img').style.display = 'none';
   document.getElementById('edit-logo-preview-img').style.display = 'none';
+  updateTitlePreview();
 
   document.getElementById('modal-overlay').classList.remove('hidden');
   setTimeout(() => document.getElementById('input-name').focus(), 50);
@@ -886,6 +887,7 @@ function openEditModal(g) {
     getFileSrc(modalLogoPath, lImg);
     lImg.style.display = 'block';
   } else { lImg.style.display = 'none'; }
+  updateTitlePreview();
 
   document.getElementById('modal-overlay').classList.remove('hidden');
   setTimeout(() => document.getElementById('input-name').focus(), 50);
@@ -895,6 +897,22 @@ function openEditModal(g) {
 document.getElementById('input-color').addEventListener('input', (e) => {
   document.getElementById('color-preview-text').textContent = e.target.value;
 });
+
+// Live game-name preview for the Title Style field: renders the current game
+// name in the chosen font + color as the user changes them.
+function updateTitlePreview() {
+  const el = document.getElementById('title-preview');
+  if (!el) return;
+  const name = document.getElementById('input-name').value.trim() || 'Game Title';
+  const font = document.getElementById('input-font').value;
+  const color = document.getElementById('input-color').value;
+  el.textContent = name;
+  el.style.fontFamily = font ? `'${font}', sans-serif` : '';
+  el.style.color = color;
+}
+document.getElementById('input-font').addEventListener('change', updateTitlePreview);
+document.getElementById('input-color').addEventListener('input', updateTitlePreview);
+document.getElementById('input-name').addEventListener('input', updateTitlePreview);
 
 document.getElementById('btn-add-game').addEventListener('click', openAddModal);
 
@@ -1694,6 +1712,11 @@ document.getElementById('btn-settings').addEventListener('click', async () => {
 });
 document.getElementById('btn-settings-close').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.add('hidden');
+});
+// Advanced section collapse (settings page)
+document.getElementById('settings-advanced-toggle')?.addEventListener('click', () => {
+  const adv = document.getElementById('settings-advanced');
+  if (adv) adv.classList.toggle('open');
 });
 
 document.getElementById('btn-save-settings').addEventListener('click', async () => {

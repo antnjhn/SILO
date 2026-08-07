@@ -6,17 +6,23 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@500;700&display=swap');
 
 :root {
   --bg:            #06060c;
   --text:          #f0f0f8;
-  --text-muted:    rgba(240, 240, 248, 0.4);
-  --text-dim:      rgba(240, 240, 248, 0.18);
+  --text-muted:    rgba(240, 240, 248, 0.45);
+  --text-dim:      rgba(240, 240, 248, 0.20);
   --green:         #4ade80;
   --green-dark:    #22c55e;
+  --red:           #f87171;
   --titlebar-h:    36px;
-  --sidebar-w:     260px;
+  --sidebar-w:     300px;
+  --font-mono:     'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Flat modal surfaces (modals sit on these, not on glass) */
+  --surface-1:     #0d0d16;
+  --surface-2:     #16161f;
 
   /* Glass */
   --glass-bg:         rgba(255, 255, 255, 0.08);
@@ -1091,3 +1097,485 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #online-art-list::-webkit-scrollbar { width: 4px; }
 #online-art-list::-webkit-scrollbar-track { background: transparent; }
 #online-art-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+
+/* ── Modal redesign: legibility + action hierarchy ───────────────────────── */
+#modal { width: 460px; max-width: 95vw; }
+
+#modal-title { font-size: 12px; letter-spacing: 4px; color: var(--text); margin-bottom: 20px; }
+
+/* Labels + values: bigger and higher-contrast for couch viewing */
+.field-group label {
+  font-size: 12px; letter-spacing: 1px;
+  color: rgba(240,240,248,0.82); margin-bottom: 8px;
+}
+.optional { opacity: 0.6; font-size: 10px; letter-spacing: 0.5px; }
+.field-group input[type="text"],
+.field-group input[type="number"],
+.field-group select,
+.glass-input { font-size: 14px; padding: 11px 13px; }
+.field-group input::placeholder { color: var(--text-muted); }
+
+/* Buttons — filled green = primary, glass = secondary, red = destructive/low weight */
+.btn-primary {
+  background: var(--green);
+  border: 1px solid var(--green);
+  color: #06210f;
+  box-shadow: 0 0 0 1px rgba(74,222,128,0.2), 0 4px 22px rgba(74,222,128,0.3);
+}
+.btn-primary:hover { background: var(--green-dark); border-color: var(--green-dark); }
+.btn-primary::before, .btn-primary::after { display: none; }
+
+.btn-danger {
+  background: rgba(255,86,86,0.10);
+  border: 1px solid rgba(255,86,86,0.35);
+  color: #ff9d9d;
+}
+.btn-danger:hover { background: rgba(255,86,86,0.18); border-color: rgba(255,86,86,0.55); }
+
+/* Global glass button text bump (applies to every modal + dialog) */
+.glass-btn { font-size: 12px; letter-spacing: 1px; }
+.glass-btn.small { font-size: 11px; letter-spacing: 0.5px; }
+
+/* Scan / import / browse secondaries in the glass language */
+.secondary-btn {
+  background: var(--glass-bg);
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 12px;
+  color: var(--text);
+  font-size: 12px; font-weight: 700;
+  padding: 11px 14px;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.secondary-btn:hover { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.4); }
+
+/* Live game-name preview for the Title Style field */
+.title-preview {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(0,0,0,0.30);
+  border: 1px dashed rgba(255,255,255,0.22);
+  font-size: 26px; font-weight: 800; line-height: 1.1;
+  color: var(--text);
+  text-shadow: 0 4px 30px rgba(0,0,0,0.8);
+  min-height: 46px;
+  display: flex; align-items: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Selected-art thumbnails (Logo / Wallpaper) get a green "selected" ring */
+.preview-thumb {
+  display: none;
+  max-height: 64px; max-width: 220px;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid rgba(74,222,128,0.5);
+  background: rgba(0,0,0,0.30);
+  box-shadow: 0 0 0 3px rgba(74,222,128,0.12);
+  padding: 4px;
+}
+
+/* ── Unified modal system ─────────────────────────────────────────────────── *
+   Flat surfaces (no glass), text-only buttons, JetBrains Mono accents,
+   8px radii. Applies to: Add/Edit #modal, Settings #settings-modal, Remove
+   #uninstall-modal, Backup Name #backup-name-modal. No icons on buttons. */
+
+/* Modal panels — flat surface-1, no blur, no border (overrides .glass-panel) */
+#modal, #settings-modal, #uninstall-modal, #backup-name-modal {
+  background: var(--surface-1);
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.55);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: var(--text);
+}
+#modal::before, #modal::after,
+#settings-modal::before, #settings-modal::after,
+#uninstall-modal::before, #uninstall-modal::after,
+#backup-name-modal::before, #backup-name-modal::after { display: none; }
+
+/* Modal overlays: flat dim behind the panel — no backdrop blur (blur is for
+   glass panels floating over game art in the library view, not modals). */
+#modal-overlay, #settings-overlay, #uninstall-overlay, #backup-name-overlay {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* One consistent title across all four modals */
+#modal-title, .modal-title {
+  font-family: var(--font-mono);
+  font-size: 20px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 2px; color: var(--text); margin-bottom: 24px;
+}
+
+/* Standardized 11px uppercase labels */
+#modal label, #settings-modal label, #uninstall-modal label, #backup-name-modal label {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px; text-transform: uppercase; font-weight: 600;
+  letter-spacing: 1.5px; color: var(--text-muted);
+  display: block; margin-bottom: 8px;
+}
+#modal label .optional, #settings-modal label .optional,
+#uninstall-modal label .optional, #backup-name-modal label .optional {
+  font-size: 10px; text-transform: none; letter-spacing: 0.5px; opacity: 0.7;
+}
+
+/* Flat inputs — surface-2, 8px radius */
+#modal input[type="text"], #modal input[type="number"], #modal select,
+#settings-modal input[type="text"], #settings-modal input[type="password"], #settings-modal select,
+#uninstall-modal input, #backup-name-modal input {
+  width: 100%; min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  padding: 11px 13px;
+  outline: none;
+}
+#modal input:focus, #modal select:focus,
+#settings-modal input:focus, #settings-modal select:focus,
+#uninstall-modal input:focus, #backup-name-modal input:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 2px rgba(74,222,128,0.25);
+}
+#modal input::placeholder, #settings-modal input::placeholder,
+#uninstall-modal input::placeholder, #backup-name-modal input::placeholder { color: var(--text-dim); }
+
+/* Focus ring — controller-first, keep on every interactive element */
+#modal button:focus-visible, #modal input:focus-visible, #modal select:focus-visible,
+#settings-modal button:focus-visible, #settings-modal input:focus-visible, #settings-modal select:focus-visible,
+#uninstall-modal button:focus-visible, #uninstall-modal input:focus-visible,
+#backup-name-modal button:focus-visible, #backup-name-modal input:focus-visible {
+  outline: 2px solid var(--green); outline-offset: 2px;
+}
+
+/* Button tiers — hierarchy through weight/size/fill only (no icons) */
+.btn-primary {
+  font-family: var(--font-mono);
+  font-size: 18px; font-weight: 700;
+  background: var(--green); color: #06210f;
+  border: none; border-radius: 8px;
+  padding: 12px 26px;
+  cursor: pointer;
+}
+.btn-primary:hover { background: var(--green-dark); }
+
+.btn-secondary {
+  font-family: 'Inter', sans-serif;
+  font-size: 14px; font-weight: 600;
+  background: var(--surface-2); color: var(--text);
+  border: none; border-radius: 8px;
+  padding: 11px 18px;
+  cursor: pointer;
+}
+.btn-secondary:hover { background: #20202b; }
+
+.btn-ghost {
+  font-family: 'Inter', sans-serif;
+  font-size: 14px; font-weight: 500;
+  background: none; border: none; color: var(--text-muted);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.btn-ghost:hover { color: var(--text); }
+.btn-ghost.danger { color: var(--red); }
+.btn-ghost.danger:hover { color: #ffb4b4; }
+
+.btn-primary, .btn-secondary, .btn-ghost {
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+/* Segmented control (import sources) */
+.segmented {
+  display: flex;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.segmented button {
+  flex: 1;
+  background: var(--surface-2);
+  border: none;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px; font-weight: 600;
+  padding: 11px 12px;
+  cursor: pointer;
+}
+.segmented button + button { border-left: 1px solid rgba(255,255,255,0.10); }
+.segmented button:hover { background: #20202b; }
+
+/* Asset picker — 72x72 box with dashed-empty-state "+", ghost actions below */
+.asset-picker { display: flex; align-items: center; gap: 14px; }
+.asset-box {
+  width: 72px; height: 72px;
+  background: var(--surface-2);
+  border: 1px dashed rgba(255,255,255,0.30);
+  border-radius: 8px;
+  position: relative; overflow: hidden;
+  flex-shrink: 0;
+}
+.asset-box .asset-plus {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim); font-size: 26px; font-weight: 400;
+  pointer-events: none;
+}
+.asset-box img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  display: none;
+  padding: 6px; box-sizing: border-box;
+  background: var(--surface-2);
+}
+.asset-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+
+/* Live title-style preview — surface-2 inset */
+.title-preview {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px dashed rgba(255,255,255,0.20);
+  font-family: 'Inter', sans-serif;
+  font-size: 26px; font-weight: 800; line-height: 1.1;
+  color: var(--text);
+  text-shadow: 0 4px 30px rgba(0,0,0,0.8);
+  min-height: 46px;
+  display: flex; align-items: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Hex value uses the mono accent face */
+.color-preview {
+  font-family: var(--font-mono);
+  font-size: 13px; font-weight: 500;
+  background: var(--surface-2);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px; padding: 10px 12px; color: var(--text);
+  min-width: 76px; text-align: center;
+}
+
+/* File-row buttons must not collapse next to flex inputs */
+#modal .file-row button { flex-shrink: 0; }
+
+/* Sidebar toolbar: breathing room on the left (icon-only nav buttons keep icons) */
+.sidebar-toolbar { padding: 0 14px; }
+#filter-bar { width: calc(100% - 140px); margin-left: 126px; }
+
+/* Add/Edit modal overflow: pin header + action row, scroll only the middle,
+   and cap the whole modal so it never exceeds the viewport. */
+#modal {
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+#modal-title, #modal-actions { flex-shrink: 0; }
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.2) transparent;
+}
+.modal-body::-webkit-scrollbar { width: 4px; }
+.modal-body::-webkit-scrollbar-track { background: transparent; }
+.modal-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
+
+/* Settings: translucent backdrop (library shows through dimmed), no boxed
+   panel, JetBrains Mono menu type. */
+#settings-overlay {
+  background: rgba(13, 13, 22, 0.60);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+#settings-modal {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+#settings-modal, #settings-modal label, #settings-modal input,
+#settings-modal button, #settings-modal select {
+  font-family: var(--font-mono);
+}
+
+/* ── Settings & Backup page — console-inspired frosted panel ─────────────── */
+#settings-overlay {
+  background: rgba(15, 17, 21, 0.50);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+#settings-modal.settings-modal {
+  width: 600px; max-width: 94vw;
+  max-height: 90vh; overflow-y: auto;
+  padding: 36px 40px;
+  background: rgba(24, 24, 28, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  text-align: left;
+}
+#settings-modal::before, #settings-modal::after { display: none; }
+#settings-modal, #settings-modal label, #settings-modal input,
+#settings-modal button, #settings-modal select {
+  font-family: 'Inter', sans-serif;
+}
+
+/* Typography */
+.settings-title { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; color: #F5F5F5; margin-bottom: 4px; }
+.settings-desc { font-size: 13px; color: #9A9A9A; margin-bottom: 34px; }
+.settings-section { margin-bottom: 30px; }
+.settings-section-title {
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 2px; color: #9A9A9A; margin-bottom: 14px;
+}
+.settings-field-label { display: block; font-size: 13px; font-weight: 600; color: #F5F5F5; margin-bottom: 8px; }
+.settings-hint { font-size: 12px; color: #9A9A9A; margin-top: 9px; line-height: 1.55; }
+
+/* Inputs */
+.settings-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 10px;
+  padding: 13px 14px;
+  color: #F5F5F5;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.settings-input::placeholder { color: rgba(245, 245, 245, 0.38); }
+.settings-input:focus { border-color: #A5B8FF; box-shadow: 0 0 0 2px rgba(165, 184, 255, 0.20); }
+
+/* Checkbox — minimal, accent-colored */
+.settings-check { display: flex; align-items: center; gap: 11px; font-size: 14px; color: #F5F5F5; cursor: pointer; margin-bottom: 20px; }
+.settings-check input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 18px; height: 18px; margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer; position: relative; flex-shrink: 0;
+  transition: background 180ms ease, border-color 180ms ease;
+}
+.settings-check input[type="checkbox"]:checked { background: #A5B8FF; border-color: #A5B8FF; }
+.settings-check input[type="checkbox"]:checked::after {
+  content: ''; position: absolute; left: 5px; top: 1px;
+  width: 5px; height: 10px;
+  border: solid #0F1115; border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.settings-check input[type="checkbox"]:focus-visible { outline: 2px solid #A5B8FF; outline-offset: 2px; }
+
+/* Buttons — flat, quiet, subtle 1.02 hover scale */
+.settings-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: #F5F5F5;
+  border-radius: 10px;
+  font-size: 14px; font-weight: 600;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+.settings-btn:hover { background: rgba(255, 255, 255, 0.06); transform: scale(1.02); }
+.settings-row { display: flex; gap: 12px; }
+.settings-row .settings-btn { flex: 1; }
+.settings-btn-primary {
+  width: 100%; margin-top: 4px;
+  background: #A5B8FF; border-color: #A5B8FF; color: #0F1115;
+  font-weight: 700;
+}
+.settings-btn-primary:hover { background: #b6c6ff; border-color: #b6c6ff; }
+
+/* Advanced collapsible section */
+.settings-btn-advanced-toggle {
+  width: 100%;
+  background: none; border: none; border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #F5F5F5;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px;
+  text-align: left; padding: 14px 0; cursor: pointer;
+  transition: color 180ms ease;
+}
+.settings-btn-advanced-toggle:hover { color: #A5B8FF; }
+.advanced-body { display: grid; grid-template-rows: 0fr; overflow: hidden; transition: grid-template-rows 200ms ease; }
+#settings-advanced.open .advanced-body { grid-template-rows: 1fr; }
+.advanced-inner { overflow: hidden; }
+.settings-ghost {
+  width: 100%;
+  background: none; border: none;
+  color: #9A9A9A; text-align: left;
+  font-size: 14px; font-weight: 500;
+  padding: 11px 4px; cursor: pointer;
+  transition: color 180ms ease, transform 180ms ease;
+}
+.settings-ghost:hover { color: #F5F5F5; transform: scale(1.02); }
+
+/* Back link */
+.settings-back-row { margin-top: 10px; display: flex; justify-content: center; }
+.settings-back {
+  background: none; border: none;
+  color: #9A9A9A; font-size: 12px; letter-spacing: 1.5px;
+  cursor: pointer; padding: 8px; font-weight: 600;
+  transition: color 180ms ease;
+}
+.settings-back:hover { color: #F5F5F5; }
+
+/* Remove Game — same console frosted panel + typography as Settings */
+#uninstall-overlay {
+  background: rgba(15, 17, 21, 0.50);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+#uninstall-modal {
+  width: 520px; max-width: 94vw;
+  max-height: 90vh; overflow-y: auto;
+  padding: 36px 40px;
+  background: rgba(24, 24, 28, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-family: 'Inter', sans-serif;
+}
+#uninstall-modal::before, #uninstall-modal::after { display: none; }
+.settings-stack { display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px; }
+.settings-stack .settings-btn { width: 100%; }
+.settings-btn-danger {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.06);
+}
+.settings-btn-danger:hover { background: rgba(248, 113, 113, 0.12); color: #ff9d9d; }
+.settings-actions-row { display: flex; justify-content: center; }
+
+/* Remove Game danger variant: mono type, red bold title, red translucent gradient */
+#uninstall-modal, #uninstall-modal button, #uninstall-modal p {
+  font-family: var(--font-mono);
+}
+#uninstall-modal .settings-title {
+  color: #f87171;
+  font-size: 30px;
+  font-weight: 800;
+}
+#uninstall-overlay {
+  background: linear-gradient(180deg, rgba(248, 113, 113, 0.14) 0%, rgba(15, 17, 21, 0.55) 65%);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+#uninstall-modal {
+  background: linear-gradient(160deg, rgba(248, 113, 113, 0.18) 0%, rgba(24, 24, 28, 0.80) 55%);
+}
