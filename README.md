@@ -52,11 +52,11 @@ SILO turns your PC into a console dashboard. Kick back with a gamepad, browse a 
 
 ## Install
 
-Download **`SILO_0.2.0_x64-setup.exe`** (the release's only asset) from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page and run it.
+Download **`SILO_0.2.1_x64-setup.exe`** (the release's only asset) from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page and run it.
 
 | File | Type |
 |------|------|
-| `SILO_0.2.0_x64-setup.exe` | NSIS installer |
+| `SILO_0.2.1_x64-setup.exe` | NSIS installer |
 
 > Windows may show a SmartScreen warning because the binary is unsigned — click **More info** → **Run anyway**. That's expected for indie software without a code-signing certificate.
 

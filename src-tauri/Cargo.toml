@@ -1,6 +1,6 @@
 [package]
 name = "silo"
-version = "0.2.0"
+version = "0.2.1"
 description = "SILO — A fast, aesthetic game launcher with controller support and save management"
 authors = ["anthn"]
 license = "MIT"
