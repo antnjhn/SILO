@@ -328,6 +328,28 @@ pub async fn pick_logo(app: AppHandle, game_id: String) -> Result<Option<String>
     Ok(None)
 }
 
+/// While a game runs, drop this launcher's own process to a background priority class
+/// so Windows is far more likely to reclaim SILO's pages (WebView2, cached images)
+/// under memory pressure instead of the game's. Restored the moment the game exits.
+#[cfg(target_os = "windows")]
+fn set_launcher_background(background: bool) {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, SetPriorityClass, PROCESS_MODE_BACKGROUND_BEGIN, PROCESS_MODE_BACKGROUND_END,
+    };
+    unsafe {
+        // Windows "process background mode" sets idle CPU scheduling AND a low memory
+        // priority in one call — the deepest reclaim hint the exposed API offers. While a
+        // game runs the launcher's pages (WebView2, images/cache) are the first the OS
+        // trims; restored to foreground mode the instant the game ends.
+        let _ = SetPriorityClass(
+            GetCurrentProcess(),
+            if background { PROCESS_MODE_BACKGROUND_BEGIN } else { PROCESS_MODE_BACKGROUND_END },
+        );
+    }
+}
+#[cfg(not(target_os = "windows"))]
+fn set_launcher_background(_background: bool) {}
+
 #[tauri::command]
 pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Result<(), String> {
     let games = get_games(app.clone());
@@ -360,13 +382,15 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
         };
 
         if let Ok(mut child) = cmd.spawn() {
-            // Immersive mode is deliberately non-destructive: it only hides SILO while the
-            // game is running. Windows processes and services are left exactly as they are.
-            if xbox_mode {
-                if let Some(win) = &window {
-                    let _ = win.hide();
-                }
+            // Hide SILO's window for the whole session (both modes) so the OS/GPU compositor
+            // doesn't keep compositing a full-screen launcher surface — lowers compositor and
+            // GPU memory while the game runs. Restored when the game exits.
+            if let Some(win) = &window {
+                let _ = win.hide();
             }
+            // Lower our priority for the whole session so the game gets the memory and
+            // SILO's pages become the OS's first reclaim candidate. Restored on exit.
+            set_launcher_background(true);
             let exe_name = Path::new(&exe_path)
                 .file_name()
                 .unwrap_or_default()
@@ -407,32 +431,48 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let mut pending_paths: HashSet<PathBuf> = HashSet::new();
             let mut detected_roots: HashSet<PathBuf> = HashSet::new();
             let mut last_detection_check: Option<Instant> = None;
+            // Bound the two background scanners so they don't poll for a whole session:
+            // - the full process scan (playtime PID hunt) stops after 15s
+            // - the save-detection watcher + Restart Manager stops after 90s
+            let mut gave_up_scan = false;
+            let detection_deadline = Instant::now() + std::time::Duration::from_secs(60);
 
             while is_running {
                 if game_pid.is_none() {
-                    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                    let mut name_match: Option<u32> = None;
-                    for (pid, proc) in system.processes() {
-                        if proc.name().to_string_lossy().to_lowercase() != exe_name.to_lowercase() {
-                            continue;
+                    // Full-scan only while we're still hunting for the PID, capped at 15s.
+                    if !gave_up_scan && check_start.elapsed().as_secs() < 15 {
+                        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                        let mut name_match: Option<u32> = None;
+                        for (pid, proc) in system.processes() {
+                            if proc.name().to_string_lossy().to_lowercase() != exe_name.to_lowercase() {
+                                continue;
+                            }
+                            let candidate_pid = pid.as_u32();
+                            // Prefer a process spawned by our cmd instance (avoids matching a
+                            // second instance of the same game already running).
+                            if crate::saveguard::is_descendant(&system, candidate_pid, spawned_child_pid) {
+                                game_pid = Some(candidate_pid);
+                                game_is_ours = true;
+                                break;
+                            }
+                            if name_match.is_none() {
+                                name_match = Some(candidate_pid);
+                            }
                         }
-                        let candidate_pid = pid.as_u32();
-                        // Prefer a process spawned by our cmd instance (avoids matching a
-                        // second instance of the same game already running).
-                        if crate::saveguard::is_descendant(&system, candidate_pid, spawned_child_pid) {
-                            game_pid = Some(candidate_pid);
-                            game_is_ours = true;
-                            break;
-                        }
-                        if name_match.is_none() {
-                            name_match = Some(candidate_pid);
+                        // Fall back to name-only matching after a grace period (some games
+                        // launch through a launcher rather than directly from our cmd).
+                        if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
+                            game_pid = name_match;
+                            game_is_ours = false;
                         }
                     }
-                    // Fall back to name-only matching after a grace period (some games
-                    // launch through a launcher rather than directly from our cmd).
-                    if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
-                        game_pid = name_match;
-                        game_is_ours = false;
+                    // Launcher-style games may never match; stop full-scanning after 15s and
+                    // just rely on the /WAIT child to signal exit.
+                    if !gave_up_scan && check_start.elapsed().as_secs() >= 15 {
+                        gave_up_scan = true;
+                        // Free the full-process snapshot instead of holding it in memory
+                        // for the rest of the session (we stop refreshing it anyway).
+                        system = sysinfo::System::new();
                     }
                     if game_pid.is_some() {
                         game_started_at = Some(Instant::now());
@@ -444,7 +484,16 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                     );
                 }
                 
-                if let Some(rx) = &rx_opt {
+                // Bound the save detector: once the root is found or the 60s window elapses,
+                // drop the recursive watcher + Restart Manager polling so it is never
+                // "constantly checking" for the whole session.
+                if detected_path.is_some() || Instant::now() >= detection_deadline {
+                    if let Some(w) = watcher_opt.take() {
+                        drop(w);
+                    }
+                    rx_opt = None;
+                }
+                if let Some(rx) = rx_opt.as_ref() {
                     while let Ok(event) = rx.try_recv() {
                         let is_write = match event.kind {
                             EventKind::Modify(_) | EventKind::Create(_) => true,
@@ -529,7 +578,10 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             if let Some(watcher) = watcher_opt {
                 drop(watcher);
             }
-            
+
+            // Game is over — restore normal priority before the backup/playtime writes.
+            set_launcher_background(false);
+
             let mut final_save_path = save_path_clone;
             
             if let Some(path) = detected_path {
@@ -571,11 +623,9 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let elapsed_secs = game_started_at.map_or(0, |started| started.elapsed().as_secs());
             let elapsed_minutes = if elapsed_secs > 0 { (elapsed_secs + 59) / 60 } else { 0 };
 
-            if xbox_mode {
-                if let Some(win) = &window {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+            if let Some(win) = &window {
+                let _ = win.show();
+                let _ = win.set_focus();
             }
 
             let mut games = get_games(app.clone());
@@ -590,7 +640,8 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let _ = save_games_atomic(&app, &games);
         }
     });
-    
+
+    let _ = xbox_mode; // hide/show now applies to both modes
     Ok(())
 }
 
