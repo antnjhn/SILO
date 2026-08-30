@@ -13,37 +13,25 @@ pub struct ImportCandidate {
 #[tauri::command]
 pub async fn import_steam_library() -> Vec<ImportCandidate> {
   #[cfg(target_os = "windows")]
-  {
-    imp::steam_library()
-  }
+  { imp::steam_library() }
   #[cfg(not(target_os = "windows"))]
-  {
-    Vec::new()
-  }
+  { linux_imp::steam_library() }
 }
 
 #[tauri::command]
 pub async fn import_epic_library() -> Vec<ImportCandidate> {
   #[cfg(target_os = "windows")]
-  {
-    imp::epic_library()
-  }
+  { imp::epic_library() }
   #[cfg(not(target_os = "windows"))]
-  {
-    Vec::new()
-  }
+  { linux_imp::heroic_epic_library() }
 }
 
 #[tauri::command]
 pub async fn import_gog_library() -> Vec<ImportCandidate> {
   #[cfg(target_os = "windows")]
-  {
-    imp::gog_library()
-  }
+  { imp::gog_library() }
   #[cfg(not(target_os = "windows"))]
-  {
-    Vec::new()
-  }
+  { linux_imp::heroic_gog_library() }
 }
 
 #[cfg(target_os = "windows")]
@@ -52,7 +40,6 @@ mod imp {
   use std::collections::HashSet;
   use std::fs;
   use std::path::{Path, PathBuf};
-  use walkdir::WalkDir;
 
   // ----- Steam -----
 
@@ -327,34 +314,7 @@ mod imp {
   // ----- shared exe scanning -----
 
   fn find_best_game_exe(game_dir: &Path) -> Option<PathBuf> {
-    let dir_name = game_dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
-    let mut best: Option<(i32, PathBuf)> = None;
-    // 3 levels covers common layouts like <game>/bin/x64/game.exe.
-    for entry in WalkDir::new(game_dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
-      let path = entry.path();
-      if !path.is_file() {
-        continue;
-      }
-      if path.extension().and_then(|e| e.to_str()) != Some("exe") {
-        continue;
-      }
-      let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-      if crate::commands::is_blacklisted_exe(&file_name) {
-        continue;
-      }
-      let Ok(metadata) = fs::metadata(path) else {
-        continue;
-      };
-      if metadata.len() < 500_000 {
-        continue;
-      }
-      let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
-      let score = crate::commands::score_exe_candidate(&stem, &dir_name, entry.depth(), metadata.len());
-      if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
-        best = Some((score, path.to_path_buf()));
-      }
-    }
-    best.map(|(_, path)| path)
+    super::shared::find_best_game_exe(game_dir)
   }
 
   // ----- minimal Valve VDF parser -----
@@ -548,5 +508,201 @@ mod imp {
         _ => panic!("library 1 should be a map"),
       }
     }
+  }
+}
+
+// ── Shared exe scanner (used by both Windows imp and Linux linux_imp) ────────
+mod shared {
+  use std::path::{Path, PathBuf};
+  use std::fs;
+  use walkdir::WalkDir;
+
+  #[cfg(target_os = "windows")]
+  const GAME_EXTS: &[&str] = &["exe"];
+  #[cfg(not(target_os = "windows"))]
+  const GAME_EXTS: &[&str] = &["exe", "sh", "x86_64", "bin", "AppImage", "appimage"];
+
+  pub fn find_best_game_exe(game_dir: &Path) -> Option<PathBuf> {
+    let dir_name = game_dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+    let mut best: Option<(i32, PathBuf)> = None;
+    for entry in WalkDir::new(game_dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
+      let path = entry.path();
+      if !path.is_file() { continue; }
+      let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+      if !GAME_EXTS.contains(&ext.as_str()) { continue; }
+      let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+      if crate::commands::is_blacklisted_exe(&file_name) { continue; }
+      let Ok(metadata) = fs::metadata(path) else { continue; };
+      // On Linux scripts can be small — skip tiny files only for Windows .exe
+      #[cfg(target_os = "windows")]
+      if metadata.len() < 500_000 { continue; }
+      let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+      let score = crate::commands::score_exe_candidate(&stem, &dir_name, entry.depth(), metadata.len());
+      if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+        best = Some((score, path.to_path_buf()));
+      }
+    }
+    best.map(|(_, path)| path)
+  }
+}
+
+// ── Linux library import ─────────────────────────────────────────────────────
+#[cfg(not(target_os = "windows"))]
+mod linux_imp {
+  use super::{ImportCandidate, shared};
+  use std::collections::HashSet;
+  use std::fs;
+  use std::path::PathBuf;
+
+  fn steam_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+      let h = PathBuf::from(&home);
+      // Native Steam
+      paths.push(h.join(".local/share/Steam"));
+      paths.push(h.join(".steam/steam"));
+      // Flatpak Steam
+      paths.push(h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"));
+    }
+    // XDG_DATA_HOME override
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+      paths.push(PathBuf::from(xdg).join("Steam"));
+    }
+    paths
+  }
+
+  pub fn steam_library() -> Vec<ImportCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for steam_root in steam_paths() {
+      let steamapps = steam_root.join("steamapps");
+      if !steamapps.is_dir() { continue; }
+
+      // Parse extra library folders from libraryfolders.vdf
+      let mut lib_dirs = vec![steamapps.clone()];
+      let vdf_path = steamapps.join("libraryfolders.vdf");
+      if let Ok(data) = fs::read_to_string(&vdf_path) {
+        // Simple key-value scan for "path" entries
+        for line in data.lines() {
+          let trimmed = line.trim();
+          if trimmed.starts_with('"') {
+            let parts: Vec<&str> = trimmed.splitn(4, '"').collect();
+            if parts.len() >= 4 && parts[1] == "path" {
+              let extra = PathBuf::from(parts[3]).join("steamapps");
+              if extra.is_dir() && !lib_dirs.contains(&extra) {
+                lib_dirs.push(extra);
+              }
+            }
+          }
+        }
+      }
+
+      for steamapps_dir in &lib_dirs {
+        let Ok(entries) = fs::read_dir(steamapps_dir) else { continue; };
+        for entry in entries.filter_map(|e| e.ok()) {
+          let path = entry.path();
+          let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()) else { continue; };
+          if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") { continue; }
+          let app_id = file_name.trim_start_matches("appmanifest_").trim_end_matches(".acf").to_string();
+          let Ok(data) = fs::read_to_string(&path) else { continue; };
+
+          let mut name = app_id.clone();
+          let mut install_dir = String::new();
+          for line in data.lines() {
+            let t = line.trim();
+            let parts: Vec<&str> = t.splitn(4, '"').collect();
+            if parts.len() >= 4 {
+              match parts[1] {
+                "name" => name = parts[3].to_string(),
+                "installdir" => install_dir = parts[3].to_string(),
+                _ => {}
+              }
+            }
+          }
+          if name.is_empty() || install_dir.is_empty() { continue; }
+
+          let game_dir = steamapps_dir.join("common").join(&install_dir);
+          let exe_path = shared::find_best_game_exe(&game_dir).map(|p| p.to_string_lossy().into_owned());
+          if let Some(ref p) = exe_path {
+            if !seen.insert(p.to_lowercase()) { continue; }
+          }
+          candidates.push(ImportCandidate {
+            name,
+            source: "Steam".to_string(),
+            app_id: Some(app_id),
+            exe_path,
+          });
+        }
+      }
+    }
+
+    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates
+  }
+
+  // Heroic stores Epic & GOG installs in ~/.config/heroic/
+  fn heroic_config_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+      let native = PathBuf::from(&home).join(".config/heroic");
+      if native.is_dir() { return Some(native); }
+      // Flatpak Heroic
+      let flat = PathBuf::from(&home).join(".var/app/com.heroicgameslauncher.hgl/config/heroic");
+      if flat.is_dir() { return Some(flat); }
+    }
+    None
+  }
+
+  #[derive(serde::Deserialize)]
+  struct HeroicInstalled {
+    app_name: Option<String>,
+    title: Option<String>,
+    install_path: Option<String>,
+    executable: Option<String>,
+    platform: Option<String>,
+  }
+
+  fn heroic_library(source: &str, runner: &str) -> Vec<ImportCandidate> {
+    let mut candidates = Vec::new();
+    let Some(heroic_dir) = heroic_config_dir() else { return candidates; };
+
+    let installed_path = heroic_dir.join(runner).join("installed.json");
+    let Ok(data) = fs::read_to_string(&installed_path) else { return candidates; };
+    let Ok(list) = serde_json::from_str::<Vec<HeroicInstalled>>(&data) else { return candidates; };
+
+    for entry in list {
+      let name = entry.title.unwrap_or_default();
+      if name.is_empty() { continue; }
+
+      let exe_path = if let (Some(install), Some(exe)) = (&entry.install_path, &entry.executable) {
+        let full = std::path::Path::new(install).join(exe);
+        if full.exists() {
+          Some(full.to_string_lossy().into_owned())
+        } else {
+          shared::find_best_game_exe(std::path::Path::new(install)).map(|p| p.to_string_lossy().into_owned())
+        }
+      } else if let Some(install) = &entry.install_path {
+        shared::find_best_game_exe(std::path::Path::new(install)).map(|p| p.to_string_lossy().into_owned())
+      } else {
+        None
+      };
+
+      candidates.push(ImportCandidate {
+        name,
+        source: source.to_string(),
+        app_id: entry.app_name,
+        exe_path,
+      });
+    }
+    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates
+  }
+
+  pub fn heroic_epic_library() -> Vec<ImportCandidate> {
+    heroic_library("Epic", "legendaryConfig/legendary")
+  }
+
+  pub fn heroic_gog_library() -> Vec<ImportCandidate> {
+    heroic_library("GOG", "gog_store")
   }
 }

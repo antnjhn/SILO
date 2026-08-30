@@ -71,8 +71,29 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn get_locking_pids(_path: &Path) -> Vec<u32> {
-    Vec::new()
+pub fn get_locking_pids(path: &Path) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let proc_dir = Path::new("/proc");
+    if let Ok(entries) = fs::read_dir(proc_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                if let Ok(pid) = file_name.parse::<u32>() {
+                    let fd_dir = entry.path().join("fd");
+                    if let Ok(fd_entries) = fs::read_dir(fd_dir) {
+                        for fd in fd_entries.filter_map(|e| e.ok()) {
+                            if let Ok(target) = fs::read_link(fd.path()) {
+                                if target.starts_with(path) || path.starts_with(&target) {
+                                    pids.push(pid);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pids
 }
 
 pub fn is_descendant(system: &System, target_pid: u32, ancestor_pid: u32) -> bool {
@@ -148,8 +169,21 @@ pub fn start_watcher(pid: u32, game_id: String, app_handle: AppHandle) {
         let mut base_dirs = Vec::new();
         if let Ok(dir) = path_resolver.local_data_dir() { base_dirs.push(dir); }
         if let Ok(dir) = path_resolver.data_dir() { base_dirs.push(dir); }
-        if let Ok(dir) = path_resolver.document_dir() { base_dirs.push(dir.join("My Games")); }
-        if let Ok(dir) = path_resolver.home_dir() { base_dirs.push(dir.join("Saved Games")); }
+        if let Ok(dir) = path_resolver.config_dir() { base_dirs.push(dir); }
+        if let Ok(dir) = path_resolver.document_dir() {
+            base_dirs.push(dir.clone());
+            base_dirs.push(dir.join("My Games"));
+        }
+        if let Ok(dir) = path_resolver.home_dir() {
+            base_dirs.push(dir.join("Saved Games"));
+            #[cfg(not(target_os = "windows"))]
+            {
+                base_dirs.push(dir.join(".local/share/Steam/steamapps/compatdata"));
+                base_dirs.push(dir.join(".steam/steam/steamapps/compatdata"));
+                base_dirs.push(dir.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata"));
+                base_dirs.push(dir.join(".wine/drive_c/users"));
+            }
+        }
 
         for dir in &base_dirs {
             if dir.exists() {

@@ -280,6 +280,28 @@ pub fn get_system_fonts() -> Vec<String> {
                 }
             }
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Use fontconfig's fc-list which is available on all major Linux distros
+            if let Ok(output) = Command::new("fc-list").args([":", "family"]).output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut fonts: std::collections::HashSet<String> = stdout
+                    .lines()
+                    .flat_map(|line| line.split(','))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                // Always include common Linux fonts as fallback
+                for f in ["Ubuntu", "DejaVu Sans", "Liberation Sans", "Noto Sans", "Roboto"] {
+                    fonts.insert(f.to_string());
+                }
+                let mut sorted: Vec<String> = fonts.into_iter().collect();
+                sorted.sort();
+                if !sorted.is_empty() {
+                    return sorted;
+                }
+            }
+        }
         vec!["Arial".to_string()]
     }).clone()
 }
@@ -288,8 +310,14 @@ use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 pub async fn pick_exe(app: AppHandle) -> Option<String> {
-    let file_path = app.dialog().file().add_filter("Executables", &["exe"]).blocking_pick_file();
-    file_path.map(|p| p.to_string())
+    #[cfg(target_os = "windows")]
+    let dialog = app.dialog().file().add_filter("Executables", &["exe"]);
+    #[cfg(not(target_os = "windows"))]
+    let dialog = app.dialog().file()
+        .add_filter("Executables", &["sh", "x86_64", "bin", "AppImage", "appimage"])
+        .add_filter("Wine/Proton", &["exe"])
+        .add_filter("All Files", &["*"]);
+    dialog.blocking_pick_file().map(|p| p.to_string())
 }
 
 #[tauri::command]
@@ -922,31 +950,60 @@ fn get_backups_dir(app: &AppHandle, game_id: &str) -> PathBuf {
 
 fn get_watch_directories() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(roaming) = std::env::var("APPDATA") {
-        paths.push(PathBuf::from(roaming));
-    }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let local_dir = PathBuf::from(local);
-        paths.push(local_dir.clone());
-        // Unity and other engines keep saves in LocalLow — it is a sibling of LocalAppData.
-        paths.push(local_dir.join("LocalLow"));
-    }
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        let userpath = PathBuf::from(userprofile);
-        paths.push(userpath.join("Saved Games"));
-        #[cfg(target_os = "windows")]
-        {
-            // Documents may be OneDrive-redirected; the User Shell Folders value is the
-            // real path (possibly with %VAR% tokens). Fall back to USERPROFILE\Documents.
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(roaming) = std::env::var("APPDATA") {
+            paths.push(PathBuf::from(roaming));
+        }
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let local_dir = PathBuf::from(&local);
+            paths.push(local_dir.clone());
+            paths.push(local_dir.join("LocalLow"));
+        }
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            let userpath = PathBuf::from(&userprofile);
+            paths.push(userpath.join("Saved Games"));
             if let Some(docs) = windows_documents_dir() {
                 paths.push(docs);
             } else {
                 paths.push(userpath.join("Documents"));
             }
         }
-        #[cfg(not(target_os = "windows"))]
-        paths.push(userpath.join("Documents"));
     }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let h = PathBuf::from(&home);
+            // XDG standard user data/config dirs
+            let xdg_data = std::env::var("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| h.join(".local/share"));
+            let xdg_config = std::env::var("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| h.join(".config"));
+            paths.push(xdg_data.clone());
+            paths.push(xdg_config);
+            paths.push(h.join("Documents"));
+            paths.push(h.join("Saved Games"));
+            // Proton/Wine compatdata (Steam games running through Proton store saves here)
+            let compatdata = xdg_data.join("Steam/steamapps/compatdata");
+            if compatdata.is_dir() {
+                paths.push(compatdata);
+            }
+            let flatpak_compat = h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata");
+            if flatpak_compat.is_dir() {
+                paths.push(flatpak_compat);
+            }
+            // Wine prefix
+            let wine_prefix = h.join(".wine/drive_c/users");
+            if wine_prefix.is_dir() {
+                paths.push(wine_prefix);
+            }
+        }
+    }
+
     paths.into_iter().filter(|p| p.exists() && p.is_dir()).collect()
 }
 
@@ -1466,25 +1523,46 @@ fn is_protected_dir(path: &Path) -> bool {
 
     let mut protected = Vec::new();
 
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let h = PathBuf::from(home);
-        protected.push(h.clone());
-        protected.push(h.join("Desktop"));
-        protected.push(h.join("Documents"));
-        protected.push(h.join("Downloads"));
-        protected.push(h.join("Videos"));
-        protected.push(h.join("Pictures"));
-        protected.push(h.join("Music"));
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            let h = PathBuf::from(home);
+            protected.push(h.clone());
+            protected.push(h.join("Desktop"));
+            protected.push(h.join("Documents"));
+            protected.push(h.join("Downloads"));
+            protected.push(h.join("Videos"));
+            protected.push(h.join("Pictures"));
+            protected.push(h.join("Music"));
+        }
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            protected.push(PathBuf::from(pf));
+        }
+        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+            protected.push(PathBuf::from(pf86));
+        }
+        if let Ok(sys) = std::env::var("SystemRoot") {
+            protected.push(PathBuf::from(sys));
+        }
     }
 
-    if let Ok(pf) = std::env::var("ProgramFiles") {
-        protected.push(PathBuf::from(pf));
-    }
-    if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
-        protected.push(PathBuf::from(pf86));
-    }
-    if let Ok(sys) = std::env::var("SystemRoot") {
-        protected.push(PathBuf::from(sys));
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Always protect Linux system directories
+        for sys_dir in ["/", "/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/lib64",
+                        "/boot", "/proc", "/sys", "/dev", "/run", "/tmp"] {
+            protected.push(PathBuf::from(sys_dir));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let h = PathBuf::from(home);
+            protected.push(h.clone());
+            protected.push(h.join("Desktop"));
+            protected.push(h.join("Documents"));
+            protected.push(h.join("Downloads"));
+            protected.push(h.join("Videos"));
+            protected.push(h.join("Pictures"));
+            protected.push(h.join("Music"));
+        }
     }
 
     for p in protected {
@@ -1526,23 +1604,25 @@ pub fn run_uninstaller(uninstaller_path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
+    let logs_dir = app.path().app_log_dir().unwrap_or_else(|_| app.path().app_data_dir().unwrap().join("logs"));
+    if let Err(e) = fs::create_dir_all(&logs_dir) {
+        return Err(format!("Failed to create logs folder: {}", e));
+    }
     #[cfg(target_os = "windows")]
     {
-        let logs_dir = app.path().app_log_dir().unwrap_or_else(|_| app.path().app_data_dir().unwrap().join("logs"));
-        if let Err(e) = fs::create_dir_all(&logs_dir) {
-            return Err(format!("Failed to create logs folder: {}", e));
-        }
         std::process::Command::new("explorer.exe")
             .arg(&logs_dir)
             .spawn()
             .map_err(|e| e.to_string())?;
-        return Ok(());
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = app;
-        Err("Not supported on this platform".to_string())
+        std::process::Command::new("xdg-open")
+            .arg(&logs_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 #[tauri::command]
