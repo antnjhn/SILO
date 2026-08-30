@@ -1029,15 +1029,54 @@ where
     Ok(())
 }
 
+fn find_common_root_prefix(archive: &mut zip::ZipArchive<File>) -> Option<PathBuf> {
+    let mut common_root: Option<PathBuf> = None;
+
+    for i in 0..archive.len() {
+        let file = match archive.by_index(i) {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+
+        let raw_name = file.name().replace('\\', "/");
+        let path = Path::new(&raw_name);
+
+        let mut components = path.components();
+        let first = match components.next() {
+            Some(Component::Normal(c)) => PathBuf::from(c),
+            _ => return None,
+        };
+
+        // If this entry is at the top level (only 1 component) and is NOT a directory,
+        // then it is a top-level file, so there is no single wrapping root directory.
+        if components.next().is_none() && !raw_name.ends_with('/') {
+            return None;
+        }
+
+        match &common_root {
+            None => common_root = Some(first),
+            Some(root) => {
+                if root != &first {
+                    return None;
+                }
+            }
+        }
+    }
+
+    common_root
+}
+
 fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    let common_prefix = find_common_root_prefix(&mut archive);
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
 
         // Older SILO backups may use Windows separators, so normalize them before checking.
-        let file_name = file.name().replace("\\", "/");
+        let file_name = file.name().replace('\\', "/");
         let archive_path = Path::new(&file_name);
         if archive_path.as_os_str().is_empty()
             || archive_path.is_absolute()
@@ -1048,14 +1087,27 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
             return Err(format!("Backup contains an unsafe path: {}", file.name()));
         }
 
-        let outpath = dest_dir.join(archive_path);
+        let relative_path = match &common_prefix {
+            Some(prefix) => match archive_path.strip_prefix(prefix) {
+                Ok(p) => p,
+                Err(_) => archive_path,
+            },
+            None => archive_path,
+        };
+
+        // If stripping the common prefix leaves an empty path (i.e. the root directory entry itself), skip it.
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let outpath = dest_dir.join(relative_path);
 
         if file_name.ends_with('/') {
             fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+                    fs::create_dir_all(p).map_err(|e| e.to_string())?;
                 }
             }
             let mut outfile = File::create(&outpath).map_err(|e| e.to_string())?;
@@ -1791,5 +1843,56 @@ mod tests {
 
         assert!(unzip_file(&zip_path, &dst.path()).is_err());
         assert!(relative_paths(&dst.path()).is_empty());
+    }
+
+    #[test]
+    fn unzip_strips_single_common_root_folder() {
+        let zip_tmp = TempDir::new("unzip_root_zip");
+        let dst = TempDir::new("unzip_root_dst");
+        let zip_path = zip_tmp.path().join("nested.zip");
+
+        let file = File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::FileOptions::default();
+
+        writer.add_directory("DeathStranding2/", opts).unwrap();
+        writer.start_file("DeathStranding2/savegame.dat", opts).unwrap();
+        writer.write_all(b"save_data_123").unwrap();
+        writer.start_file("DeathStranding2/sub/config.ini", opts).unwrap();
+        writer.write_all(b"res=1080").unwrap();
+        writer.finish().unwrap();
+
+        unzip_file(&zip_path, dst.path()).unwrap();
+
+        assert_eq!(
+            relative_paths(dst.path()),
+            vec!["savegame.dat", "sub", "sub/config.ini"]
+        );
+        assert_eq!(fs::read(dst.path().join("savegame.dat")).unwrap(), b"save_data_123");
+        assert_eq!(fs::read(dst.path().join("sub/config.ini")).unwrap(), b"res=1080");
+    }
+
+    #[test]
+    fn unzip_does_not_strip_when_top_level_has_mixed_files_and_folders() {
+        let zip_tmp = TempDir::new("unzip_mixed_zip");
+        let dst = TempDir::new("unzip_mixed_dst");
+        let zip_path = zip_tmp.path().join("mixed.zip");
+
+        let file = File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::FileOptions::default();
+
+        writer.start_file("root_save.dat", opts).unwrap();
+        writer.write_all(b"root").unwrap();
+        writer.start_file("sub/other.dat", opts).unwrap();
+        writer.write_all(b"other").unwrap();
+        writer.finish().unwrap();
+
+        unzip_file(&zip_path, dst.path()).unwrap();
+
+        assert_eq!(
+            relative_paths(dst.path()),
+            vec!["root_save.dat", "sub", "sub/other.dat"]
+        );
     }
 }
