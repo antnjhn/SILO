@@ -43,6 +43,7 @@
     <div id="game-list-panel">
       <div style="display: flex; align-items: center; gap: 10px; margin: 12px 0;" class="sidebar-toolbar">
         <button id="btn-settings" title="Settings / Backup" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.35); font-size: 20px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;">⚙</button>
+        <button id="btn-stats" title="Statistics" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.6); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 15v-3"/><path d="M12 15V7"/><path d="M17 15v-5"/></svg></button>
         <button id="btn-search-toggle" title="Search ( / )" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.6); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></button>
         <input type="text" id="search-input" placeholder="Search your library" autocomplete="off" />
         <button id="btn-add-game" title="Add Game (Y)" style="margin: 0;">+</button>
@@ -69,11 +70,11 @@
           <div id="details-game-name-fallback"></div>
 
           <div id="details-stats">
-            <div class="stat-block">
+            <div class="stat-block stat-hover" id="stat-block-playtime" data-stat="playtime">
               <div class="stat-value" id="stat-playtime">0h 0m</div>
               <div class="stat-label">PLAYTIME</div>
             </div>
-            <div class="stat-block">
+            <div class="stat-block stat-hover" id="stat-block-sessions" data-stat="sessions">
               <div class="stat-value" id="stat-sessions">0</div>
               <div class="stat-label">SESSIONS</div>
             </div>
@@ -92,6 +93,8 @@
               <div class="stat-label">STAGE</div>
             </div>
           </div>
+
+          <div id="save-path-status"></div>
 
           <div id="details-actions">
             <!-- Pill launch button — Performance/Xbox Mode -->
@@ -460,6 +463,39 @@
       <div id="backup-manager-list" style="display: flex; flex-direction: column; gap: 12px; max-height: 380px; overflow-y: auto; margin-bottom: 20px;"></div>
       <div style="display: flex; justify-content: flex-end;">
         <button class="glass-btn small" id="btn-backup-manager-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- STAT HOVER POPOVER (PLAYTIME / SESSIONS mini-chart) -->
+  <div id="stat-popover" class="hidden">
+    <div class="sp-title-row">
+      <span id="sp-title"></span>
+      <span id="sp-total"></span>
+    </div>
+    <div class="sp-range" id="sp-range">
+      <button type="button" class="sp-range-btn" data-days="7">WEEK</button>
+      <button type="button" class="sp-range-btn" data-days="30">MONTH</button>
+    </div>
+    <div id="sp-chart"></div>
+    <div class="sp-foot">
+      <span id="sp-summary"></span>
+      <button type="button" id="sp-open-stats">FULL STATS →</button>
+    </div>
+  </div>
+
+  <!-- STATS HUB -->
+  <div id="stats-overlay" class="hidden">
+    <div id="stats-modal" class="glass-panel settings-modal stats-modal">
+      <div class="settings-title">Statistics</div>
+      <p class="settings-desc">Session history &amp; playtime, tracked locally. History begins from this version onward.</p>
+      <div class="segmented stats-view-toggle" id="stats-view-toggle">
+        <button type="button" id="btn-stats-overall" class="active"><span>Overall Stats</span></button>
+        <button type="button" id="btn-stats-games"><span>Game Stats</span></button>
+      </div>
+      <div id="stats-content"></div>
+      <div class="settings-back-row">
+        <button type="button" id="btn-stats-close" class="settings-back">&larr; Back</button>
       </div>
     </div>
   </div>

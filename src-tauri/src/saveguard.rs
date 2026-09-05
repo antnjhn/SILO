@@ -114,6 +114,36 @@ pub fn is_descendant(system: &System, target_pid: u32, ancestor_pid: u32) -> boo
     false
 }
 
+/// True when `target_pid` is `ancestor_pid` or runs somewhere under its process tree.
+/// Unlike [`is_descendant`], which only consults the already-loaded snapshot, this
+/// refreshes each process as it climbs the parent chain — so save writes made by a
+/// game's child/helper processes are attributed even though the session snapshot only
+/// tracks the single pinned game PID. Refresh cost is one PID per step of the chain.
+pub fn pid_is_descendant_of(system: &mut System, target_pid: u32, ancestor_pid: u32) -> bool {
+    if target_pid == ancestor_pid { return true; }
+
+    let mut current_pid = target_pid;
+    for _ in 0..64 {
+        system.refresh_processes(
+            sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(current_pid)]),
+            false,
+        );
+        let parent_pid = match system.process(Pid::from_u32(current_pid)).and_then(|proc| proc.parent()) {
+            Some(parent) => parent.as_u32(),
+            // Process is gone or its parent is not visible — treat as not a descendant.
+            None => return false,
+        };
+        if parent_pid == ancestor_pid {
+            return true;
+        }
+        if parent_pid == current_pid {
+            return false; // safety valve: no meaningful parent
+        }
+        current_pid = parent_pid;
+    }
+    false
+}
+
 pub fn is_save_root_excluded(folder_name: &str) -> bool {
     let exclusions = [
         "d3dscache",
@@ -366,5 +396,18 @@ mod tests {
         let system = System::new(); // no process table loaded -> process() returns None
         assert!(!is_descendant(&system, 99_999_999, 1));
         assert!(!is_descendant(&system, 1, 99_999_999));
+    }
+
+    #[test]
+    fn pid_is_descendant_of_self_is_true() {
+        let mut system = System::new();
+        assert!(pid_is_descendant_of(&mut system, 4321, 4321));
+    }
+
+    #[test]
+    fn pid_is_descendant_of_false_for_unknown_pids() {
+        // Unknown PIDs can't be refreshed -> the climb stops -> not a descendant.
+        let mut system = System::new();
+        assert!(!pid_is_descendant_of(&mut system, 99_999_999, 1));
     }
 }

@@ -69,6 +69,7 @@ window.vault = {
   pickWallpaper: (gameId) => invoke('pick_wallpaper', { gameId }),
   pickLogo: (gameId) => invoke('pick_logo', { gameId }),
   launchGame: (gameId, xboxMode) => invoke('launch_game', { gameId, xboxMode }),
+  listSessions: () => invoke('list_sessions'),
   getSystemFonts: () => invoke('get_system_fonts'),
   onPlaytimeUpdated: async (cb) => await listen('playtime-updated', (event) => cb(event.payload)),
   windowMinimize: () => invoke('window_minimize'),
@@ -144,7 +145,40 @@ async function init() {
       applyCategoryFilter(false);
       if (detailsOpen && games[selectedIndex]?.id === updated.id) renderDetails(updated);
     }
+    hideStatPopoverNow();
   });
+
+  // ── SaveGuard status events (backed by Rust launch_game) ──
+  listen('saveguard-path-detected', (event) => {
+    const p = event.payload || {};
+    const name = gameNameById(p.gameId);
+    if (p.savePath) {
+      const idx = allGames.findIndex(x => x.id === p.gameId);
+      if (idx !== -1) { allGames[idx].savePath = p.savePath; allGames[idx].savePathSource = 'auto'; }
+      if (detailsOpen && games[selectedIndex]?.id === p.gameId) renderDetails(games[selectedIndex]);
+    }
+    showToast('success', 'SaveGuard', `${name}: save folder found and saved. Auto-backups will run from now on.`);
+  });
+  listen('saveguard-backup-complete', (event) => {
+    const p = event.payload || {};
+    const ts = p.timestamp ? ` at ${backupTimestampLabel(p.timestamp)}` : '';
+    showToast('success', 'Auto-Backup Complete', `${gameNameById(p.gameId)}: save files backed up${ts}.`);
+  });
+  listen('saveguard-backup-failed', (event) => {
+    const p = event.payload || {};
+    showToast('error', 'Auto-Backup Failed', `${gameNameById(p.gameId)}: ${p.reason || 'unknown error'}`);
+  });
+  listen('saveguard-path-missing', (event) => {
+    const p = event.payload || {};
+    showToast('info', 'Save Folder Missing', `${gameNameById(p.gameId)}: the saved folder is gone. It will be re-detected automatically on the next launch.`);
+  });
+  listen('saveguard-not-found', (event) => {
+    const p = event.payload || {};
+    showToast('info', 'SaveGuard', `${gameNameById(p.gameId)}: no save writes were detected this session. If the game saves elsewhere, set the folder manually in Edit.`);
+  });
+
+  // ── Hover mini-charts over PLAYTIME / SESSIONS ──
+  bindStatPopoverHover();
 
   if (games.length === 0) {
     document.getElementById('details-panel').classList.add('hidden');
@@ -491,6 +525,7 @@ function renderDetails(g) {
   document.getElementById('stat-playtime').textContent = fmtTime(g.playtimeMinutes);
   document.getElementById('stat-sessions').textContent = g.sessionCount || 0;
   document.getElementById('stat-last-played').textContent = fmtDate(g.lastPlayed);
+  renderSavePathStatus(g);
 
   const statusSelect = document.getElementById('details-status-select');
   if (statusSelect) {
@@ -537,7 +572,7 @@ function renderDetails(g) {
     
     restoreBtn.onclick = async () => {
       if (!g.savePath) {
-        showToast('error', 'Not Ready', 'Launch the game first to automatically detect its save folder.');
+        showToast('error', 'Not Ready', 'Launch the game — SaveGuard will find the save folder and backups will start automatically.');
         return;
       }
       
@@ -580,7 +615,7 @@ function renderDetails(g) {
 
     backupBtn.onclick = async () => {
       if (!g.savePath) {
-        showToast('error', 'Not Ready', 'Launch the game first to automatically detect its save folder.');
+        showToast('error', 'Not Ready', 'Launch the game — SaveGuard will find the save folder and backups will start automatically.');
         return;
       }
       
@@ -1518,6 +1553,12 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') document.getElementById('btn-settings-close').click();
     return;
   }
+  if (!document.getElementById('stats-overlay').classList.contains('hidden')) {
+    if (e.key === 'Escape') document.getElementById('btn-stats-close').click();
+    if (e.key === 'ArrowLeft') { e.preventDefault(); document.getElementById('btn-stats-overall').click(); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); document.getElementById('btn-stats-games').click(); }
+    return;
+  }
 
   if (categoriesOpen) {
     switch (e.key) {
@@ -1585,6 +1626,7 @@ function handlePad(pad) {
   const onlineArtOpen = !document.getElementById('online-art-overlay').classList.contains('hidden');
   const backupManagerOpen = !document.getElementById('backup-manager-overlay').classList.contains('hidden');
   const settingsOpen = !document.getElementById('settings-overlay').classList.contains('hidden');
+  const statsOpen = !document.getElementById('stats-overlay').classList.contains('hidden');
 
   const ly = pad.axes[1];
   const lx = pad.axes[0];
@@ -1597,6 +1639,16 @@ function handlePad(pad) {
   const down  = dDown  || ly >  DEADZONE;
   const right = dRight || lx >  DEADZONE;
   const left  = dLeft  || lx < -DEADZONE;
+
+  if (statsOpen) {
+    if (btnPressed(pad, 1, 'B')) document.getElementById('btn-stats-close').click();
+    if (right && !prevAxes.right) document.getElementById('btn-stats-games').click();
+    if (left && !prevAxes.left) document.getElementById('btn-stats-overall').click();
+    if (up && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; navigateStatsFocus(-1); }
+    if (down && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; navigateStatsFocus(1); }
+    prevAxes.right = right; prevAxes.left = left;
+    savePad(pad); return;
+  }
 
   if (launchOpen) {
     if (btnPressed(pad, 0, 'A')) document.getElementById('btn-launch-mode-normal').click();
@@ -1899,6 +1951,518 @@ document.getElementById('btn-import-backup').addEventListener('click', async () 
   } catch (e) {
     if (e !== 'Restore cancelled') showToast('error', 'Import Failed', e);
   }
+});
+
+/* ── Stats & SaveGuard status module ───────────────────────────────────────*/
+let popoverTimer = null;
+let popoverState = null; // { metric, gameId, days, sessions }
+let statsView = 'overall'; // 'overall' | 'games'
+let statsGameId = null;
+let statsSessions = [];
+
+function findGameById(id) {
+  if (!id) return null;
+  return allGames.find(x => x.id === id) || games.find(x => x.id === id) || null;
+}
+
+function gameNameById(id) {
+  const g = findGameById(id);
+  return g ? g.name : 'Game';
+}
+
+// Small SaveGuard status line shown under the details stats row.
+function renderSavePathStatus(g) {
+  const el = document.getElementById('save-path-status');
+  if (!el) return;
+  if (g && g.savePath) {
+    const src = String(g.savePathSource || '').toLowerCase();
+    const tag = src === 'auto' ? '<span class="sp-path-tag">AUTO</span>'
+      : src === 'manual' ? '<span class="sp-path-tag manual">MANUAL</span>'
+      : '';
+    el.innerHTML = `${tag}<span title="${esc(g.savePath)}">${esc(g.savePath)}</span>`;
+  } else {
+    el.textContent = 'SAVE FOLDER — auto-detected when you launch';
+  }
+}
+
+/* ── Date / formatting helpers ── */
+function startOfLocalDay(d) {
+  const c = new Date(d);
+  c.setHours(0, 0, 0, 0);
+  return c;
+}
+function addDaysLocal(d, n) {
+  const c = new Date(d);
+  c.setDate(c.getDate() + n);
+  return c;
+}
+function localDayKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function parseSessionDate(s) {
+  if (!s || !s.startedAt) return null;
+  const d = new Date(s.startedAt);
+  return isNaN(d.getTime()) ? null : d;
+}
+function fmtShort(min) {
+  const n = Math.max(0, Math.round(min || 0));
+  if (!n) return '0m';
+  const h = Math.floor(n / 60), m = n % 60;
+  if (h) return m ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+function fmtDayTitle(d) {
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+}
+function fmtAxisLabel(d, days) {
+  return days <= 7 ? d.toLocaleDateString('en-GB', { weekday: 'short' }) : String(d.getDate());
+}
+function fmtSessionWhen(iso) {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : d.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function backupTimestampLabel(ts) {
+  const m = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/.exec(ts || '');
+  if (!m) return ts || '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  return d.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+/* ── Activity bucketing ── */
+function buildBuckets(sessions, gameId, days) {
+  const todayStart = startOfLocalDay(new Date());
+  const rangeStart = addDaysLocal(todayStart, -(days - 1));
+  const map = new Map();
+  for (let i = 0; i < days; i++) {
+    const d = addDaysLocal(rangeStart, i);
+    map.set(localDayKey(d), { date: d, minutes: 0, count: 0 });
+  }
+  (sessions || []).forEach(s => {
+    if (gameId && s.gameId !== gameId) return;
+    const d = parseSessionDate(s);
+    if (!d) return;
+    const d0 = startOfLocalDay(d);
+    if (d0 < rangeStart || d0 > todayStart) return;
+    const b = map.get(localDayKey(d0));
+    if (!b) return;
+    b.minutes += s.minutes || 0;
+    b.count += 1;
+  });
+  return [...map.values()];
+}
+
+function hasActivityIn(sessions, gameId, days) {
+  const todayStart = startOfLocalDay(new Date());
+  const start = addDaysLocal(todayStart, -(days - 1));
+  return (sessions || []).some(s => {
+    if (gameId && s.gameId !== gameId) return false;
+    const d = parseSessionDate(s);
+    if (!d) return false;
+    const d0 = startOfLocalDay(d);
+    return d0 >= start && d0 <= todayStart;
+  });
+}
+
+function activeDayCount(sessions) {
+  const set = new Set();
+  const todayStart = startOfLocalDay(new Date());
+  (sessions || []).forEach(s => {
+    const d = parseSessionDate(s);
+    if (d && startOfLocalDay(d) <= todayStart) set.add(localDayKey(startOfLocalDay(d)));
+  });
+  return set.size;
+}
+
+/* ── Bar chart renderer (animated left→right sweep) ── */
+function renderChartBars(host, sessions, gameId, metric, days) {
+  host.innerHTML = '';
+  const buckets = buildBuckets(sessions, gameId, days);
+  const hasAny = (sessions || []).some(s => !gameId || s.gameId === gameId);
+
+  if (!buckets.some(b => b.count > 0)) {
+    const hint = hasAny
+      ? 'No sessions in this range yet.'
+      : (metric === 'sessions' ? 'No sessions tracked yet.' : 'No playtime tracked yet.');
+    host.innerHTML = `<div class="stats-empty">${hint}<br><span style="font-size:10px;color:rgba(255,255,255,0.28);">Launch a game — history appears after your first session.</span></div>`;
+    return;
+  }
+
+  const values = buckets.map(b => metric === 'sessions' ? b.count : b.minutes);
+  const max = Math.max(1, ...values);
+  const disp = buckets.map((b, i) => {
+    if (metric === 'sessions') {
+      return values[i] > 0 ? Math.max(6, Math.round(values[i] / max * 100)) : 0;
+    }
+    if (b.minutes > 0) return Math.max(6, Math.round(b.minutes / max * 100));
+    return b.count > 0 ? 4 : 0; // sub-minute play day still shows a sliver
+  });
+
+  const labelEvery = days <= 7 ? 1 : 5;
+  const cols = buckets.map((b, i) => {
+    const tip = metric === 'sessions'
+      ? `${fmtDayTitle(b.date)} — ${b.count} session${b.count === 1 ? '' : 's'}${b.minutes ? ` · ${fmtShort(b.minutes)}` : ''}`
+      : `${fmtDayTitle(b.date)} — ${fmtShort(b.minutes)} in ${b.count} session${b.count === 1 ? '' : 's'}`;
+    return `<div class="act-col${disp[i] === 0 ? ' zero' : ''}" title="${esc(tip)}"><div class="act-bar" style="transition-delay:${i * 18}ms;"></div></div>`;
+  }).join('');
+  const axis = buckets.map((b, i) =>
+    `<span>${i % labelEvery === 0 ? esc(fmtAxisLabel(b.date, days)) : ''}</span>`
+  ).join('');
+
+  host.innerHTML = `<div class="act-wrap"><div class="act-chart">${cols}</div><div class="act-axis">${axis}</div></div>`;
+
+  const chart = host.querySelector('.act-chart');
+  chart.querySelectorAll('.act-col').forEach((col, i) => {
+    col.addEventListener('mouseenter', () => col.classList.add('hovered'));
+    col.addEventListener('mouseleave', () => col.classList.remove('hovered'));
+  });
+  // Two frames later the bars are in the DOM at height 0; raise them with a stagger.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      chart.querySelectorAll('.act-col').forEach((col, i) => {
+        const bar = col.querySelector('.act-bar');
+        if (bar) bar.style.height = `${disp[i]}%`;
+      });
+    });
+  });
+}
+
+// Builds a full chart section (title + WEEK/MONTH toggle + chart) and appends it.
+function appendChartSection(parent, sessions, gameId, metric) {
+  const section = document.createElement('div');
+  section.className = 'stats-chart-section';
+
+  const head = document.createElement('div');
+  head.className = 'stats-chart-head';
+  const title = document.createElement('h4');
+  title.textContent = metric === 'sessions' ? 'Sessions per Day' : 'Playtime per Day';
+  head.appendChild(title);
+
+  const range = document.createElement('div');
+  range.className = 'sp-range';
+  const b7 = document.createElement('button');
+  b7.type = 'button'; b7.className = 'sp-range-btn'; b7.dataset.days = '7'; b7.textContent = 'WEEK';
+  const b30 = document.createElement('button');
+  b30.type = 'button'; b30.className = 'sp-range-btn'; b30.dataset.days = '30'; b30.textContent = 'MONTH';
+  range.append(b7, b30);
+  head.appendChild(range);
+  section.appendChild(head);
+
+  const host = document.createElement('div');
+  section.appendChild(host);
+
+  let days = hasActivityIn(sessions, gameId, 7) ? 7 : 30;
+  const paint = () => {
+    b7.classList.toggle('active', days === 7);
+    b30.classList.toggle('active', days === 30);
+    renderChartBars(host, sessions, gameId, metric, days);
+  };
+  b7.addEventListener('click', () => { days = 7; paint(); });
+  b30.addEventListener('click', () => { days = 30; paint(); });
+
+  paint();
+  parent.appendChild(section);
+}
+
+/* ── Overall stats ── */
+function statCardHtml(value, label) {
+  return `<div class="stat-card"><div class="sc-value">${esc(value)}</div><div class="sc-label">${esc(label)}</div></div>`;
+}
+
+function renderStatsOverall() {
+  const el = document.getElementById('stats-content');
+  el.innerHTML = '';
+
+  const totalMin = allGames.reduce((a, g) => a + (g.playtimeMinutes || 0), 0);
+  const totalSessions = allGames.reduce((a, g) => a + (g.sessionCount || 0), 0);
+  const played = allGames.filter(g => (g.sessionCount || 0) > 0).length;
+  const activeDays = activeDayCount(statsSessions);
+
+  const cards = document.createElement('div');
+  cards.className = 'stats-cards';
+  cards.innerHTML =
+    statCardHtml(fmtTime(totalMin), 'TOTAL PLAYTIME') +
+    statCardHtml(totalSessions, 'TOTAL SESSIONS') +
+    statCardHtml(played, 'GAMES PLAYED') +
+    statCardHtml(activeDays, 'DAYS ACTIVE');
+  el.appendChild(cards);
+
+  appendChartSection(el, statsSessions, null, 'playtime');
+  appendChartSection(el, statsSessions, null, 'sessions');
+
+  const ranked = [...allGames]
+    .filter(g => (g.playtimeMinutes || 0) > 0)
+    .sort((a, b) => (b.playtimeMinutes || 0) - (a.playtimeMinutes || 0))
+    .slice(0, 8);
+
+  const sec = document.createElement('div');
+  sec.className = 'stats-chart-section';
+  sec.innerHTML = '<div class="stats-chart-head"><h4>Most Played</h4></div>';
+  const rankWrap = document.createElement('div');
+  rankWrap.className = 'stats-rank';
+  if (ranked.length) {
+    const maxMin = Math.max(1, ranked[0].playtimeMinutes || 1);
+    rankWrap.innerHTML = ranked.map((g, i) => `
+      <div class="rank-row">
+        <span class="rank-pos">${i + 1}</span>
+        <span class="rank-name" title="${esc(g.name)}">${esc(g.name)}</span>
+        <span class="rank-track"><span class="rank-fill" style="width:${Math.max(2, Math.round((g.playtimeMinutes || 0) / maxMin * 100))}%"></span></span>
+        <span class="rank-time">${fmtTime(g.playtimeMinutes)}</span>
+      </div>`).join('');
+  } else {
+    rankWrap.innerHTML = '<div class="stats-empty">No playtime yet — launch a game to get started.</div>';
+  }
+  sec.appendChild(rankWrap);
+  el.appendChild(sec);
+}
+
+/* ── Game-wise stats ── */
+function renderStatsGames() {
+  const el = document.getElementById('stats-content');
+  el.innerHTML = '';
+
+  const list = [...allGames].sort((a, b) =>
+    ((b.playtimeMinutes || 0) - (a.playtimeMinutes || 0)) ||
+    ((b.sessionCount || 0) - (a.sessionCount || 0)) ||
+    String(a.name || '').localeCompare(String(b.name || ''))
+  );
+
+  if (!list.length) {
+    el.innerHTML = '<div class="stats-empty">No games in your library yet.</div>';
+    return;
+  }
+  if (!statsGameId || !list.some(g => g.id === statsGameId)) {
+    statsGameId = (list.find(g => (g.sessionCount || 0) > 0) || list[0]).id;
+  }
+
+  const layout = document.createElement('div');
+  layout.className = 'stats-games-layout';
+
+  const listCol = document.createElement('div');
+  listCol.className = 'stats-game-list';
+
+  const detailCol = document.createElement('div');
+  detailCol.className = 'stats-game-detail';
+  layout.append(listCol, detailCol);
+  el.appendChild(layout);
+
+  const paintList = () => {
+    listCol.innerHTML = list.map(g => `
+      <button type="button" class="stats-game-btn${g.id === statsGameId ? ' active' : ''}" data-game="${esc(g.id)}">
+        <span class="gb-name" title="${esc(g.name)}">${esc(g.name)}</span>
+        <span class="gb-sub">${fmtTime(g.playtimeMinutes)} · ${g.sessionCount || 0} sessions</span>
+      </button>`).join('');
+    listCol.querySelectorAll('.stats-game-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        statsGameId = btn.dataset.game;
+        paintList();
+        paintDetail();
+      });
+    });
+  };
+
+  const paintDetail = () => {
+    const game = findGameById(statsGameId);
+    detailCol.innerHTML = '';
+    if (!game) return;
+
+    const name = document.createElement('div');
+    name.className = 'gd-name';
+    name.textContent = game.name;
+    detailCol.appendChild(name);
+
+    const cards = document.createElement('div');
+    cards.className = 'stats-cards';
+    cards.innerHTML =
+      statCardHtml(fmtTime(game.playtimeMinutes), 'PLAYTIME') +
+      statCardHtml(game.sessionCount || 0, 'SESSIONS') +
+      statCardHtml(fmtDate(game.lastPlayed), 'LAST PLAYED');
+    detailCol.appendChild(cards);
+
+    appendChartSection(detailCol, statsSessions, game.id, 'playtime');
+    appendChartSection(detailCol, statsSessions, game.id, 'sessions');
+
+    const recent = statsSessions.filter(s => s.gameId === game.id).slice(0, 8);
+    if (recent.length) {
+      const sec = document.createElement('div');
+      sec.className = 'stats-chart-section';
+      sec.innerHTML = '<div class="stats-chart-head"><h4>Recent Sessions</h4></div>';
+      const listEl = document.createElement('div');
+      listEl.className = 'stats-recent';
+      listEl.innerHTML = recent.map(s => `
+        <div class="recent-row">
+          <span class="rr-time">${esc(fmtSessionWhen(s.startedAt))}</span>
+          <span class="rr-dur">${fmtShort(s.minutes)}</span>
+        </div>`).join('');
+      sec.appendChild(listEl);
+      detailCol.appendChild(sec);
+    }
+  };
+
+  paintList();
+  paintDetail();
+}
+
+function renderStatsContent() {
+  if (statsView === 'games') renderStatsGames();
+  else renderStatsOverall();
+}
+
+function setStatsView(view) {
+  statsView = view === 'games' ? 'games' : 'overall';
+  document.getElementById('btn-stats-overall').classList.toggle('active', statsView === 'overall');
+  document.getElementById('btn-stats-games').classList.toggle('active', statsView === 'games');
+  renderStatsContent();
+}
+
+function openStats(opts) {
+  hideStatPopoverNow();
+  const overlay = document.getElementById('stats-overlay');
+  overlay.classList.remove('hidden');
+  if (opts && opts.gameId) statsGameId = opts.gameId;
+  (async () => {
+    try {
+      statsSessions = await window.vault.listSessions();
+    } catch (e) {
+      statsSessions = statsSessions || [];
+    }
+    setStatsView(opts && opts.view === 'games' ? 'games' : 'overall');
+  })();
+}
+
+function closeStats() {
+  document.getElementById('stats-overlay').classList.add('hidden');
+}
+
+// Gamepad focus cycling inside the stats modal (left/right already switch the view).
+function navigateStatsFocus(delta) {
+  const focusables = [...document.querySelectorAll('#stats-content button')].filter(el => el.offsetParent !== null);
+  if (!focusables.length) return;
+  let i = focusables.indexOf(document.activeElement);
+  if (i < 0) i = delta > 0 ? -1 : 0;
+  i = (i + delta + focusables.length) % focusables.length;
+  focusables[i].focus();
+}
+
+/* ── Hover popover (PLAYTIME / SESSIONS stat blocks) ── */
+function bindStatPopoverHover() {
+  ['playtime', 'sessions'].forEach(metric => {
+    const block = document.getElementById('stat-block-' + metric);
+    if (!block) return;
+    block.addEventListener('mouseenter', () => {
+      if (!detailsOpen || !games[selectedIndex]) return;
+      openStatPopover(metric, games[selectedIndex].id);
+    });
+    block.addEventListener('mouseleave', scheduleStatPopoverHide);
+  });
+  const pv = document.getElementById('stat-popover');
+  if (pv) {
+    pv.addEventListener('mouseenter', cancelStatPopoverHide);
+    pv.addEventListener('mouseleave', scheduleStatPopoverHide);
+  }
+}
+
+function cancelStatPopoverHide() {
+  if (popoverTimer) { clearTimeout(popoverTimer); popoverTimer = null; }
+}
+
+function scheduleStatPopoverHide() {
+  cancelStatPopoverHide();
+  popoverTimer = setTimeout(hideStatPopoverNow, 240);
+}
+
+function hideStatPopoverNow() {
+  const pv = document.getElementById('stat-popover');
+  if (!pv) return;
+  pv.classList.remove('show');
+  setTimeout(() => { if (!pv.classList.contains('show')) pv.classList.add('hidden'); }, 170);
+}
+
+async function openStatPopover(metric, gameId) {
+  cancelStatPopoverHide();
+  const pv = document.getElementById('stat-popover');
+  if (!pv) return;
+  const requested = { metric, gameId };
+  popoverState = { metric, gameId, days: 7, sessions: [] };
+  pv.classList.remove('hidden');
+
+  const g = findGameById(gameId);
+  document.getElementById('sp-title').textContent =
+    `${metric === 'sessions' ? 'SESSIONS' : 'PLAYTIME'} · ${g ? g.name : ''}`;
+  document.getElementById('sp-total').textContent =
+    metric === 'sessions' ? String(g ? (g.sessionCount || 0) : 0) : fmtTime(g ? g.playtimeMinutes : 0);
+
+  let sessions = [];
+  try {
+    sessions = await window.vault.listSessions();
+  } catch (e) {
+    sessions = [];
+  }
+  // State may have changed while we fetched (e.g. hovered the other stat).
+  if (!popoverState || popoverState.metric !== requested.metric || popoverState.gameId !== requested.gameId) return;
+
+  popoverState.sessions = sessions;
+  popoverState.days = hasActivityIn(sessions, gameId, 7) ? 7 : 30;
+  renderPopoverChart();
+  positionStatPopover();
+  pv.classList.add('show');
+}
+
+function renderPopoverChart() {
+  const st = popoverState;
+  if (!st) return;
+  document.querySelectorAll('#sp-range .sp-range-btn').forEach(btn => {
+    btn.classList.toggle('active', parseInt(btn.dataset.days, 10) === st.days);
+  });
+  renderChartBars(document.getElementById('sp-chart'), st.sessions, st.gameId, st.metric, st.days);
+
+  const buckets = buildBuckets(st.sessions, st.gameId, st.days);
+  const sumMin = buckets.reduce((a, b) => a + b.minutes, 0);
+  const sumCnt = buckets.reduce((a, b) => a + b.count, 0);
+  const sum = document.getElementById('sp-summary');
+  if (sum) {
+    sum.textContent = st.metric === 'sessions'
+      ? `Last ${st.days}d · ${sumCnt} session${sumCnt === 1 ? '' : 's'} · ${fmtShort(sumMin)}`
+      : `Last ${st.days}d · ${fmtShort(sumMin)} · ${sumCnt} session${sumCnt === 1 ? '' : 's'}`;
+  }
+}
+
+function positionStatPopover() {
+  const pv = document.getElementById('stat-popover');
+  const st = popoverState;
+  if (!pv || !st) return;
+  const anchor = document.getElementById('stat-block-' + st.metric);
+  if (!anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const w = pv.offsetWidth || 302;
+  const h = pv.offsetHeight || 240;
+  const left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), window.innerWidth - w - 12);
+  const spaceBelow = window.innerHeight - r.bottom - 12;
+  const top = spaceBelow >= h * 0.55 ? r.bottom + 12 : Math.max(10, r.top - h - 12);
+  pv.style.left = Math.round(left) + 'px';
+  pv.style.top = Math.round(top) + 'px';
+}
+
+/* ── Stats UI wiring ── */
+document.getElementById('btn-stats').addEventListener('click', () => openStats({ view: 'overall' }));
+document.getElementById('btn-stats-overall').addEventListener('click', () => setStatsView('overall'));
+document.getElementById('btn-stats-games').addEventListener('click', () => setStatsView('games'));
+document.getElementById('btn-stats-close').addEventListener('click', closeStats);
+
+document.getElementById('sp-open-stats')?.addEventListener('click', () => {
+  const st = popoverState;
+  hideStatPopoverNow();
+  if (st && st.gameId) openStats({ view: 'games', gameId: st.gameId });
+  else openStats({ view: 'overall' });
+});
+
+document.querySelectorAll('#sp-range .sp-range-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const st = popoverState;
+    if (!st) return;
+    st.days = parseInt(btn.dataset.days, 10);
+    renderPopoverChart();
+    positionStatPopover();
+  });
 });
 
 /* ── Go ────────────────────────────────────────────────────────────────────*/

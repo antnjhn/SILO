@@ -378,6 +378,16 @@ fn set_launcher_background(background: bool) {
 #[cfg(not(target_os = "windows"))]
 fn set_launcher_background(_background: bool) {}
 
+/// SaveGuard should watch for save writes while a game runs when there is no usable
+/// folder yet — or when the stored folder no longer exists (game moved/reinstalled)
+/// so a fresh location gets re-found instead of silently never backing up again.
+fn save_detection_needed(save_path: Option<&str>) -> bool {
+    match save_path {
+        None => true,
+        Some(path) => !Path::new(path).is_dir(),
+    }
+}
+
 #[tauri::command]
 pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Result<(), String> {
     let games = get_games(app.clone());
@@ -425,7 +435,10 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 .to_string_lossy()
                 .into_owned();
 
-            let run_detection = save_path_clone.is_none();
+            // Watch for save writes when we have no usable folder yet — or when the stored
+            // folder has vanished (game moved/reinstalled) so a fresh location is re-found
+            // instead of silently never backing up again.
+            let run_detection = save_detection_needed(save_path_clone.as_deref());
             let mut detected_path: Option<PathBuf> = None;
             let mut watcher_opt = None;
             let mut rx_opt = None;
@@ -459,51 +472,47 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let mut pending_paths: HashSet<PathBuf> = HashSet::new();
             let mut detected_roots: HashSet<PathBuf> = HashSet::new();
             let mut last_detection_check: Option<Instant> = None;
-            // Bound the two background scanners so they don't poll for a whole session:
-            // - the full process scan (playtime PID hunt) stops after 15s
-            // - the save-detection watcher + Restart Manager stops after 90s
-            let mut gave_up_scan = false;
-            let detection_deadline = Instant::now() + std::time::Duration::from_secs(60);
+            // Wall-clock moment the game process was first seen, used for the session log.
+            let mut game_started_wall: Option<String> = None;
 
             while is_running {
                 if game_pid.is_none() {
-                    // Full-scan only while we're still hunting for the PID, capped at 15s.
-                    if !gave_up_scan && check_start.elapsed().as_secs() < 15 {
-                        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                        let mut name_match: Option<u32> = None;
-                        for (pid, proc) in system.processes() {
-                            if proc.name().to_string_lossy().to_lowercase() != exe_name.to_lowercase() {
-                                continue;
-                            }
-                            let candidate_pid = pid.as_u32();
-                            // Prefer a process spawned by our cmd instance (avoids matching a
-                            // second instance of the same game already running).
-                            if crate::saveguard::is_descendant(&system, candidate_pid, spawned_child_pid) {
-                                game_pid = Some(candidate_pid);
-                                game_is_ours = true;
-                                break;
-                            }
-                            if name_match.is_none() {
-                                name_match = Some(candidate_pid);
-                            }
+                    // Hunt for the real game PID (by name, preferring a descendant of the
+                    // cmd we spawned) for as long as it takes — some games start through a
+                    // launcher and only spawn their main process later. The 0.2.1 "perf" cap
+                    // stopped this scan after 15s and silently broke save detection for those
+                    // games, so it now runs until a PID is pinned (the full snapshot is freed
+                    // the moment we pin).
+                    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                    let mut name_match: Option<u32> = None;
+                    for (pid, proc) in system.processes() {
+                        if proc.name().to_string_lossy().to_lowercase() != exe_name.to_lowercase() {
+                            continue;
                         }
-                        // Fall back to name-only matching after a grace period (some games
-                        // launch through a launcher rather than directly from our cmd).
-                        if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
-                            game_pid = name_match;
-                            game_is_ours = false;
+                        let candidate_pid = pid.as_u32();
+                        // Prefer a process spawned by our cmd instance (avoids matching a
+                        // second instance of the same game already running).
+                        if crate::saveguard::is_descendant(&system, candidate_pid, spawned_child_pid) {
+                            game_pid = Some(candidate_pid);
+                            game_is_ours = true;
+                            break;
+                        }
+                        if name_match.is_none() {
+                            name_match = Some(candidate_pid);
                         }
                     }
-                    // Launcher-style games may never match; stop full-scanning after 15s and
-                    // just rely on the /WAIT child to signal exit.
-                    if !gave_up_scan && check_start.elapsed().as_secs() >= 15 {
-                        gave_up_scan = true;
-                        // Free the full-process snapshot instead of holding it in memory
-                        // for the rest of the session (we stop refreshing it anyway).
-                        system = sysinfo::System::new();
+                    // Fall back to name-only matching after a grace period (some games
+                    // launch through a launcher rather than directly from our cmd).
+                    if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
+                        game_pid = name_match;
+                        game_is_ours = false;
                     }
                     if game_pid.is_some() {
                         game_started_at = Some(Instant::now());
+                        game_started_wall = Some(chrono::Local::now().to_rfc3339());
+                        // Free the full-process snapshot: once pinned we only need this one
+                        // process, so drop the rest of the table to keep session RAM low.
+                        system = sysinfo::System::new();
                     }
                 } else {
                     system.refresh_processes(
@@ -512,10 +521,9 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                     );
                 }
                 
-                // Bound the save detector: once the root is found or the 60s window elapses,
-                // drop the recursive watcher + Restart Manager polling so it is never
-                // "constantly checking" for the whole session.
-                if detected_path.is_some() || Instant::now() >= detection_deadline {
+                // Drop the save watcher the moment a root is found (nothing left to watch);
+                // otherwise keep it alive for the whole session so late autosaves are caught.
+                if detected_path.is_some() {
                     if let Some(w) = watcher_opt.take() {
                         drop(w);
                     }
@@ -555,7 +563,10 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                                 }
                                 let pids = crate::saveguard::get_locking_pids(&path);
                                 for locking_pid in pids {
-                                    if crate::saveguard::is_descendant(&system, locking_pid, target_pid) {
+                                    // Refresh the writer's own ancestry so saves written by
+                                    // child/helper processes of the game are attributed too
+                                    // (the snapshot only tracks the pinned PID at this point).
+                                    if crate::saveguard::pid_is_descendant_of(&mut system, locking_pid, target_pid) {
                                         if let Some(root) = crate::saveguard::get_save_root(&path, &watch_dirs) {
                                             log::info!("SaveGuard detected save root: {:?}", root);
                                             detected_path = Some(root.clone());
@@ -610,6 +621,13 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             // Game is over — restore normal priority before the backup/playtime writes.
             set_launcher_background(false);
 
+            // Bring the launcher back BEFORE emitting save status events so the toasts
+            // are actually visible when the game exits.
+            if let Some(win) = &window {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+
             let mut final_save_path = save_path_clone;
             
             if let Some(path) = detected_path {
@@ -628,21 +646,59 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 final_save_path = Some(path_str);
             }
             
-            if let Some(ref path_str) = final_save_path {
-                let save_path = Path::new(path_str);
-                if save_path.exists() {
+            // Auto-backup after a session — and surface every outcome instead of failing
+            // silently. When a known folder has gone missing, the next launch re-runs
+            // detection (save_detection_needed) to re-find it.
+            match &final_save_path {
+                Some(path_str) => {
+                    let save_path = Path::new(path_str);
                     let backups_dir = get_backups_dir(&app, &game_id_clone);
-                    if fs::create_dir_all(&backups_dir).is_ok() {
-                        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-                        let backup_file = backups_dir.join(format!("auto_{}.zip", timestamp));
-                        
-                        if zip_dir(save_path, &backup_file).is_ok() {
-                            let _ = prune_backups(&backups_dir, backup_count_clone as usize);
-                            let _ = app.emit("saveguard-backup-complete", serde_json::json!({
-                                "gameId": game_id_clone,
-                                "timestamp": timestamp
-                            }));
+                    if save_path.exists() {
+                        match fs::create_dir_all(&backups_dir) {
+                            Ok(()) => {
+                                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                                let backup_file = backups_dir.join(format!("auto_{}.zip", timestamp));
+                                match zip_dir(save_path, &backup_file) {
+                                    Ok(()) => {
+                                        let _ = prune_backups(&backups_dir, backup_count_clone as usize);
+                                        let _ = app.emit("saveguard-backup-complete", serde_json::json!({
+                                            "gameId": game_id_clone,
+                                            "timestamp": timestamp
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        log::warn!("SaveGuard auto-backup failed for {}: {}", game_id_clone, e);
+                                        let _ = app.emit("saveguard-backup-failed", serde_json::json!({
+                                            "gameId": game_id_clone,
+                                            "reason": e
+                                        }));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("SaveGuard could not create backups dir for {}: {}", game_id_clone, e);
+                                let _ = app.emit("saveguard-backup-failed", serde_json::json!({
+                                    "gameId": game_id_clone,
+                                    "reason": e.to_string()
+                                }));
+                            }
                         }
+                    } else {
+                        log::warn!("SaveGuard known save folder missing at exit for {}: {:?}", game_id_clone, save_path);
+                        let _ = app.emit("saveguard-path-missing", serde_json::json!({
+                            "gameId": game_id_clone,
+                            "savePath": path_str
+                        }));
+                    }
+                }
+                None => {
+                    // A session ran with no usable save folder and SaveGuard could not
+                    // attribute one — surface it so the user is never left wondering.
+                    if run_detection {
+                        log::info!("SaveGuard found no save folder for {} this session", game_id_clone);
+                        let _ = app.emit("saveguard-not-found", serde_json::json!({
+                            "gameId": game_id_clone
+                        }));
                     }
                 }
             }
@@ -650,11 +706,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             // Playtime is measured from when the game process was first detected, not from spawn.
             let elapsed_secs = game_started_at.map_or(0, |started| started.elapsed().as_secs());
             let elapsed_minutes = if elapsed_secs > 0 { (elapsed_secs + 59) / 60 } else { 0 };
-
-            if let Some(win) = &window {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
 
             let mut games = get_games(app.clone());
             if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
@@ -666,6 +717,14 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 let _ = app.emit("playtime-updated", g.clone());
             }
             let _ = save_games_atomic(&app, &games);
+
+            // Record the session in the stats history. started_at is the moment we first
+            // saw the game process (fallback: exit time for sub-minute/untracked starts),
+            // and minutes uses the same ceiling as the playtime total above so they agree.
+            let session_started = game_started_wall
+                .clone()
+                .unwrap_or_else(|| chrono::Local::now().to_rfc3339());
+            record_session(&app, &game_id_clone, &session_started, elapsed_minutes as u32);
         }
     });
 
@@ -942,6 +1001,74 @@ pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>,
 // Helper functions and commands for SaveGuard
 fn get_backups_dir(app: &AppHandle, game_id: &str) -> PathBuf {
     app.path().app_data_dir().unwrap().join("backups").join(game_id)
+}
+
+// ── Session history (stats) ─────────────────────────────────────────────────
+// One row per completed play session, written at game exit in launch_game right
+// where playtime totals are updated, so the log and the aggregates always agree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    #[serde(rename = "gameId")]
+    pub game_id: String,
+    #[serde(rename = "startedAt")]
+    pub started_at: String,
+    // Whole minutes, same ceiling used to increment playtimeMinutes.
+    pub minutes: u32,
+}
+
+fn get_sessions_path(app: &AppHandle) -> PathBuf {
+    app.path().app_data_dir().unwrap().join("sessions.json")
+}
+
+fn read_sessions(app: &AppHandle) -> Vec<SessionRecord> {
+    fs::read_to_string(get_sessions_path(app))
+        .ok()
+        .and_then(|data| serde_json::from_str::<Vec<SessionRecord>>(&data).ok())
+        .unwrap_or_default()
+}
+
+fn save_sessions_atomic(app: &AppHandle, sessions: &[SessionRecord]) -> Result<(), String> {
+    let path = get_sessions_path(app);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json_str = serde_json::to_string_pretty(sessions).map_err(|e| e.to_string())?;
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        let mut file = File::create(&tmp_path).map_err(|e| e.to_string())?;
+        file.write_all(json_str.as_bytes()).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn record_session(app: &AppHandle, game_id: &str, started_at: &str, minutes: u32) {
+    let mut sessions = read_sessions(app);
+    sessions.push(SessionRecord {
+        game_id: game_id.to_string(),
+        started_at: started_at.to_string(),
+        minutes,
+    });
+    if let Err(e) = save_sessions_atomic(app, &sessions) {
+        log::warn!("Failed to record session for {}: {}", game_id, e);
+    }
+}
+
+#[tauri::command]
+pub fn list_sessions(app: AppHandle) -> Vec<SessionRecord> {
+    let mut sessions = read_sessions(&app);
+    // Newest first, bounded so a long-lived library stays light to transfer.
+    sessions.sort_by(|a, b| {
+        let ts = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|d| d.timestamp_millis())
+                .unwrap_or(0)
+        };
+        ts(&b.started_at).cmp(&ts(&a.started_at))
+    });
+    sessions.truncate(5000);
+    sessions
 }
 
 
@@ -1974,5 +2101,26 @@ mod tests {
             relative_paths(dst.path()),
             vec!["root_save.dat", "sub", "sub/other.dat"]
         );
+    }
+
+    #[test]
+    fn save_detection_needed_without_path() {
+        // No known folder -> always watch while the game runs.
+        assert!(save_detection_needed(None));
+        assert!(save_detection_needed(Some("")));
+    }
+
+    #[test]
+    fn save_detection_needed_when_stored_folder_vanished() {
+        let tmp = TempDir::new("savedetect");
+        let dir = tmp.path().join("SaveGame");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Folder exists -> no need to watch; plain exit backup covers it.
+        assert!(!save_detection_needed(Some(&dir.to_string_lossy())));
+
+        fs::remove_dir_all(&dir).unwrap();
+        // Folder gone (game moved / reinstalled / wiped) -> must re-detect.
+        assert!(save_detection_needed(Some(&dir.to_string_lossy())));
     }
 }

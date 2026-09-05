@@ -56,6 +56,7 @@ pub fn run() {
       commands::open_logs_folder,
       commands::get_all_backups,
       commands::delete_game_backups,
+      commands::list_sessions,
       metadata::fetch_metadata,
       library_import::import_steam_library,
       library_import::import_epic_library,
