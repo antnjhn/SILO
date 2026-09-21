@@ -73,16 +73,41 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
 #[cfg(not(target_os = "windows"))]
 pub fn get_locking_pids(path: &Path) -> Vec<u32> {
     let mut pids = Vec::new();
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let proc_dir = Path::new("/proc");
     if let Ok(entries) = fs::read_dir(proc_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             if let Ok(file_name) = entry.file_name().into_string() {
                 if let Ok(pid) = file_name.parse::<u32>() {
+                    // Check open file descriptors
                     let fd_dir = entry.path().join("fd");
                     if let Ok(fd_entries) = fs::read_dir(fd_dir) {
                         for fd in fd_entries.filter_map(|e| e.ok()) {
                             if let Ok(target) = fs::read_link(fd.path()) {
-                                if target.starts_with(path) || path.starts_with(&target) {
+                                if let Ok(canonical_target) = target.canonicalize() {
+                                    if canonical_target.starts_with(&canonical_path) || canonical_path.starts_with(&canonical_target) {
+                                        pids.push(pid);
+                                        break;
+                                    }
+                                } else if target.starts_with(path) || path.starts_with(&target) {
+                                    pids.push(pid);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Also check memory-mapped files (for memory-mapped saves)
+                    let map_dir = entry.path().join("map_files");
+                    if let Ok(map_entries) = fs::read_dir(map_dir) {
+                        for map_entry in map_entries.filter_map(|e| e.ok()) {
+                            if let Ok(target) = fs::read_link(map_entry.path()) {
+                                if let Ok(canonical_target) = target.canonicalize() {
+                                    if canonical_target.starts_with(&canonical_path) || canonical_path.starts_with(&canonical_target) {
+                                        pids.push(pid);
+                                        break;
+                                    }
+                                } else if target.starts_with(path) || path.starts_with(&target) {
                                     pids.push(pid);
                                     break;
                                 }
@@ -355,34 +380,56 @@ mod tests {
 
     #[test]
     fn get_save_root_returns_first_component_under_base() {
-        let base = PathBuf::from(r"C:\Users\Test\Saved Games");
-        let path = PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3\saves\game0");
-        assert_eq!(
-            get_save_root(&path, &[base.clone()]),
-            Some(PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3"))
-        );
+        #[cfg(target_os = "windows")]
+        {
+            let base = PathBuf::from(r"C:\Users\Test\Saved Games");
+            let path = PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3\saves\game0");
+            assert_eq!(
+                get_save_root(&path, &[base.clone()]),
+                Some(PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3"))
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let base = PathBuf::from("/home/test/Saved Games");
+            let path = PathBuf::from("/home/test/Saved Games/Witcher 3/saves/game0");
+            assert_eq!(
+                get_save_root(&path, &[base.clone()]),
+                Some(PathBuf::from("/home/test/Saved Games/Witcher 3"))
+            );
+        }
     }
 
     #[test]
     fn get_save_root_returns_none_for_excluded_first_component() {
-        let base = PathBuf::from(r"C:\Users\Test\AppData\Local");
-        let path = PathBuf::from(r"C:\Users\Test\AppData\Local\Temp\save\game0");
-        assert_eq!(get_save_root(&path, &[base]), None);
-    }
-
-    #[test]
-    fn get_save_root_lowercases_before_exclusion_check() {
-        // "Temp" (mixed case) is excluded because get_save_root lowercases the first component.
-        let base = PathBuf::from(r"C:\Users\Test\AppData\Local");
-        let path = PathBuf::from(r"C:\Users\Test\AppData\Local\Temp\save");
-        assert_eq!(get_save_root(&path, &[base]), None);
+        #[cfg(target_os = "windows")]
+        {
+            let base = PathBuf::from(r"C:\Users\Test\AppData\Local");
+            let path = PathBuf::from(r"C:\Users\Test\AppData\Local\Temp\save\game0");
+            assert_eq!(get_save_root(&path, &[base]), None);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let base = PathBuf::from("/home/test/.local/share");
+            let path = PathBuf::from("/home/test/.local/share/Temp/save/game0");
+            assert_eq!(get_save_root(&path, &[base]), None);
+        }
     }
 
     #[test]
     fn get_save_root_returns_none_outside_any_base() {
-        let base = PathBuf::from(r"C:\Users\Test\Saved Games");
-        let path = PathBuf::from(r"D:\Games\Witcher 3\saves");
-        assert_eq!(get_save_root(&path, &[base]), None);
+        #[cfg(target_os = "windows")]
+        {
+            let base = PathBuf::from(r"C:\Users\Test\Saved Games");
+            let path = PathBuf::from(r"D:\Games\Witcher 3\saves");
+            assert_eq!(get_save_root(&path, &[base]), None);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let base = PathBuf::from("/home/test/Saved Games");
+            let path = PathBuf::from("/mnt/games/Witcher 3/saves");
+            assert_eq!(get_save_root(&path, &[base]), None);
+        }
     }
 
     #[test]
