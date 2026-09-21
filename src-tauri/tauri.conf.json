@@ -24,7 +24,7 @@
       "csp": "default-src 'self' 'unsafe-inline' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://*.steamstatic.com https://*.steampowered.com https://*.steamgriddb.com;",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**", "$APPCONFIG/**", "$APPDATA/com.tauri.dev/**", "$HOME/.local/share/**", "$HOME/.config/**"]
+        "scope": ["$APPDATA/**", "$APPCONFIG/**", "$APPDATA/com.tauri.dev/**", "$HOME/.local/share/**", "$HOME/.config/**", "$HOME/.var/**"]
       }
     },
     "withGlobalTauri": true
@@ -48,6 +48,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1", "librsvg2-2", "libssl3", "libglib2.0-0", "libgtk-3-0", "libxdo3", "libsoup-3.0-0", "libjavascriptcoregtk-4.1-0"]
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
