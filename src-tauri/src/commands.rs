@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::time::Instant;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::PermissionsExt;
 
 
