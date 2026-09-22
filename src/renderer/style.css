@@ -364,6 +364,7 @@ html, body {
 /* ── Details Panel ────────────────────────────────────────────────────────── */
 #details-panel {
   flex: 1;
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -380,14 +381,55 @@ html, body {
 #details-panel.is-preview #details-logo-area {
   display: none;
 }
-#details-panel.is-preview #details-actions {
-  opacity: 0;
+/* Logo-first hero: when the focused game has a logo, show it big in preview
+   with the caption (if enabled) underneath. Games without a logo fall back to
+   the styled text title via #details-game-name-fallback. */
+#details-panel.is-preview.has-logo #details-logo-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 0;
+  margin: 0;
+}
+/* When 'Show game titles' is ON: hide the logo, show the text title instead. */
+body.show-game-titles #details-panel.is-preview.has-logo #details-logo-area {
+  display: none;
+}
+body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fallback {
+  display: block;
+}
+/* Keep the SaveGuard status line out of the hero's vertical centering math,
+   tucked quietly under the bottom edge of the panel instead. */
+#details-panel.is-preview.has-logo #save-path-status {
+  position: absolute;
+  left: 60px;
+  bottom: 14px;
+  max-width: min(44vw, 540px);
   pointer-events: none;
-  transform: translateY(20px);
+}
+#details-panel.is-preview.has-logo #details-logo-img {
+  max-width: min(28vw, 430px);
+  max-height: min(42vh, 330px);
+  width: auto;
+  height: auto;
+  filter: drop-shadow(0 8px 46px rgba(0,0,0,0.75));
+  will-change: transform, opacity;
+}
+/* The big text title is only for games without a logo asset
+   (unless 'Show game titles' is ON, which is handled below). */
+#details-panel.has-logo #details-game-name-fallback {
+  display: none;
+}
+body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fallback {
+  display: block;
+}
+#details-panel.is-preview #details-actions {
+  display: none;
 }
 #details-panel.is-preview #btn-close-details {
-  opacity: 0;
-  pointer-events: none;
+  display: none;
 }
 
 #details-inner { max-width: 1000px; display: flex; flex-direction: row; align-items: center; gap: 40px; }
@@ -415,9 +457,7 @@ html, body {
   letter-spacing: -0.5px; line-height: 1;
   text-shadow: 0 4px 30px rgba(0,0,0,0.8);
 }
-#details-panel.has-logo:not(.is-preview) #details-game-name-fallback {
-  display: none;
-}
+/* (fallback text hiding is handled above — logo takes over whenever it exists) */
 
 /* Stats — floating text, no boxes */
 #details-stats {
@@ -790,6 +830,32 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   border-radius: 24px; padding: 32px;
   box-shadow: var(--glass-shadow);
   position: relative; overflow: hidden;
+  transform: scale(1);
+  transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Modal opening animation: subtle scale from 0.98 to 1 */
+#modal-overlay:not(.hidden) .glass-panel,
+#restore-overlay:not(.hidden) .glass-panel,
+#backup-name-overlay:not(.hidden) .glass-panel,
+#scan-results-overlay:not(.hidden) .glass-panel,
+#uninstall-overlay:not(.hidden) .glass-panel {
+  animation: modalIn 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.98); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .glass-panel { transition: none; }
+  #modal-overlay:not(.hidden) .glass-panel,
+  #restore-overlay:not(.hidden) .glass-panel,
+  #backup-name-overlay:not(.hidden) .glass-panel,
+  #scan-results-overlay:not(.hidden) .glass-panel,
+  #uninstall-overlay:not(.hidden) .glass-panel {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 .glass-panel::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
@@ -1049,6 +1115,54 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #details-panel:not(.is-preview) #details-logo-area { animation: detailsFade 420ms cubic-bezier(0.22, 1, 0.36, 1); }
 #details-panel:not(.is-preview) #details-content { animation: detailsFade 460ms cubic-bezier(0.22, 1, 0.36, 1); }
 #details-panel.is-preview #details-logo-area { opacity: 0; transition: opacity 300ms ease; }
+#details-panel.is-preview.has-logo #details-logo-area { opacity: 1; }
+
+/* Secondary title caption under the hero logo (Settings → Display → Show game titles) */
+#details-logo-caption {
+  display: none;
+  max-width: min(30vw, 440px);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  line-height: 1.3;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.55;
+  text-shadow: 0 2px 14px rgba(0,0,0,0.8);
+}
+body.show-game-titles #details-panel.has-logo #details-logo-caption {
+  display: block;
+}
+
+/* Hero entrance — logo scales up from list size, text/stats glide in. Retriggered
+   via .hero-anim on #details-panel each time the focused game changes. */
+@keyframes heroLogoIn {
+  from { opacity: 0; transform: scale(0.45); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes heroFallbackIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes heroStatIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+#details-panel.is-preview.hero-anim.has-logo #details-logo-img {
+  transform-origin: 0% 100%;
+  animation: heroLogoIn 560ms cubic-bezier(0.2, 1.1, 0.35, 1) both;
+}
+#details-panel.is-preview.hero-anim #details-game-name-fallback {
+  animation: heroFallbackIn 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+#details-panel.is-preview.hero-anim .stat-block {
+  animation: heroStatIn 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+#details-panel.is-preview.hero-anim .stat-block:nth-child(2) { animation-delay: 60ms; }
+#details-panel.is-preview.hero-anim .stat-block:nth-child(3) { animation-delay: 120ms; }
+#details-panel.is-preview.hero-anim .stat-block:nth-child(4) { animation-delay: 180ms; }
 
 /* ── Number inputs in the modal ──────────────────────────────────────────── */
 .field-group input[type="number"] {
@@ -1183,7 +1297,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
    #uninstall-modal, Backup Name #backup-name-modal. No icons on buttons. */
 
 /* Modal panels — flat surface-1, no blur, no border (overrides .glass-panel) */
-#modal, #settings-modal, #uninstall-modal, #backup-name-modal {
+#modal, #settings-modal, #uninstall-modal, #backup-name-modal, #restore-modal {
   background: var(--surface-1);
   border: none;
   border-radius: 8px;
@@ -1191,6 +1305,74 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   color: var(--text);
+}
+/* Restore Save dialog polish */
+#restore-modal {
+  padding: 32px;
+  width: 400px; max-width: 95vw;
+}
+#restore-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 4px;
+  font-weight: 800;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+#restore-subtitle {
+  font-size: 12px;
+  color: rgba(255,255,255,0.45);
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+#restore-list {
+  gap: 8px;
+  max-height: 220px;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+#restore-actions {
+  gap: 8px;
+  margin-top: 6px;
+}
+.restore-item {
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+}
+.restore-item:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.12);
+}
+/* Name Your Backup dialog polish */
+#backup-name-modal {
+  padding: 32px;
+  width: 350px; max-width: 95vw;
+}
+#backup-name-modal > div:first-child {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 4px;
+  font-weight: 800;
+  color: var(--text);
+}
+#backup-name-modal > div:nth-child(2) {
+  font-size: 12px;
+  color: rgba(255,255,255,0.45);
+  line-height: 1.5;
+}
+#backup-name-modal .glass-input {
+  font-size: 13px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 6px;
+}
+#backup-name-modal .glass-input:focus {
+  border-color: rgba(255,255,255,0.25);
+  outline: none;
 }
 #modal::before, #modal::after,
 #settings-modal::before, #settings-modal::after,
@@ -1972,3 +2154,188 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 .stats-modal::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 3px; }
 .stats-game-list::-webkit-scrollbar { width: 4px; }
 .stats-game-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 2px; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PLAY TIME TREND-LINE (SVG area chart)
+   ═══════════════════════════════════════════════════════════════════════════ */
+.sp-trend {
+  display: block;
+  width: 100%;
+  height: 96px;
+  overflow: visible;
+}
+.sp-trend .sp-base {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+.sp-trend .sp-line {
+  fill: none;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sp-trend .sp-area { opacity: 0.9; }
+.sp-trend .sp-end-dot {
+  fill: #f4fff8;
+  stroke: #0d0d16;
+  stroke-width: 1.4;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.sp-trend .sp-end-glow {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+.sp-trend-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3px;
+  font-size: 8px;
+  letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.35);
+  text-transform: uppercase;
+}
+
+/* Draw-in animation (runs every time the playtime chart is opened / re-rendered) */
+.sp-trend.sp-anim .sp-line {
+  stroke-dasharray: 1;
+  animation: spLineDraw 0.68s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes spLineDraw {
+  from { stroke-dashoffset: 1; }
+  to   { stroke-dashoffset: 0; }
+}
+/* Area fades in ~100ms after the line starts drawing */
+.sp-trend.sp-anim .sp-area {
+  animation: spAreaFade 0.5s ease 0.1s both;
+}
+@keyframes spAreaFade {
+  from { opacity: 0; }
+  to   { opacity: 0.9; }
+}
+/* Endpoint dot appears last, with a small spring-like settle */
+.sp-trend.sp-anim .sp-end-dot {
+  animation: spDotIn 0.34s cubic-bezier(0.34, 1.56, 0.64, 1) 0.58s both;
+}
+@keyframes spDotIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to   { opacity: 1; transform: scale(1); }
+}
+/* Streak state: slow, subtle pulsing glow behind the final point */
+.sp-trend.sp-anim.sp-streak .sp-end-glow {
+  animation: spGlowPulse 1.5s ease-in-out 0.85s infinite;
+}
+@keyframes spGlowPulse {
+  0%, 100% { transform: scale(1);    opacity: 0.35; }
+  50%      { transform: scale(1.15); opacity: 0.7; }
+}
+
+/* Small streak flame next to the total-hours value in the playtime popover */
+#sp-flame {
+  display: inline-flex;
+  align-items: center;
+  color: var(--green);
+  opacity: 0;
+  transform: translateY(1px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+  filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.55));
+}
+#sp-flame.show { opacity: 1; transform: none; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SETTINGS — DISPLAY TOGGLE
+   ═══════════════════════════════════════════════════════════════════════════ */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  cursor: pointer;
+}
+.toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.toggle-title { font-size: 14px; font-weight: 600; color: #F5F5F5; }
+.toggle-sub { font-size: 12px; color: #9A9A9A; line-height: 1.45; }
+.toggle-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  transition: background 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+.toggle-track.on {
+  background: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 12px rgba(74, 222, 128, 0.35);
+}
+.toggle-track input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  transition: transform 200ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.toggle-track.on .toggle-thumb { transform: translateX(18px); }
+.toggle-track input:focus-visible + .toggle-thumb {
+  outline: 2px solid rgba(74, 222, 128, 0.7);
+  outline-offset: 3px;
+}
+
+/* Hero sizing on narrower windows: keep the logo left-of-center and the stats
+   readable without ever covering the artwork on the right. */
+@media (max-width: 1500px) {
+  #details-panel.is-preview.has-logo #details-logo-img {
+    max-width: min(24vw, 400px);
+  }
+  #details-panel.is-preview #details-inner { gap: 32px; }
+  #details-panel.is-preview #details-stats { gap: 40px; }
+}
+@media (max-width: 1200px) {
+  #details-panel.is-preview.has-logo #details-logo-img {
+    max-width: min(22vw, 330px);
+  }
+  #details-panel.is-preview #details-inner { gap: 22px; }
+  #details-panel.is-preview #details-stats { gap: 24px; }
+  #details-panel.is-preview .stat-value,
+  #details-panel.is-preview .status-select { font-size: 18px; }
+  #details-panel.is-preview #details-content { gap: 14px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   REDUCED MOTION — keep hierarchy/functionality, drop reveal & pulse motion
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  .sp-trend.sp-anim .sp-line,
+  .sp-trend.sp-anim .sp-area,
+  .sp-trend.sp-anim .sp-end-dot { animation: none; }
+  .sp-trend.sp-anim.sp-streak .sp-end-glow { animation: none; opacity: 0.45; }
+  .sp-trend .sp-end-glow { opacity: 0; }
+  #details-panel.is-preview.hero-anim.has-logo #details-logo-img,
+  #details-panel.is-preview.hero-anim #details-game-name-fallback,
+  #details-panel.is-preview.hero-anim .stat-block { animation: none; }
+  #sp-flame { transition: none; }
+}

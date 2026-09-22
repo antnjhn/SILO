@@ -12,6 +12,8 @@ pub struct Settings {
   pub sgdb_api_key: Option<String>,
   #[serde(rename = "checkUpdatesOnLaunch")]
   pub check_updates_on_launch: bool,
+  #[serde(rename = "showGameTitles")]
+  pub show_game_titles: bool,
 }
 
 impl Default for Settings {
@@ -19,6 +21,7 @@ impl Default for Settings {
     Settings {
       sgdb_api_key: None,
       check_updates_on_launch: true,
+      show_game_titles: false,
     }
   }
 }
