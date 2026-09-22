@@ -65,6 +65,7 @@
       <div id="details-inner">
         <div id="details-logo-area">
           <img id="details-logo-img" src="" alt="" />
+          <div id="details-logo-caption" aria-hidden="true"></div>
         </div>
         <div id="details-content">
           <div id="details-game-name-fallback"></div>
@@ -430,6 +431,20 @@
       </div>
 
       <div class="settings-section">
+        <h3 class="settings-section-title">Display</h3>
+        <label class="settings-toggle-row" for="input-show-game-titles">
+          <span class="toggle-copy">
+            <span class="toggle-title">Show game titles</span>
+            <span class="toggle-sub">Display the game name as text alongside its logo.</span>
+          </span>
+          <span class="toggle-track">
+            <input type="checkbox" id="input-show-game-titles" />
+            <span class="toggle-thumb"></span>
+          </span>
+        </label>
+      </div>
+
+      <div class="settings-section">
         <h3 class="settings-section-title">Preferences</h3>
         <label class="settings-check">
           <input type="checkbox" id="input-check-updates" />
@@ -471,7 +486,10 @@
   <div id="stat-popover" class="hidden">
     <div class="sp-title-row">
       <span id="sp-title"></span>
-      <span id="sp-total"></span>
+      <span style="display:inline-flex; align-items:center; gap:6px;">
+        <span id="sp-flame" title="Active play streak"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg></span>
+        <span id="sp-total"></span>
+      </span>
     </div>
     <div class="sp-range" id="sp-range">
       <button type="button" class="sp-range-btn" data-days="7">WEEK</button>

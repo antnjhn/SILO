@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::time::Instant;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::PermissionsExt;
 
 
@@ -1320,10 +1321,14 @@ where
         .compression_method(zip::CompressionMethod::Deflated);
 
     let walkdir = WalkDir::new(src_dir);
+    let mut files_added: u32 = 0;
+    let mut skipped: u32 = 0;
     for entry in walkdir.into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        let name = path.strip_prefix(src_dir)
-            .map_err(|e| e.to_string())?;
+        let name = match path.strip_prefix(src_dir) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
 
         if exclude(name) {
             continue;
@@ -1332,16 +1337,33 @@ where
         let zip_name = name.to_string_lossy().replace("\\", "/");
 
         if path.is_file() {
-            zip.start_file(zip_name, options)
-                .map_err(|e| e.to_string())?;
-            let mut f = File::open(path).map_err(|e| e.to_string())?;
-            let mut buffer = Vec::new();
-            f.read_to_end(&mut buffer).map_err(|e| e.to_string())?;
-            zip.write_all(&buffer).map_err(|e| e.to_string())?;
+            // Try to read the file; if locked or inaccessible, skip it silently
+            // so the rest of the backup can still be created.
+            if let Ok(mut f) = File::open(path) {
+                if zip.start_file(&zip_name, options).is_ok() {
+                    let mut buffer = Vec::new();
+                    if f.read_to_end(&mut buffer).is_ok() {
+                        if zip.write_all(&buffer).is_ok() {
+                            files_added += 1;
+                        } else {
+                            skipped += 1;
+                        }
+                    } else {
+                        skipped += 1;
+                    }
+                } else {
+                    skipped += 1;
+                }
+            } else {
+                skipped += 1;
+            }
         } else if !name.as_os_str().is_empty() {
-            zip.add_directory(zip_name, options)
-                .map_err(|e| e.to_string())?;
+            let _ = zip.add_directory(zip_name, options);
         }
+    }
+    log::info!("Zip completed: {} files added, {} skipped", files_added, skipped);
+    if files_added == 0 {
+        return Err("No files could be read from the save directory — it may be empty or all files are locked".to_string());
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(())
@@ -1974,7 +1996,13 @@ pub async fn backup_library(app: AppHandle) -> Result<String, String> {
             }
             false
         };
-        zip_dir_filtered(&app_data_dir, std::path::Path::new(&dest_path.to_string()), exclude)?;
+        log::info!("Starting library backup: app_data_dir={:?}, dest={:?}", app_data_dir, dest_path);
+        let result = zip_dir_filtered(&app_data_dir, std::path::Path::new(&dest_path.to_string()), exclude);
+        match &result {
+            Ok(()) => log::info!("Library backup completed successfully"),
+            Err(e) => log::error!("Library backup failed: {}", e),
+        }
+        result?;
         return Ok(dest_path.to_string());
     }
     Err("Backup cancelled".into())
@@ -1985,7 +2013,13 @@ pub async fn restore_library(app: AppHandle) -> Result<String, String> {
     let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).blocking_pick_file();
     if let Some(src_path) = file_path {
         let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
-        unzip_file(std::path::Path::new(&src_path.to_string()), &app_data_dir)?;
+        log::info!("Starting library restore: src={:?}, dest={:?}", src_path, app_data_dir);
+        let result = unzip_file(std::path::Path::new(&src_path.to_string()), &app_data_dir);
+        match &result {
+            Ok(()) => log::info!("Library restore completed successfully"),
+            Err(e) => log::error!("Library restore failed: {}", e),
+        }
+        result?;
         return Ok("Library restored successfully".into());
     }
     Err("Restore cancelled".into())

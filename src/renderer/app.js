@@ -12,6 +12,8 @@ let modalWallpaperPath = null;
 let modalLogoPath = null;
 let searchQuery = '';
 let sortMode = 'name'; // 'name' | 'playtime' | 'recent'
+let showGameTitles = false; // 'Show game titles' Display setting
+let lastHeroRenderedId = null;
 
 // Gamepad
 const DEADZONE = 0.4;
@@ -120,6 +122,13 @@ function showToast(type, title, msg) {
 /* ── Init ──────────────────────────────────────────────────────────────────*/
 async function init() {
   allGames = await window.vault.getGames();
+  try {
+    const s = await window.vault.getSettings();
+    showGameTitles = !!s.showGameTitles;
+  } catch (e) {
+    showGameTitles = false;
+  }
+  applyShowGameTitles(false);
   applyCategoryFilter();
   requestAnimationFrame(pollGamepad);
 
@@ -187,7 +196,10 @@ async function init() {
     document.getElementById('details-panel').classList.remove('hidden');
     document.getElementById('details-panel').classList.add('is-preview');
     document.getElementById('empty-state').style.display = 'none';
-    if (!detailsOpen) renderDetails(games[selectedIndex]);
+    if (!detailsOpen) {
+      renderDetails(games[selectedIndex]);
+      retriggerHeroAnimation();
+    }
   }
 }
 
@@ -268,6 +280,15 @@ function applyCategoryFilter(resetIndex = true) {
   renderGameList();
   centerActiveItem(false);
   crossfadeWallpaper();
+
+  // Keep the preview hero in sync with the newly focused game (category/search changes).
+  if (!detailsOpen && games.length) {
+    const cur = games[selectedIndex];
+    if (cur && lastHeroRenderedId !== cur.id) {
+      renderDetails(cur);
+      retriggerHeroAnimation();
+    }
+  }
 }
 
 function renderGameList() {
@@ -408,6 +429,19 @@ function selectGame(i) {
   centerActiveItem(true);
   crossfadeWallpaper();
   if (games[i]) renderDetails(games[i]);
+  if (!detailsOpen) retriggerHeroAnimation();
+}
+
+/* Re-run the hero entrance (logo scales up, stats glide in) whenever the focused
+   game changes. Remove + re-add the class inside one frame so rapid scrolling
+   cleanly interrupts the previous animation instead of getting stuck. */
+function retriggerHeroAnimation() {
+  if (detailsOpen) return;
+  const panel = document.getElementById('details-panel');
+  if (!panel || panel.classList.contains('hidden')) return;
+  panel.classList.remove('hero-anim');
+  void panel.offsetWidth; // force reflow so the animation restarts
+  panel.classList.add('hero-anim');
 }
 
 function updateGameListSelection() {
@@ -521,6 +555,15 @@ function renderDetails(g) {
   fallback.style.color = g.fontColor || 'inherit';
   if (g.fontFamily) fallback.classList.add('game-title-styled');
   else fallback.classList.remove('game-title-styled');
+
+  // Secondary title caption under the hero logo (shown only when enabled).
+  const caption = document.getElementById('details-logo-caption');
+  if (caption) {
+    caption.textContent = g.name;
+    caption.style.fontFamily = g.fontFamily ? `'${g.fontFamily}', 'Inter', sans-serif` : 'inherit';
+    caption.style.color = g.fontColor || '#fff';
+  }
+  lastHeroRenderedId = g.id;
 
   document.getElementById('stat-playtime').textContent = fmtTime(g.playtimeMinutes);
   document.getElementById('stat-sessions').textContent = g.sessionCount || 0;
@@ -1752,14 +1795,55 @@ function parseTags(val) {
 }
 
 /* ── Settings & Backup ─────────────────────────────────────────────────────*/
-document.getElementById('btn-settings').addEventListener('click', async () => {
+let cachedSettings = null;
+
+// Applies the 'Show game titles' preference to the live UI (body class drives CSS).
+function applyShowGameTitles(syncCheckbox = true) {
+  document.body.classList.toggle('show-game-titles', !!showGameTitles);
+  const track = document.querySelector('.toggle-track');
+  if (track) track.classList.toggle('on', !!showGameTitles);
+  if (syncCheckbox) {
+    const cb = document.getElementById('input-show-game-titles');
+    if (cb) cb.checked = !!showGameTitles;
+  }
+}
+
+async function openSettingsModal() {
   document.getElementById('settings-overlay').classList.remove('hidden');
   try {
     const s = await window.vault.getSettings();
+    cachedSettings = s;
+    showGameTitles = !!s.showGameTitles;
     document.getElementById('input-sgdb-key').value = s.sgdbApiKey || '';
     document.getElementById('input-check-updates').checked = !!s.checkUpdatesOnLaunch;
+    applyShowGameTitles();
   } catch (err) {
     console.error(err);
+  }
+}
+
+document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
+
+// Toggle applies immediately (no Save required) and persists the whole settings object.
+document.getElementById('input-show-game-titles')?.addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  showGameTitles = on;
+  applyShowGameTitles();
+  const base = cachedSettings || {
+    sgdbApiKey: document.getElementById('input-sgdb-key').value.trim() || null,
+    checkUpdatesOnLaunch: document.getElementById('input-check-updates').checked,
+  };
+  base.showGameTitles = on;
+  try {
+    await window.vault.setSettings({
+      settings: {
+        sgdbApiKey: base.sgdbApiKey || null,
+        checkUpdatesOnLaunch: !!base.checkUpdatesOnLaunch,
+        showGameTitles: on,
+      },
+    });
+  } catch (err) {
+    showToast('error', 'Save Failed', err);
   }
 });
 document.getElementById('btn-settings-close').addEventListener('click', () => {
@@ -1774,8 +1858,11 @@ document.getElementById('settings-advanced-toggle')?.addEventListener('click', (
 document.getElementById('btn-save-settings').addEventListener('click', async () => {
   const sgdbApiKey = document.getElementById('input-sgdb-key').value.trim() || null;
   const checkUpdatesOnLaunch = document.getElementById('input-check-updates').checked;
+  showGameTitles = document.getElementById('input-show-game-titles').checked;
+  applyShowGameTitles();
   try {
-    await window.vault.setSettings({ settings: { sgdbApiKey, checkUpdatesOnLaunch } });
+    await window.vault.setSettings({ settings: { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles } });
+    cachedSettings = { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles };
     showToast('success', 'Settings Saved', 'Settings have been saved.');
   } catch (err) {
     showToast('error', 'Save Failed', err);
@@ -2126,6 +2213,113 @@ function renderChartBars(host, sessions, gameId, metric, days) {
   });
 }
 
+/* ── Playtime trend-line (SVG area chart) ───────────────────────────────────*/
+let trendGradSeq = 0;
+
+// Right-most run of consecutive active days (minutes > 0).
+function trendRun(buckets) {
+  let end = -1;
+  for (let i = buckets.length - 1; i >= 0; i--) {
+    if (buckets[i].minutes > 0) { end = i; break; }
+  }
+  if (end === -1) return null;
+  let len = 0;
+  for (let i = end; i >= 0 && buckets[i].minutes > 0; i--) len++;
+  return { end, len };
+}
+
+// A streak counts when 3+ consecutive play days are still "live" (they reach
+// today or yesterday, so a run already broken by idle days stays normal).
+function isActiveStreak(buckets) {
+  const run = trendRun(buckets);
+  return !!run && run.len >= 3 && run.end >= buckets.length - 2;
+}
+
+function setPopoverFlame(on, delay) {
+  const flame = document.getElementById('sp-flame');
+  if (!flame) return;
+  if (flame._timer) { clearTimeout(flame._timer); flame._timer = null; }
+  flame.classList.remove('show');
+  if (!on) return;
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (reduced) { flame.classList.add('show'); return; }
+  flame._timer = setTimeout(() => flame.classList.add('show'), delay || 760);
+}
+
+// SVG playtime trend-line with a left→right draw-in, soft area fill, endpoint
+// dot and — for active streaks — a dim→bright gradient plus a pulsing glow.
+// Returns whether an active streak was detected.
+function renderTrendLine(host, sessions, gameId, days, metric = 'playtime') {
+  host.innerHTML = '';
+  const buckets = buildBuckets(sessions, gameId, days);
+  const hasAny = (sessions || []).some(s => !gameId || s.gameId === gameId);
+  const isSessions = metric === 'sessions';
+  const value = (b) => isSessions ? b.count : b.minutes;
+  const emptyMsg = isSessions ? 'No sessions in this range yet.' : 'No playtime in this range yet.';
+  const noDataMsg = isSessions ? 'No sessions tracked yet.' : 'No playtime tracked yet.';
+
+  if (!buckets.some(b => value(b) > 0)) {
+    const hint = hasAny ? emptyMsg : noDataMsg;
+    host.innerHTML = `<div class="stats-empty">${hint}<br><span style="font-size:10px;color:rgba(255,255,255,0.28);">Launch a game — history appears after your first session.</span></div>`;
+    return false;
+  }
+
+  const streak = isActiveStreak(buckets);
+  const n = buckets.length;
+  const H = 96;
+  const W = Math.max(140, Math.floor(host.clientWidth) || 260);
+  const padX = 8;
+  const top = 8;
+  const bottom = H - 8;
+  const span = Math.max(1, W - padX * 2);
+  const maxVal = Math.max(1, ...buckets.map(b => value(b)));
+  const x = (i) => padX + (n === 1 ? span / 2 : (span * i) / (n - 1));
+  const y = (v) => (v > 0 ? top + (1 - Math.min(1, v / maxVal)) * (bottom - top - 6) : bottom);
+
+  const pts = buckets.map((b, i) => `${x(i).toFixed(1)},${y(value(b)).toFixed(1)}`);
+  const lineD = `M${pts.join(' L')}`;
+  const areaD = `${lineD} L${x(n - 1).toFixed(1)},${bottom} L${x(0).toFixed(1)},${bottom} Z`;
+  const lastX = x(n - 1);
+  const lastY = y(value(buckets[n - 1]));
+
+  const seq = ++trendGradSeq;
+  const lineGrad = `tl-line-${seq}`;
+  const areaGrad = `tl-area-${seq}`;
+  const glowGrad = `tl-glow-${seq}`;
+  const lineStroke = streak ? `url(#${lineGrad})` : '#4ade80';
+
+  host.innerHTML = `
+  <svg class="sp-trend${streak ? ' streak' : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <defs>
+      <linearGradient id="${lineGrad}" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#3fae70" />
+        <stop offset="100%" stop-color="#86eeb0" />
+      </linearGradient>
+      <linearGradient id="${areaGrad}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#4ade80" stop-opacity="0.16" />
+        <stop offset="100%" stop-color="#4ade80" stop-opacity="0" />
+      </linearGradient>
+      <radialGradient id="${glowGrad}">
+        <stop offset="0%" stop-color="#4ade80" stop-opacity="0.42" />
+        <stop offset="100%" stop-color="#4ade80" stop-opacity="0" />
+      </radialGradient>
+    </defs>
+    <line class="sp-base" x1="${padX}" y1="${bottom}" x2="${W - padX}" y2="${bottom}" />
+    <path class="sp-area" d="${areaD}" fill="url(#${areaGrad})" />
+    <path class="sp-line" d="${lineD}" pathLength="1" stroke="${lineStroke}" />
+    ${streak ? `<circle class="sp-end-glow" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="10" fill="url(#${glowGrad})" />` : ''}
+    <circle class="sp-end-dot" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3" />
+  </svg>
+  <div class="sp-trend-axis">
+    <span>${esc(fmtDayTitle(buckets[0].date))}</span>
+    <span>${esc(fmtDayTitle(buckets[n - 1].date))}</span>
+  </div>`;
+
+  const svg = host.querySelector('.sp-trend');
+  if (svg) svg.classList.add('sp-anim');
+  return streak;
+}
+
 // Builds a full chart section (title + WEEK/MONTH toggle + chart) and appends it.
 function appendChartSection(parent, sessions, gameId, metric) {
   const section = document.createElement('div');
@@ -2154,7 +2348,7 @@ function appendChartSection(parent, sessions, gameId, metric) {
   const paint = () => {
     b7.classList.toggle('active', days === 7);
     b30.classList.toggle('active', days === 30);
-    renderChartBars(host, sessions, gameId, metric, days);
+    renderTrendLine(host, sessions, gameId, days, metric);
   };
   b7.addEventListener('click', () => { days = 7; paint(); });
   b30.addEventListener('click', () => { days = 30; paint(); });
@@ -2413,7 +2607,10 @@ function renderPopoverChart() {
   document.querySelectorAll('#sp-range .sp-range-btn').forEach(btn => {
     btn.classList.toggle('active', parseInt(btn.dataset.days, 10) === st.days);
   });
-  renderChartBars(document.getElementById('sp-chart'), st.sessions, st.gameId, st.metric, st.days);
+  const chartHost = document.getElementById('sp-chart');
+  // Both playtime and sessions use the trend-line chart in the popover.
+  const streak = renderTrendLine(chartHost, st.sessions, st.gameId, st.days, st.metric);
+  setPopoverFlame(!!streak, 800);
 
   const buckets = buildBuckets(st.sessions, st.gameId, st.days);
   const sumMin = buckets.reduce((a, b) => a + b.minutes, 0);
@@ -2436,8 +2633,8 @@ function positionStatPopover() {
   const w = pv.offsetWidth || 302;
   const h = pv.offsetHeight || 240;
   const left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), window.innerWidth - w - 12);
-  const spaceBelow = window.innerHeight - r.bottom - 12;
-  const top = spaceBelow >= h * 0.55 ? r.bottom + 12 : Math.max(10, r.top - h - 12);
+  // Always position the popover above the stat block.
+  const top = Math.max(10, r.top - h - 12);
   pv.style.left = Math.round(left) + 'px';
   pv.style.top = Math.round(top) + 'px';
 }
