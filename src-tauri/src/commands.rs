@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::time::Instant;
+use std::os::unix::fs::PermissionsExt;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,7 +377,9 @@ fn set_launcher_background(background: bool) {
     }
 }
 #[cfg(not(target_os = "windows"))]
-fn set_launcher_background(_background: bool) {}
+fn set_launcher_background(_background: bool) {
+    // Disabled for now - renice/ionice may cause issues on some systems
+}
 
 /// SaveGuard should watch for save writes while a game runs when there is no usable
 /// folder yet — or when the stored folder no longer exists (game moved/reinstalled)
@@ -386,6 +389,135 @@ fn save_detection_needed(save_path: Option<&str>) -> bool {
         None => true,
         Some(path) => !Path::new(path).is_dir(),
     }
+}
+
+/// Determines how to launch a game on Linux based on the executable path.
+/// Returns (command_name, args, working_dir_override)
+#[cfg(not(target_os = "windows"))]
+fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<PathBuf>) {
+    let path = Path::new(exe_path);
+    
+    // If it's a steam:// URL, use steam-run or xdg-open
+    if exe_path.starts_with("steam://") {
+        if Command::new("steam-run").arg("--version").output().is_ok() {
+            return ("steam-run".to_string(), vec![exe_path.to_string()], None);
+        }
+        // Fallback to xdg-open for steam:// URLs
+        return ("xdg-open".to_string(), vec![exe_path.to_string()], None);
+    }
+    
+    // Check if it's an AppImage
+    if exe_path.ends_with(".AppImage") || exe_path.ends_with(".appimage") {
+        let args = vec![exe_path.to_string()];
+        // Ensure it's executable
+        let _ = fs::metadata(path).map(|m| {
+            let mut perms = m.permissions();
+            perms.set_mode(0o755);
+            let _ = fs::set_permissions(path, perms);
+        });
+        return (exe_path.to_string(), args, path.parent().map(|p| p.to_path_buf()));
+    }
+    
+    // Check if it's a shell script
+    if exe_path.ends_with(".sh") {
+        return ("bash".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+    }
+    
+    // Check if it's a Windows executable (.exe) - likely Wine/Proton
+    if exe_path.ends_with(".exe") || exe_path.ends_with(".EXE") {
+        // Check if it's in a Steam compatdata directory (Proton)
+        let path_str = exe_path.to_string();
+        if path_str.contains("compatdata") && path_str.contains("steamapps") {
+            // This is a Steam Proton game - try to use steam-run or run via proton directly
+            // Find the proton runtime
+            if let Some(proton_dir) = find_proton_runtime(&path) {
+                if let Some(proton_bin) = proton_dir.join("proton").to_str() {
+                    let args = vec!["run".to_string(), exe_path.to_string()];
+                    return (proton_bin.to_string(), args, path.parent().map(|p| p.to_path_buf()));
+                }
+            }
+            // Fallback: try steam-run
+            if Command::new("steam-run").arg("--version").output().is_ok() {
+                return ("steam-run".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+            }
+            // Last resort: wine
+            return ("wine".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+        }
+        
+        // Check if it's in a Wine prefix
+        if path_str.contains(".wine") || path_str.contains("drive_c") {
+            return ("wine".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+        }
+        
+        // Generic .exe - try wine
+        return ("wine".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+    }
+    
+    // For native Linux binaries, check if it's actually an ELF binary
+    if let Ok(metadata) = fs::metadata(path) {
+        if metadata.is_file() {
+            // Check for ELF magic bytes
+            if let Ok(mut file) = File::open(path) {
+                let mut magic = [0u8; 4];
+                if file.read_exact(&mut magic).is_ok() {
+                    if &magic == b"\x7fELF" {
+                        // Native Linux binary
+                        return (exe_path.to_string(), vec![], path.parent().map(|p| p.to_path_buf()));
+                    }
+                    // Check for shebang
+                    if &magic[..2] == b"#!" {
+                        // Script with shebang - execute directly
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o755);
+                        let _ = fs::set_permissions(path, perms);
+                        return (exe_path.to_string(), vec![], path.parent().map(|p| p.to_path_buf()));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Default: try to execute directly
+    (exe_path.to_string(), vec![], path.parent().map(|p| p.to_path_buf()))
+}
+
+/// Try to find the Proton runtime for a Steam game
+#[cfg(not(target_os = "windows"))]
+fn find_proton_runtime(game_exe_path: &Path) -> Option<PathBuf> {
+    // Walk up the path to find compatdata/<appid>/ and then look for proton in the steam installation
+    let mut current = game_exe_path;
+    while let Some(parent) = current.parent() {
+        let parent_str = parent.to_string_lossy();
+        if parent_str.contains("compatdata") {
+            // Found compatdata directory, now look for Steam installation
+            if let Ok(home) = std::env::var("HOME") {
+                let steam_paths = vec![
+                    PathBuf::from(&home).join(".local/share/Steam"),
+                    PathBuf::from(&home).join(".steam/steam"),
+                    PathBuf::from(&home).join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+                ];
+                for steam_path in steam_paths {
+                    let proton_dir = steam_path.join("steamapps/common/Proton");
+                    if proton_dir.is_dir() {
+                        // Find the latest Proton version
+                        if let Ok(entries) = fs::read_dir(&proton_dir) {
+                            let mut versions: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                            versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                            for entry in versions {
+                                let proton_bin = entry.path().join("proton");
+                                if proton_bin.exists() {
+                                    return Some(entry.path());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        current = parent;
+    }
+    None
 }
 
 #[tauri::command]
@@ -402,7 +534,7 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
         let window = app.get_webview_window("main");
         
         let working_dir = std::path::Path::new(&exe_path).parent().unwrap_or(std::path::Path::new(""));
-
+        
         #[cfg(target_os = "windows")]
         let mut cmd = {
             let mut c = Command::new("cmd");
@@ -411,11 +543,13 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             c.raw_arg(format!("/C start \"\" /HIGH /WAIT \"{}\"", exe_path));
             c
         };
-
+        
         #[cfg(not(target_os = "windows"))]
         let mut cmd = {
-            let mut c = Command::new(&exe_path);
-            c.current_dir(working_dir);
+            let (cmd_name, args, work_dir_override) = build_linux_game_command(&exe_path);
+            let mut c = Command::new(&cmd_name);
+            c.args(&args);
+            c.current_dir(work_dir_override.unwrap_or_else(|| working_dir.to_path_buf()));
             c
         };
 
@@ -1651,10 +1785,81 @@ pub fn check_uninstaller(app: AppHandle, game_id: String) -> Result<Option<Strin
     let exe_path_str = game.exe_path.unwrap_or_default();
     let exe_path = Path::new(&exe_path_str);
     if let Some(parent) = exe_path.parent() {
-        let unins = parent.join("unins000.exe");
-        if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
-        let unins = parent.join("uninstall.exe");
-        if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+        #[cfg(target_os = "windows")]
+        {
+            let unins = parent.join("unins000.exe");
+            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+            let unins = parent.join("uninstall.exe");
+            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+        }
+        
+        #[cfg(not(target_os = "windows"))]
+        {
+            let exe_path_str = exe_path_str.to_lowercase();
+            
+            // Check for Wine/Proton uninstallers
+            let unins = parent.join("unins000.exe");
+            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+            let unins = parent.join("uninstall.exe");
+            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+            
+            // Check for Steam game (in compatdata or steamapps)
+            if exe_path_str.contains("steamapps") || exe_path_str.contains("compatdata") {
+                // Try to find the appmanifest to get app ID
+                let mut current = parent;
+                while let Some(p) = current.parent() {
+                    if p.file_name().and_then(|n| n.to_str()) == Some("steamapps") {
+                        // Look for appmanifest_*.acf files
+                        if let Ok(entries) = fs::read_dir(p) {
+                            for entry in entries.filter_map(|e| e.ok()) {
+                                let path = entry.path();
+                                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                if name.starts_with("appmanifest_") && name.ends_with(".acf") {
+                                    if let Ok(data) = fs::read_to_string(&path) {
+                                        for line in data.lines() {
+                                            let t = line.trim();
+                                            if t.starts_with("\"appid\"") {
+                                                let parts: Vec<&str> = t.splitn(4, '"').collect();
+                                                if parts.len() >= 4 {
+                                                    let app_id = parts[3];
+                                                    return Ok(Some(format!("steam://uninstall/{}", app_id)));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    current = p;
+                }
+                // Fallback: just return a generic steam uninstall hint
+                return Ok(Some("steam://open/minigameslist".to_string()));
+            }
+            
+            // Check for Flatpak
+            if exe_path_str.contains(".var/app/") {
+                // Extract flatpak app ID from path
+                let parts: Vec<&str> = exe_path_str.split(".var/app/").collect();
+                if parts.len() > 1 {
+                    let after = parts[1];
+                    let app_id = after.split('/').next().unwrap_or("");
+                    if !app_id.is_empty() {
+                        return Ok(Some(format!("flatpak uninstall {}", app_id)));
+                    }
+                }
+            }
+            
+            // Check for native Linux uninstall scripts
+            let uninstall_scripts = ["uninstall.sh", "uninstall", "uninstall.bin"];
+            for script in uninstall_scripts {
+                let script_path = parent.join(script);
+                if script_path.exists() {
+                    return Ok(Some(script_path.to_string_lossy().to_string()));
+                }
+            }
+        }
     }
     Ok(None)
 }
