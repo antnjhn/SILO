@@ -59,23 +59,35 @@ jobs:
       - name: Install Node dependencies
         run: npm install
 
-      - name: Build Tauri app
-        run: npm run build
+      - name: Configure updater signing key
+        run: |
+          mkdir -p /tmp/tauri-keys
+          echo "${{ secrets.UPDATER_PRIVATE_KEY }}" | base64 --decode > /tmp/tauri-keys/private.key
+          echo "${{ secrets.UPDATER_KEY_PASSWORD }}" > /tmp/tauri-keys/password.txt
+        env:
+          UPDATER_PRIVATE_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
+          UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_KEY_PASSWORD }}
+
+      - name: Build Tauri app with updater artifacts
+        run: |
+          # Set environment variables for Tauri updater signing
+          export TAURI_UPDATER_PRIVATE_KEY_PATH=/tmp/tauri-keys/private.key
+          export TAURI_UPDATER_KEY_PASSWORD_PATH=/tmp/tauri-keys/password.txt
+          npm run build
 
       - name: Get version from tag
         id: get_version
         shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      # Upload platform artifacts so the release job can collect them
-      - name: Upload Windows installer
+      - name: Upload Windows artifacts
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v4
         with:
           name: silo-windows
           path: src-tauri/target/release/bundle/nsis/*.exe
 
-      - name: Upload Linux bundles
+      - name: Upload Linux artifacts
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
         with:
@@ -83,6 +95,18 @@ jobs:
           path: |
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Generate and upload latest.json
+        if: always()
+        run: |
+          mkdir -p dist
+          # The Tauri build creates update artifacts including latest.json
+          # Copy it from the build output
+          ls src-tauri/target/release/bundle*/ 2>/dev/null || true
+          # Copy the latest.json from the updater build output
+          find . -name "latest.json" -type f 2>/dev/null | head -5
+          # Copy all artifacts to dist
+          cp -r src-tauri/target/release/bundle* dist/ 2>/dev/null || true
 
   release:
     needs: build
@@ -109,3 +133,4 @@ jobs:
             dist/silo-windows/*.exe
             dist/silo-linux/*.deb
             dist/silo-linux/*.AppImage
+            dist/latest.json

@@ -34,13 +34,13 @@
       "endpoints": [
         "https://github.com/antnjhn/SILO/releases/latest/download/latest.json"
       ],
-      "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      "pubkey": "Pppk4hZp7jOIxjkj9IclIEHm0nVpb0qw3Xr1C1hYw3w="
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis", "deb", "appimage"],
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
