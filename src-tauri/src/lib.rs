@@ -29,6 +29,7 @@ pub fn run() {
       commands::get_games,
       commands::add_game,
       commands::update_game,
+      commands::detect_launch_target,
       commands::delete_game,
       commands::get_system_fonts,
       commands::launch_game,

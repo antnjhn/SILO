@@ -52,6 +52,16 @@ pub struct Game {
     pub favorite: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// What the exePath points at, as chosen in the Edit modal: "auto" (SILO's
+    /// guess, resolved per-launch), "launcher", or "game". Serialization uses
+    /// camelCase like every other field.
+    #[serde(rename = "launchTarget", default)]
+    pub launch_target: Option<String>,
+    /// Directory containing the executable. Reserved for future per-game exe
+    /// caching; not currently read.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    pub exe_dir: Option<String>,
 }
 
 fn get_data_path(app: &AppHandle) -> PathBuf {
@@ -158,7 +168,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
 }
 
 #[tauri::command]
-pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>, save_path: Option<String>) -> Result<Game, String> {
+pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>, save_path: Option<String>, launch_target: Option<String>) -> Result<Game, String> {
     let mut games = get_games(app.clone());
     let save_path = normalize_save_path(save_path.as_deref())?;
     let new_game = Game {
@@ -180,6 +190,8 @@ pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpape
         backup_count: Some(5),
         favorite: false,
         tags: vec![],
+        launch_target: launch_target.filter(|t| matches!(t.as_str(), "auto" | "launcher" | "game")),
+        exe_dir: None,
     };
     games.push(new_game.clone());
     save_games_atomic(&app, &games)?;
@@ -210,6 +222,7 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
         apply_optional(updates.get("fontFamily"), &mut game.font_family);
         apply_optional(updates.get("fontColor"), &mut game.font_color);
         apply_optional(updates.get("status"), &mut game.status);
+        apply_optional(updates.get("launchTarget"), &mut game.launch_target);
         
         if let Some(save_path) = updates.get("savePath") {
             if save_path.is_null() {
@@ -245,6 +258,32 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
     } else {
         Ok(None)
     }
+}
+
+/// Inspect the configured exe and report whether it looks like a launcher and
+/// which sibling exe SILO would pick as the real game. The Edit modal uses this
+/// to offer a direct "go to the game" launch option. `real_game_path` is null
+/// when the configured exe already looks like the game itself.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchTargetInfo {
+    pub launcher_like: bool,
+    pub real_game_path: Option<String>,
+}
+
+#[tauri::command]
+pub fn detect_launch_target(exe_path: String) -> LaunchTargetInfo {
+    let path = Path::new(&exe_path);
+    let launcher_like = path
+        .file_name()
+        .map(|n| is_launcher_like(&n.to_string_lossy().to_lowercase()))
+        .unwrap_or(false);
+    let real_game_path = if launcher_like {
+        find_real_game_exe(path).map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    LaunchTargetInfo { launcher_like, real_game_path }
 }
 
 #[tauri::command]
@@ -392,6 +431,24 @@ fn save_detection_needed(save_path: Option<&str>) -> bool {
     }
 }
 
+/// True when the stored save folder is the game's own — i.e. its last path
+/// component names the game. Used to spot a folder that exists but was stored
+/// too broadly by an older build (the publisher folder
+/// `Saved Games\CD Projekt Red`, a cache folder), which would otherwise
+/// suppress detection for that game forever.
+fn save_path_names_game(save_path: &str, name_keys: &[String]) -> bool {
+    let Some(name) = Path::new(save_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+    else {
+        return false;
+    };
+    if name.is_empty() || crate::saveguard::is_save_root_excluded(&name) {
+        return false;
+    }
+    name_keys.iter().any(|key| crate::saveguard::name_matches(&name, key))
+}
+
 /// Determines how to launch a game on Linux based on the executable path.
 /// Returns (command_name, args, working_dir_override)
 #[cfg(not(target_os = "windows"))]
@@ -521,11 +578,236 @@ fn find_proton_runtime(game_exe_path: &Path) -> Option<PathBuf> {
     None
 }
 
+// ── Launcher-aware process tracking ────────────────────────────────────────
+// Games frequently start through a pre-launcher (REDprelauncher.exe for
+// Cyberpunk 2077,launcher-chain up to the real game binary. SILO spawns the
+// configured exe and records every PID in the whole spawned subtree; a save
+// write counts as belonging to this session when its locking PID's parent chain
+// reaches any of those PIDs — even after intermediate launchers have exited.
+
+/// Collect `pid` plus every process that has it (transitively) as an ancestor.
+fn collect_subtree_pids(system: &sysinfo::System, root_pid: u32) -> HashSet<u32> {
+    let mut known: HashSet<u32> = HashSet::new();
+    known.insert(root_pid);
+    // Children maps each parent PID to its live children. sysinfo does not
+    // expose a reverse lookup, so build one from the full snapshot.
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for (pid, proc) in system.processes() {
+        if let Some(parent) = proc.parent() {
+            children.entry(parent.as_u32()).or_default().push(pid.as_u32());
+        }
+    }
+    let mut queue: Vec<u32> = vec![root_pid];
+    while let Some(current) = queue.pop() {
+        if let Some(kids) = children.get(&current) {
+            for kid in kids {
+                if known.insert(*kid) {
+                    queue.push(*kid);
+                }
+            }
+        }
+    }
+    known
+}
+
+const LAUNCHER_NAME_HINTS: &[&str] = &[
+    "launcher", "redprelauncher", "prelauncher", "bootstrap", "starter",
+    "splash", "epicgameslauncher", "galaxyclient", "steam",
+];
+
+/// True when an exe name smells like a launcher rather than a game binary.
+fn is_launcher_like(name_lower: &str) -> bool {
+    LAUNCHER_NAME_HINTS.iter().any(|hint| name_lower.contains(hint))
+}
+
+/// Folders inside a game install that never hold the game binary. Pruning them
+/// keeps the search quick and stops redistributables from out-ranking the game.
+const INSTALL_NOISE_DIRS: &[&str] = &[
+    "redist", "redistributables", "_commonredist", "support", "docs",
+    "documentation", "installers", "mods", "cache", "tools", "crashreporter",
+    "dxsetup", "directx", "dotnet",
+];
+
+/// How far below the configured exe the real game binary may sit. One level
+/// covers `bin\Game.exe`; two covers `bin\x64\Game.exe`, which is where
+/// Cyberpunk 2077 keeps Cyberpunk2077.exe under REDprelauncher.exe.
+const MAX_GAME_EXE_DEPTH: usize = 3;
+
+/// A candidate's name-relatedness to the install folder, folded so that
+/// "Cyberpunk2077.exe" still scores against the "Cyberpunk 2077" folder.
+fn game_exe_name_bonus(stem: &str, install_dir: &str) -> i32 {
+    let stem_key = crate::saveguard::normalize_key(stem);
+    let dir_key = crate::saveguard::normalize_key(install_dir);
+    if stem_key.is_empty() || dir_key.is_empty() {
+        0
+    } else if stem_key == dir_key {
+        60
+    } else if stem_key.len() >= 4 && (dir_key.contains(&stem_key) || stem_key.contains(&dir_key)) {
+        40
+    } else {
+        0
+    }
+}
+
+fn is_exe(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+}
+
+/// Return the exe that most likely is the real game when the configured exe is
+/// a launcher. Searches the launcher's own folder first, then a few levels
+/// below it, because launchers often sit beside the game (sibling .exe) or
+/// above it (`REDprelauncher.exe` next to `bin\x64\Cyberpunk2077.exe`).
+/// Signals: name-relatedness to the install folder, shallowness, and size —
+/// with the biggest plausible binary as a last resort so a direct-to-game
+/// option still exists when no name lines up.
+fn find_real_game_exe(configured: &Path) -> Option<PathBuf> {
+    use walkdir::WalkDir;
+
+    let dir = configured.parent()?;
+    let configured_lower = configured.file_name()?.to_string_lossy().to_lowercase();
+    if !is_launcher_like(&configured_lower) {
+        return None;
+    }
+    let dir_name = dir.file_name()?.to_string_lossy().to_lowercase();
+
+    // Named matches win outright; the biggest binary is only a fallback and has
+    // to be plausibly a game (a redistributable is never 20MB or more).
+    let mut named: Option<(i32, PathBuf)> = None;
+    let mut biggest: Option<(u64, PathBuf)> = None;
+
+    let mut consider = |path: &Path, depth: usize| {
+        if !is_exe(path) {
+            return;
+        }
+        let name_lower = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        if name_lower == configured_lower
+            || is_blacklisted_exe(&name_lower)
+            || is_launcher_like(&name_lower)
+        {
+            return;
+        }
+        let stem = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let bonus = game_exe_name_bonus(&stem, &dir_name);
+        if bonus > 0 {
+            let score = bonus + score_exe_candidate(&stem, &dir_name, depth, size);
+            if named.as_ref().map_or(true, |(s, _)| score > *s) {
+                named = Some((score, path.to_path_buf()));
+            }
+        }
+        if depth <= 2 && size >= 20 * 1024 * 1024 {
+            if biggest.as_ref().map_or(true, |(s, _)| size > *s) {
+                biggest = Some((size, path.to_path_buf()));
+            }
+        }
+    };
+
+    // Siblings of the launcher.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            consider(&entry.path(), 0);
+        }
+    }
+
+    // And the install's subfolders, pruning the noise ones wholesale.
+    let noise = |name: &str| INSTALL_NOISE_DIRS.contains(&name);
+    for entry in WalkDir::new(dir)
+        .min_depth(1)
+        .max_depth(MAX_GAME_EXE_DEPTH)
+        .into_iter()
+        .filter_entry(|e| !noise(&e.file_name().to_string_lossy().to_lowercase()))
+        .flatten()
+    {
+        consider(entry.path(), entry.depth());
+    }
+
+    named
+        .map(|(_, path)| path)
+        .or_else(|| biggest.map(|(_, path)| path))
+}
+
+/// True when the found binary's name lines up with the install folder — i.e.
+/// the launcher genuinely sits above its own game (`REDprelauncher.exe` above
+/// `bin\x64\Cyberpunk2077.exe`) rather than us guessing from file size. "Auto"
+/// only bypasses a launcher on this stronger signal, so a launcher that is
+/// required (account checks, DRM) is never skipped on a hunch.
+fn is_confident_game_exe(candidate: &Path, configured: &Path) -> bool {
+    let (Some(stem), Some(install)) = (
+        candidate.file_stem().map(|s| s.to_string_lossy().to_lowercase()),
+        configured
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_lowercase()),
+    ) else {
+        return false;
+    };
+    game_exe_name_bonus(&stem, &install) > 0
+}
+
+/// Names a game's save folders may carry: the library name, the game binary's
+/// stem, and the install folder — folded for comparison by
+/// [`crate::saveguard::name_matches`]. These are what let SaveGuard find the
+/// saves of a game that a launcher started, and what let it resolve publisher
+/// layouts like `Saved Games\CD Projekt Red\Cyberpunk 2077` to the game's own
+/// folder instead of the publisher's.
+fn save_name_keys(game_name: &str, game_exe: &Path) -> Vec<String> {
+    let mut keys: Vec<String> = vec![game_name.to_string()];
+    if let Some(stem) = game_exe.file_stem().map(|s| s.to_string_lossy().to_lowercase()) {
+        if !stem.is_empty() && !is_launcher_like(&stem) {
+            keys.push(stem);
+        }
+    }
+    if let Some(folder) = game_exe
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_lowercase())
+    {
+        // Short folder names ("Games", "bin") match too much to be useful.
+        if folder.chars().filter(|c| c.is_alphanumeric()).count() >= 4 {
+            keys.push(folder);
+        }
+    }
+    keys.retain(|key| !crate::saveguard::normalize_key(key).is_empty());
+    keys
+}
+
 #[tauri::command]
 pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Result<(), String> {
     let games = get_games(app.clone());
     let game = games.into_iter().find(|g| g.id == game_id).ok_or("Game not found")?;
-    let exe_path = game.exe_path.clone().ok_or("No executable set")?;
+    let configured_exe = game.exe_path.clone().ok_or("No executable set")?;
+    // Launcher-aware launch target, the Edit modal's Auto / Launcher / Game:
+    //   launcher → always start the configured exe (the launcher itself)
+    //   game     → start the detected game binary, falling back to the exe above
+    //   auto/–   → start the game binary directly when SILO is *confident* it
+    //              found it below the launcher, otherwise the configured exe
+    // Save detection works through any of these: see name_keys below.
+    let configured_path = Path::new(&configured_exe);
+    let real_game_exe = find_real_game_exe(configured_path);
+    let exe_path = match game.launch_target.as_deref() {
+        Some("launcher") => configured_exe.clone(),
+        Some("game") => real_game_exe
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| configured_exe.clone()),
+        _ => match real_game_exe.as_ref() {
+            Some(candidate) if is_confident_game_exe(candidate, configured_path) => {
+                candidate.to_string_lossy().into_owned()
+            }
+            _ => configured_exe.clone(),
+        },
+    };
+    // Every name this game's save folder might carry, so the saves are found
+    // whichever exe we ended up starting (and through publisher nesting).
+    let name_keys = save_name_keys(&game.name, Path::new(&exe_path));
     
     let game_id_clone = game_id.clone();
     let save_path_clone = game.save_path.clone();
@@ -574,11 +856,20 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             // folder has vanished (game moved/reinstalled) so a fresh location is re-found
             // instead of silently never backing up again.
             let run_detection = save_detection_needed(save_path_clone.as_deref());
+            // A folder that exists can still be the wrong one: an older build could
+            // have stored the publisher folder instead of the game's own, which then
+            // suppresses detection forever. Keep looking in that case — but only a
+            // folder that names the game may replace it.
+            let stored_is_suspect = save_path_clone
+                .as_deref()
+                .map(|p| Path::new(p).is_dir() && !save_path_names_game(p, &name_keys))
+                .unwrap_or(false);
+            let watch_for_saves = run_detection || stored_is_suspect;
             let mut detected_path: Option<PathBuf> = None;
             let mut watcher_opt = None;
             let mut rx_opt = None;
             
-            if run_detection {
+            if watch_for_saves {
                 let (tx, rx) = channel();
                 let watcher_res = notify::recommended_watcher(move |res| {
                     if let Ok(event) = res {
@@ -609,35 +900,81 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             let mut last_detection_check: Option<Instant> = None;
             // Wall-clock moment the game process was first seen, used for the session log.
             let mut game_started_wall: Option<String> = None;
+            // Same moment as a wall clock, for the end-of-session save sweep.
+            let mut game_started_sys: Option<std::time::SystemTime> = None;
+            // Every PID in the subtree SILO spawned (launcher chain + game + helpers).
+            // Keeps launcher handoffs linked even after intermediate processes exit.
+            let mut known_pids: HashSet<u32> = HashSet::new();
+            known_pids.insert(spawned_child_pid);
 
             while is_running {
                 if game_pid.is_none() {
-                    // Hunt for the real game PID (by name, preferring a descendant of the
-                    // cmd we spawned) for as long as it takes — some games start through a
-                    // launcher and only spawn their main process later. The 0.2.1 "perf" cap
-                    // stopped this scan after 15s and silently broke save detection for those
-                    // games, so it now runs until a PID is pinned (the full snapshot is freed
-                    // the moment we pin).
+                    // Hunt for the real game PID. First keep the spawned subtree fresh so
+                    // launcher handoffs (launcher exits, game spawns) stay attributed to
+                    // this session. Then look for a game-named process INSIDE the subtree.
+                    // This is what makes save detection work when the configured exe is a
+                    // launcher like REDprelauncher.exe: the game spawns under it, and the
+                    // subtree keeps the lineage even once the launcher process is gone.
                     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                    known_pids = collect_subtree_pids(&system, spawned_child_pid);
+
                     let mut name_match: Option<u32> = None;
+                    // Best candidate inside our subtree even when names differ: when the
+                    // configured exe is a launcher (REDprelauncher.exe), the real game has
+                    // a different name and must still be pinned. A large binary that is
+                    // NOT launcher-like and lives in (or under) the game install dir is
+                    // almost certainly the game itself.
+                    let mut subtree_best_score: i32 = -1;
+                    let mut subtree_best_score_pid: Option<u32> = None;
                     for (pid, proc) in system.processes() {
-                        if proc.name().to_string_lossy().to_lowercase() != exe_name.to_lowercase() {
+                        let proc_name = proc.name().to_string_lossy().to_lowercase();
+                        let candidate_pid = pid.as_u32();
+                        let in_subtree = known_pids.contains(&candidate_pid);
+
+                        if proc_name == exe_name.to_lowercase() {
+                            // Prefer a process spawned inside our tracked subtree (avoids
+                            // matching a second instance of the same game already running).
+                            if in_subtree {
+                                game_pid = Some(candidate_pid);
+                                game_is_ours = true;
+                                break;
+                            }
+                            if name_match.is_none() {
+                                name_match = Some(candidate_pid);
+                            }
                             continue;
                         }
-                        let candidate_pid = pid.as_u32();
-                        // Prefer a process spawned by our cmd instance (avoids matching a
-                        // second instance of the same game already running).
-                        if crate::saveguard::is_descendant(&system, candidate_pid, spawned_child_pid) {
-                            game_pid = Some(candidate_pid);
-                            game_is_ours = true;
-                            break;
-                        }
-                        if name_match.is_none() {
-                            name_match = Some(candidate_pid);
+
+                        // Launcher-handoff detection: score every process inside the
+                        // subtree that isn't the launcher itself.
+                        if in_subtree
+                            && game_pid.is_none()
+                            && !is_launcher_like(&proc_name)
+                            && proc_name != "cmd.exe"
+                            && candidate_pid != spawned_child_pid
+                        {
+                            let score = {
+                                let exe_path: Option<&std::path::Path> = proc.exe();
+                                let size: u64 = exe_path
+                                    .as_ref()
+                                    .and_then(|p| std::fs::metadata(p).ok())
+                                    .map(|m| m.len())
+                                    .unwrap_or(0);
+                                (size / (10 * 1024 * 1024)).min(50) as i32
+                            };
+                            if score > subtree_best_score {
+                                subtree_best_score = score;
+                                subtree_best_score_pid = Some(candidate_pid);
+                            }
                         }
                     }
+                    if game_pid.is_none() && subtree_best_score_pid.is_some() && check_start.elapsed().as_secs() >= 5 {
+                        // The launcher handed off to a differently-named game binary.
+                        game_pid = subtree_best_score_pid;
+                        game_is_ours = true;
+                    }
                     // Fall back to name-only matching after a grace period (some games
-                    // launch through a launcher rather than directly from our cmd).
+                    // launch through an out-of-tree service rather than our cmd).
                     if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
                         game_pid = name_match;
                         game_is_ours = false;
@@ -645,15 +982,29 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                     if game_pid.is_some() {
                         game_started_at = Some(Instant::now());
                         game_started_wall = Some(chrono::Local::now().to_rfc3339());
-                        // Free the full-process snapshot: once pinned we only need this one
-                        // process, so drop the rest of the table to keep session RAM low.
+                        game_started_sys = Some(std::time::SystemTime::now());
+                        // Free the full-process snapshot: once pinned we only need the
+                        // subtree set, so drop the rest of the table to keep session RAM low.
                         system = sysinfo::System::new();
                     }
                 } else {
-                    system.refresh_processes(
-                        sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid.unwrap())]),
-                        true,
-                    );
+                    // Keep the whole subtree refreshed: launcher-to-game handoffs happen
+                    // AFTER the initial pin, so new children (the real game process) must
+                    // keep entering known_pids or save attribution would silently miss them.
+                    let root_alive = system
+                        .process(sysinfo::Pid::from_u32(spawned_child_pid))
+                        .is_some();
+                    if root_alive {
+                        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                        known_pids = collect_subtree_pids(&system, spawned_child_pid);
+                    } else {
+                        // Spawned root is gone (launcher exited after handing off). Refresh
+                        // only the pinned PID so we know when the game itself ends.
+                        system.refresh_processes(
+                            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid.unwrap())]),
+                            true,
+                        );
+                    }
                 }
                 
                 // Drop the save watcher the moment a root is found (nothing left to watch);
@@ -690,24 +1041,46 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                     };
                     if due && detected_path.is_none() && !pending_paths.is_empty() {
                         last_detection_check = Some(Instant::now());
-                        if let Some(target_pid) = game_pid {
+                        {
                             let paths: Vec<PathBuf> = pending_paths.drain().collect();
                             for path in paths {
                                 if detected_roots.iter().any(|root| path.starts_with(root)) {
                                     continue;
                                 }
                                 let pids = crate::saveguard::get_locking_pids(&path);
-                                for locking_pid in pids {
-                                    // Refresh the writer's own ancestry so saves written by
-                                    // child/helper processes of the game are attributed too
-                                    // (the snapshot only tracks the pinned PID at this point).
-                                    if crate::saveguard::pid_is_descendant_of(&mut system, locking_pid, target_pid) {
-                                        if let Some(root) = crate::saveguard::get_save_root(&path, &watch_dirs) {
+                                // Lock evidence only replaces a stored folder when that
+                                // folder was already unusable; a suspect folder is only
+                                // replaced by one that names the game.
+                                let lock_pids: &[u32] = if stored_is_suspect { &[] } else { &pids };
+                                for &locking_pid in lock_pids {
+                                    // Attribute the write to this session when the locking
+                                    // PID's parent chain reaches ANY PID SILO spawned. This
+                                    // works through launchers: the game writes saves even if
+                                    // the launcher that spawned it has already exited, because
+                                    // the subtree kept every PID the chain passed through.
+                                    if crate::saveguard::pid_chain_reaches(&system, locking_pid, &known_pids)
+                                        || game_pid.map_or(false, |target| crate::saveguard::pid_is_descendant_of(&mut system, locking_pid, target))
+                                    {
+                                        if let Some(root) = crate::saveguard::get_save_root_for(&path, &watch_dirs, &name_keys) {
                                             log::info!("SaveGuard detected save root: {:?}", root);
                                             detected_path = Some(root.clone());
                                             detected_roots.insert(root);
                                             break;
                                         }
+                                    }
+                                }
+                                // Lock-free fallback. A launcher hands the game off
+                                // outside the tree SILO spawned, and many games save
+                                // atomically (write, rename, close) so no process holds
+                                // the file by the time Restart Manager is asked. The
+                                // folder that names this game is evidence enough — and
+                                // because a wrong folder here is visible and overridable,
+                                // missing the saves entirely is the worse failure.
+                                if detected_path.is_none() {
+                                    if let Some(root) = crate::saveguard::save_root_by_name(&path, &watch_dirs, &name_keys) {
+                                        log::info!("SaveGuard detected save root by name: {:?}", root);
+                                        detected_path = Some(root.clone());
+                                        detected_roots.insert(root);
                                     }
                                 }
                                 if detected_path.is_some() {
@@ -726,10 +1099,10 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
                 };
                 
                 if child_exited {
-                    // Only keep the loop alive if the pinned PID is still running AND it is
-                    // a descendant of the cmd we spawned. The name-match fallback can pin an
-                    // unrelated already-running instance of the same game; trusting it here
-                    // would make this loop never terminate and the save backup never run.
+                    // Only keep the loop alive if the pinned PID is still running. Name-only
+                    // fallback pins can grab an unrelated already-running instance of the
+                    // same game; trusting those here would make this loop never terminate
+                    // and the save backup never run.
                     let running_in_system = match game_pid {
                         Some(pid) => game_is_ours && system.process(sysinfo::Pid::from_u32(pid)).is_some(),
                         None => false,
@@ -761,6 +1134,26 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
             if let Some(win) = &window {
                 let _ = win.show();
                 let _ = win.set_focus();
+            }
+
+            // Last resort before the backup: nothing was ever attributed to this
+            // session — no handle to query (atomic saves), a launcher that started
+            // the game outside our tree, or a session that never wrote a file.
+            // Sweep the standard save locations for a folder that names the game
+            // and was touched while it ran.
+            if watch_for_saves && detected_path.is_none() && game_pid.is_some() {
+                let since = game_started_sys.unwrap_or_else(std::time::SystemTime::now);
+                let install_dir = Path::new(&exe_path).parent();
+                if let Some(root) = crate::saveguard::find_save_root_by_scan(
+                    &watch_dirs,
+                    &name_keys,
+                    since,
+                    install_dir,
+                ) {
+                    log::info!("SaveGuard found save root by scan: {:?}", root);
+                    detected_roots.insert(root.clone());
+                    detected_path = Some(root);
+                }
             }
 
             let mut final_save_path = save_path_clone;
@@ -1307,6 +1700,25 @@ fn expand_env_vars(input: &str) -> String {
     out
 }
 
+/// Library exports skip nested archives — the per-game snapshots under
+/// `backups/` and `saves/` — so the export stays a library + settings bundle
+/// instead of ballooning into a zip of zips. Note this means save snapshots do
+/// not travel with an exported library; the games, their settings, cover art and
+/// session history do.
+fn is_nested_archive(rel_path: &Path) -> bool {
+    let mut components = rel_path.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let folder = first.as_os_str().to_string_lossy().to_lowercase();
+    (folder == "backups" || folder == "saves")
+        && rel_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false)
+}
+
 fn zip_dir(src_dir: &Path, dest_zip: &Path) -> Result<(), String> {
     zip_dir_filtered(src_dir, dest_zip, |_| false)
 }
@@ -1363,7 +1775,7 @@ where
     }
     log::info!("Zip completed: {} files added, {} skipped", files_added, skipped);
     if files_added == 0 {
-        return Err("No files could be read from the save directory — it may be empty or all files are locked".to_string());
+        return Err("No files could be read from the save directory - it may be empty or all files are locked".to_string());
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(())
@@ -1984,20 +2396,12 @@ pub async fn backup_library(app: AppHandle) -> Result<String, String> {
     let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).set_file_name("silo_backup.zip").blocking_save_file();
     if let Some(dest_path) = file_path {
         let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
-        // Do not recurse existing backup/save archives (avoids zip-of-zip bloat).
-        let exclude = |rel_path: &Path| {
-            let mut components = rel_path.components();
-            if let Some(first) = components.next() {
-                let folder = first.as_os_str().to_string_lossy().to_lowercase();
-                if (folder == "backups" || folder == "saves")
-                    && rel_path.extension().and_then(|e| e.to_str()) == Some("zip") {
-                    return true;
-                }
-            }
-            false
-        };
         log::info!("Starting library backup: app_data_dir={:?}, dest={:?}", app_data_dir, dest_path);
-        let result = zip_dir_filtered(&app_data_dir, std::path::Path::new(&dest_path.to_string()), exclude);
+        let result = zip_dir_filtered(
+            &app_data_dir,
+            std::path::Path::new(&dest_path.to_string()),
+            is_nested_archive,
+        );
         match &result {
             Ok(()) => log::info!("Library backup completed successfully"),
             Err(e) => log::error!("Library backup failed: {}", e),
@@ -2361,5 +2765,170 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         // Folder gone (game moved / reinstalled / wiped) -> must re-detect.
         assert!(save_detection_needed(Some(&dir.to_string_lossy())));
+    }
+
+    // ----- find_real_game_exe (launcher-aware "go straight to the game") -----
+
+    /// Sparse file of the given length: `set_len` avoids writing real bytes, so
+    /// the size thresholds these tests exercise cost nothing to set up.
+    fn write_exe(path: &Path, size: u64) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(path).unwrap().set_len(size).unwrap();
+    }
+
+    // ----- library export / import (Settings -> Library Backup) -----
+
+    #[test]
+    fn library_export_then_import_restores_games_and_settings() {
+        // An app-data dir shaped like the real one: library, settings, per-game
+        // save snapshots, session history.
+        let src = TempDir::new("lib_export");
+        fs::create_dir_all(src.path().join("backups").join("game-1")).unwrap();
+        fs::create_dir_all(src.path().join("saves").join("game-1")).unwrap();
+        fs::create_dir_all(src.path().join("wallpapers")).unwrap();
+        fs::write(src.path().join("games.json"), br#"[{"id":"game-1","name":"Cyberpunk 2077"}]"#).unwrap();
+        fs::write(src.path().join("settings.json"), br#"{"showGameTitles":true}"#).unwrap();
+        fs::write(src.path().join("sessions.json"), br#"[{"gameId":"game-1"}]"#).unwrap();
+        fs::write(src.path().join("wallpapers").join("game-1.png"), b"png").unwrap();
+        fs::write(src.path().join("backups").join("game-1").join("auto_20240101_120000.zip"), b"snapshot").unwrap();
+        fs::write(src.path().join("saves").join("game-1").join("notes.txt"), b"keep me").unwrap();
+
+        let zip_path = TempDir::new("lib_export_zip");
+        let archive_path = zip_path.path().join("silo_backup.zip");
+        zip_dir_filtered(src.path(), &archive_path, is_nested_archive).unwrap();
+
+        // Importing is exactly `restore_library`: unzip into a (fresh) data dir.
+        let restored = TempDir::new("lib_import");
+        unzip_file(&archive_path, restored.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(restored.path().join("games.json")).unwrap(),
+            r#"[{"id":"game-1","name":"Cyberpunk 2077"}]"#
+        );
+        assert_eq!(
+            fs::read_to_string(restored.path().join("settings.json")).unwrap(),
+            r#"{"showGameTitles":true}"#
+        );
+        assert_eq!(
+            fs::read_to_string(restored.path().join("sessions.json")).unwrap(),
+            r#"[{"gameId":"game-1"}]"#
+        );
+        assert!(restored.path().join("wallpapers").join("game-1.png").exists());
+        assert_eq!(
+            fs::read_to_string(restored.path().join("saves").join("game-1").join("notes.txt")).unwrap(),
+            "keep me"
+        );
+        // Save snapshots are deliberately left out of the library bundle.
+        assert!(!restored.path().join("backups").join("game-1").join("auto_20240101_120000.zip").exists());
+        assert!(is_nested_archive(Path::new("backups/game-1/auto_20240101_120000.zip")));
+        assert!(is_nested_archive(Path::new("saves/game-1/auto_20240101_120000.ZIP")));
+        assert!(!is_nested_archive(Path::new("games.json")));
+        assert!(!is_nested_archive(Path::new("saves/game-1/notes.txt")));
+    }
+
+    #[test]
+    fn empty_library_export_fails_loudly_instead_of_writing_an_empty_zip() {
+        let src = TempDir::new("lib_export_empty");
+        let archive = TempDir::new("lib_export_empty_zip");
+        let err = zip_dir_filtered(src.path(), &archive.path().join("empty.zip"), is_nested_archive)
+            .unwrap_err();
+        assert!(err.contains("No files could be read"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn save_path_names_game_spots_broad_or_unrelated_folders() {
+        let keys = save_name_keys("Cyberpunk 2077", Path::new("C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"));
+        // The game's own folder, and a publisher folder that happens to be the
+        // same depth — only the first is the game's.
+        assert!(save_path_names_game(
+            "C:\\Users\\Test\\Saved Games\\CD Projekt Red\\Cyberpunk 2077",
+            &keys
+        ));
+        assert!(!save_path_names_game(
+            "C:\\Users\\Test\\Saved Games\\CD Projekt Red",
+            &keys
+        ));
+        assert!(!save_path_names_game("C:\\Users\\Test\\AppData\\Local\\Temp", &keys));
+        assert!(!save_path_names_game("C:\\Users\\Test\\Documents\\Other Game", &keys));
+    }
+
+    #[test]
+    fn save_name_keys_cover_name_exe_stem_and_install_folder() {
+        let keys = save_name_keys("Cyberpunk 2077", Path::new("C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"));
+        assert!(keys.iter().any(|k| crate::saveguard::name_matches("Cyberpunk 2077", k)));
+        assert!(crate::saveguard::name_matches("Cyberpunk2077", &keys[1]));
+        // The install folder is picked up too, so a game launched through its
+        // launcher (whose own name is noise) still matches by folder.
+        assert!(keys.iter().any(|k| crate::saveguard::normalize_key(k) == "cyberpunk2077"));
+        // A launcher's own name never becomes a key.
+        let launcher_keys = save_name_keys("Cyberpunk 2077", Path::new("C:\\Games\\Cyberpunk 2077\\REDprelauncher.exe"));
+        assert!(!launcher_keys.iter().any(|k| k.to_lowercase().contains("prelauncher")));
+    }
+
+    #[test]
+    fn find_real_game_exe_finds_the_game_nested_below_a_prelauncher() {
+        // The Cyberpunk 2077 layout: REDprelauncher.exe at the install root and
+        // the actual game two levels down in bin\x64.
+        let tmp = TempDir::new("launcher_nested");
+        let install = tmp.path().join("Cyberpunk 2077");
+        let prelauncher = install.join("REDprelauncher.exe");
+        write_exe(&prelauncher, 1_024);
+        let game = install.join("bin").join("x64").join("Cyberpunk2077.exe");
+        write_exe(&game, 30 * 1024 * 1024);
+        // Decoys that must never win: a bigger crash handler and a bigger
+        // redistributable, both deeper than the game.
+        write_exe(&install.join("bin").join("x64").join("CrashReporter.exe"), 40 * 1024 * 1024);
+        write_exe(&install.join("redist").join("vc_redist.x64.exe"), 45 * 1024 * 1024);
+
+        assert_eq!(find_real_game_exe(&prelauncher), Some(game));
+    }
+
+    #[test]
+    fn find_real_game_exe_prefers_a_sibling_over_a_deeper_binary() {
+        let tmp = TempDir::new("launcher_sibling");
+        let install = tmp.path().join("Some Game");
+        let launcher = install.join("SomeGameLauncher.exe");
+        write_exe(&launcher, 1_024);
+        let game = install.join("SomeGame.exe");
+        write_exe(&game, 25 * 1024 * 1024);
+        let helper = install.join("sub").join("SomeGameTool.exe");
+        write_exe(&helper, 60 * 1024 * 1024);
+
+        // The shallower, name-related binary wins over the bigger helper.
+        assert_eq!(find_real_game_exe(&launcher), Some(game));
+    }
+
+    #[test]
+    fn find_real_game_exe_falls_back_to_the_biggest_binary_without_a_name_match() {
+        let tmp = TempDir::new("launcher_fallback");
+        let install = tmp.path().join("install");
+        let launcher = install.join("ThingLauncher.exe");
+        write_exe(&launcher, 1_024);
+        let game = install.join("bin").join("TotallyDifferentName.exe");
+        write_exe(&game, 40 * 1024 * 1024);
+
+        assert_eq!(find_real_game_exe(&launcher), Some(game));
+    }
+
+    #[test]
+    fn find_real_game_exe_returns_none_for_a_normal_game_exe() {
+        // Not launcher-like: nothing to redirect, so "auto" must keep using it.
+        let tmp = TempDir::new("launcher_plain");
+        let game = tmp.path().join("SomeGame.exe");
+        write_exe(&game, 25 * 1024 * 1024);
+
+        assert_eq!(find_real_game_exe(&game), None);
+    }
+
+    #[test]
+    fn find_real_game_exe_ignores_redistributables_only() {
+        let tmp = TempDir::new("launcher_redist");
+        let install = tmp.path().join("install");
+        let launcher = install.join("GameLauncher.exe");
+        write_exe(&launcher, 1_024);
+        write_exe(&install.join("redist").join("huge_setup.exe"), 45 * 1024 * 1024);
+        write_exe(&install.join("Support").join("CrashReporter.exe"), 45 * 1024 * 1024);
+
+        assert_eq!(find_real_game_exe(&launcher), None);
     }
 }

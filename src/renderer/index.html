@@ -50,7 +50,7 @@
       </div>
       <div id="filter-bar">
         <select id="sort-select">
-          <option value="name">Name A–Z</option>
+          <option value="name">Name A-Z</option>
           <option value="playtime">Most Played</option>
           <option value="recent">Recently Played</option>
         </select>
@@ -247,6 +247,15 @@
         </div>
       </div>
       <div class="field-group">
+        <label>Launch Target <span class="optional">(when the exe is a launcher)</span></label>
+        <div class="segmented" id="launch-target-group">
+          <button type="button" id="lt-auto">Auto</button>
+          <button type="button" id="lt-launcher">Launcher</button>
+          <button type="button" id="lt-game">Game</button>
+        </div>
+        <div id="launch-target-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;"></div>
+      </div>
+      <div class="field-group">
         <label>Save Folder <span class="optional">(optional)</span></label>
         <div class="file-row">
           <input type="text" id="input-save-path" placeholder="Path to save files" readonly />
@@ -286,7 +295,7 @@
         <input type="text" id="input-tags" placeholder="e.g. RPG, Indie, Favorites" autocomplete="off" />
       </div>
       <div class="field-group" id="backup-count-group" style="display: none;">
-        <label>Keep Last N Backups <span class="optional">(1–50)</span></label>
+        <label>Keep Last N Backups <span class="optional">(1-50)</span></label>
         <input type="number" id="input-backup-count" min="1" max="50" value="5" />
       </div>
       </div>
@@ -439,6 +448,16 @@
           </span>
           <span class="toggle-track">
             <input type="checkbox" id="input-show-game-titles" />
+            <span class="toggle-thumb"></span>
+          </span>
+        </label>
+        <label class="settings-toggle-row" for="input-force-motion">
+          <span class="toggle-copy">
+            <span class="toggle-title">Always animate</span>
+            <span class="toggle-sub">Overrides your system's reduce-motion setting for the launcher's animations.</span>
+          </span>
+          <span class="toggle-track">
+            <input type="checkbox" id="input-force-motion" />
             <span class="toggle-thumb"></span>
           </span>
         </label>
