@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SILO",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "identifier": "com.silo.launcher",
   "build": {
     "frontendDist": "../src/renderer",
@@ -34,13 +34,13 @@
       "endpoints": [
         "https://github.com/antnjhn/SILO/releases/latest/download/latest.json"
       ],
-      "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFOEE2QTFCQkZEODJDMTQKUldRVUxOaS9HMnFLN3M2Vm9oeWkrWkQxNW80M2g4VDZPblQvZnBaMm83NEhYaDR5Q3JwdEhqYksK"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis", "deb", "appimage"],
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

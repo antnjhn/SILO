@@ -2683,10 +2683,15 @@ document.getElementById('btn-check-updates').addEventListener('click', async () 
     if (updater && updater.check) {
       const u = await updater.check();
       if (u) {
-        showToast('info', 'Update Available', `Update ${u.version} available`);
-        const { ask } = window.__TAURI__.dialog;
-        const yes = await ask(`Version ${u.version} is available. Open the GitHub releases page to download it?`, { title: 'Update Available', kind: 'info' });
-        if (yes) window.open('https://github.com/antnjhn/vault-launcher/releases', '_blank');
+        if (u.updateAvailable) {
+          showToast('info', 'Update Available', `Update ${u.version} is available`);
+          await u.downloadAndInstall({
+            mimeType: 'application/octet-stream',
+            requestHeaders: [],
+          });
+        } else {
+          showToast('info', 'Up to Date', 'You are up to date');
+        }
       } else {
         showToast('info', 'Up to Date', 'You are up to date');
       }

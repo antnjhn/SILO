@@ -1262,7 +1262,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   display: none;
   box-sizing: border-box;
   flex: 0 0 auto; min-width: 0;
-  width: calc(100% - 112px);
+  width: calc(100% - 140px);
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.15);
   border-radius: 10px;
@@ -1283,7 +1283,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #game-list-panel.search-mode #btn-search-toggle { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 /* Filter bar: hidden until search mode, then slides in under the search box */
-#filter-bar { display: none; box-sizing: border-box; align-items: center; width: calc(100% - 112px); margin: 2px 0 10px 112px; align-self: flex-start; }
+#filter-bar { display: none; box-sizing: border-box; align-items: center; width: calc(100% - 140px); margin: 2px 0 10px 140px; align-self: flex-start; }
 #game-list-panel.search-mode #filter-bar { display: flex; animation: searchFade 240ms ease; }
 #sort-select {
   flex: 1;
@@ -1301,7 +1301,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 #sort-select:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
 @keyframes searchFade { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
-@keyframes searchGrow { from { width: 0; opacity: 0; } to { width: calc(100% - 112px); opacity: 1; } }
+@keyframes searchGrow { from { width: 0; opacity: 0; } to { width: calc(100% - 140px); opacity: 1; } }
 
 /* Details panel crossfade (no flying-logo clone): the logo + content fade up on open,
    and fade out again on close via the is-preview state below. */
@@ -1760,7 +1760,6 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 
 /* Sidebar toolbar: breathing room on the left (icon-only nav buttons keep icons) */
 .sidebar-toolbar { padding: 0 14px; }
-#filter-bar { width: calc(100% - 140px); margin-left: 126px; }
 
 /* Add/Edit modal overflow: pin header + action row, scroll only the middle,
    and cap the whole modal so it never exceeds the viewport. */

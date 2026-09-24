@@ -1,6 +1,6 @@
 {
   "name": "silo-launcher",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "A fast, aesthetic game launcher with controller support",
   "main": "src/main/main.js",
   "scripts": {
@@ -14,6 +14,6 @@
     "@tauri-apps/plugin-fs": "^2.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0"
+    "@tauri-apps/cli": "^2.11.5"
   }
 }
