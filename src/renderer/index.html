@@ -39,12 +39,22 @@
       <!-- Category dots are built dynamically by app.js: ALL GAMES, RECENTLY PLAYED, FAVORITES, + one per tag -->
     </div>
 
+    <!-- CATEGORY OPTION WHEEL (LEFT past the first game / C / LB) -->
+    <div id="category-wheel-overlay" class="hidden">
+      <div class="wheel-backdrop"></div>
+      <div id="category-wheel">
+        <div class="wheel-hint">CATEGORY</div>
+        <div id="wheel-list"></div>
+        <div class="wheel-hint wheel-hint-bottom">&uarr;&darr; NAVIGATE&nbsp;&nbsp;&middot;&nbsp;&nbsp;ENTER SELECT&nbsp;&nbsp;&middot;&nbsp;&nbsp;ESC CANCEL</div>
+      </div>
+    </div>
+
     <!-- LEFT: Centered logo sidebar -->
     <div id="game-list-panel">
       <div style="display: flex; align-items: center; gap: 10px; margin: 12px 0;" class="sidebar-toolbar">
         <button id="btn-settings" title="Settings / Backup" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.35); font-size: 20px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;">⚙</button>
         <button id="btn-stats" title="Statistics" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.6); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 15v-3"/><path d="M12 15V7"/><path d="M17 15v-5"/></svg></button>
-        <button id="btn-search-toggle" title="Search ( / )" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.6); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></button>
+        <button id="btn-search-toggle" title="Search ( / )" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.32); background: rgba(255,255,255,0.16); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.92); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), inset 0 0 4px 2px rgba(255,255,255,0.12), 0 0 10px rgba(255,255,255,0.06); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></button>
         <input type="text" id="search-input" placeholder="Search your library" autocomplete="off" />
         <button id="btn-add-game" title="Add Game (Y)" style="margin: 0;">+</button>
       </div>
@@ -421,70 +431,85 @@
   <!-- SETTINGS / BACKUP MODAL -->
   <div id="settings-overlay" class="hidden">
     <div id="settings-modal" class="glass-panel settings-modal">
-      <div class="settings-title">Settings</div>
-      <p class="settings-desc">Everything here stays on this machine.</p>
+      <div class="settings-head">
+        <div class="settings-title">Settings</div>
+        <p class="settings-desc">Everything here stays on this machine.</p>
+      </div>
 
-      <div class="settings-section">
-        <h3 class="settings-section-title">Library Backup</h3>
-        <div class="settings-row">
-          <button id="btn-export-backup" class="settings-btn">Export Library</button>
-          <button id="btn-import-backup" class="settings-btn">Import Library</button>
+      <div class="settings-body">
+        <div class="settings-section">
+          <h3 class="settings-section-title">Library Backup</h3>
+          <div class="settings-card">
+            <div class="settings-row">
+              <button id="btn-export-backup" class="settings-btn">Export Library</button>
+              <button id="btn-import-backup" class="settings-btn">Import Library</button>
+            </div>
+          </div>
         </div>
-      </div>
 
-      <div class="settings-section">
-        <h3 class="settings-section-title">SteamGridDB</h3>
-        <label class="settings-field-label" for="input-sgdb-key">API Key</label>
-        <input id="input-sgdb-key" type="password" class="settings-input" placeholder="Paste your SteamGridDB API key" autocomplete="off" />
-        <p class="settings-hint">Adds custom logos, heroes and grids to the art picker. Get a free key at steamgriddb.com.</p>
-      </div>
+        <div class="settings-section">
+          <h3 class="settings-section-title">SteamGridDB</h3>
+          <div class="settings-card">
+            <label class="settings-field-label" for="input-sgdb-key">API Key</label>
+            <div class="settings-key-row">
+              <input id="input-sgdb-key" type="password" class="settings-input" placeholder="Paste your SteamGridDB API key" autocomplete="off" />
+              <button type="button" id="btn-toggle-key-visibility" class="settings-key-toggle" title="Show key" aria-label="Show or hide API key">SHOW</button>
+            </div>
+            <p class="settings-hint">Adds custom logos, heroes and grids to the art picker. Get a free key at steamgriddb.com.</p>
+          </div>
+        </div>
 
-      <div class="settings-section">
-        <h3 class="settings-section-title">Display</h3>
-        <label class="settings-toggle-row" for="input-show-game-titles">
-          <span class="toggle-copy">
-            <span class="toggle-title">Show game titles</span>
-            <span class="toggle-sub">Display the game name as text alongside its logo.</span>
-          </span>
-          <span class="toggle-track">
-            <input type="checkbox" id="input-show-game-titles" />
-            <span class="toggle-thumb"></span>
-          </span>
-        </label>
-        <label class="settings-toggle-row" for="input-force-motion">
-          <span class="toggle-copy">
-            <span class="toggle-title">Always animate</span>
-            <span class="toggle-sub">Overrides your system's reduce-motion setting for the launcher's animations.</span>
-          </span>
-          <span class="toggle-track">
-            <input type="checkbox" id="input-force-motion" />
-            <span class="toggle-thumb"></span>
-          </span>
-        </label>
-      </div>
+        <div class="settings-section">
+          <h3 class="settings-section-title">Display</h3>
+          <div class="settings-card">
+            <label class="settings-toggle-row" for="input-show-game-titles">
+              <span class="toggle-copy">
+                <span class="toggle-title">Show game titles</span>
+                <span class="toggle-sub">Display the game name as text alongside its logo.</span>
+              </span>
+              <span class="toggle-track">
+                <input type="checkbox" id="input-show-game-titles" />
+                <span class="toggle-thumb"></span>
+              </span>
+            </label>
+            <label class="settings-toggle-row" for="input-force-motion">
+              <span class="toggle-copy">
+                <span class="toggle-title">Always animate</span>
+                <span class="toggle-sub">Overrides your system's reduce-motion setting for the launcher's animations.</span>
+              </span>
+              <span class="toggle-track">
+                <input type="checkbox" id="input-force-motion" />
+                <span class="toggle-thumb"></span>
+              </span>
+            </label>
+          </div>
+        </div>
 
-      <div class="settings-section">
-        <h3 class="settings-section-title">Preferences</h3>
-        <label class="settings-check">
-          <input type="checkbox" id="input-check-updates" />
-          <span>Check for updates on launch</span>
-        </label>
-        <button id="btn-save-settings" class="settings-btn settings-btn-primary">Save Changes</button>
-      </div>
+        <div class="settings-section">
+          <h3 class="settings-section-title">Preferences</h3>
+          <div class="settings-card">
+            <label class="settings-check">
+              <input type="checkbox" id="input-check-updates" />
+              <span>Check for updates on launch</span>
+            </label>
+          </div>
+        </div>
 
-      <div class="settings-section settings-advanced" id="settings-advanced">
-        <button class="settings-btn-advanced-toggle" id="settings-advanced-toggle">Advanced</button>
-        <div class="advanced-body">
-          <div class="advanced-inner">
-            <button id="btn-backup-manager" class="settings-ghost">Backup Manager</button>
-            <button id="btn-open-logs" class="settings-ghost">Open Logs Folder</button>
-            <button id="btn-check-updates" class="settings-ghost">Check for Updates</button>
+        <div class="settings-section settings-advanced" id="settings-advanced">
+          <button class="settings-btn-advanced-toggle" id="settings-advanced-toggle">Advanced</button>
+          <div class="advanced-body">
+            <div class="advanced-inner">
+              <button id="btn-backup-manager" class="settings-ghost">Backup Manager</button>
+              <button id="btn-open-logs" class="settings-ghost">Open Logs Folder</button>
+              <button id="btn-check-updates" class="settings-ghost">Check for Updates</button>
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="settings-back-row">
+      <div class="settings-footer">
         <button id="btn-settings-close" class="settings-back">&larr; Back</button>
+        <button id="btn-save-settings" class="settings-btn settings-btn-primary">Save Changes</button>
       </div>
     </div>
   </div>

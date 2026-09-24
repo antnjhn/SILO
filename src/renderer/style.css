@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   VAULT LAUNCHER — style.css
-   Pure glassmorphism, green accent, centered scrolling sidebar,
+   SILO LAUNCHER — style.css
+   Pure glassmorphism, dynamic accent, centered scrolling sidebar,
    animated pill launch buttons, animated × remove button
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -13,8 +13,14 @@
   --text:          #f0f0f8;
   --text-muted:    rgba(240, 240, 248, 0.55);
   --text-dim:      rgba(240, 240, 248, 0.20);
-  --green:         #4ade80;
-  --green-dark:    #22c55e;
+  /* Dynamic accent — derived from the focused game's wallpaper by app.js.
+     Falls back to neutral light gray when no dominant color exists. The old
+     --green names are kept as aliases so every accent consumer follows it. */
+  --accent:        #e8e8ee;
+  --accent-strong: #b9b9c4;
+  --green:         var(--accent);
+  --green-dark:    var(--accent-strong);
+  --accent-soft:   rgba(232, 232, 238, 0.16);
   --red:           #f87171;
   --titlebar-h:    36px;
   --sidebar-w:     300px;
@@ -172,9 +178,9 @@ html, body {
 }
 
 .category-dot.active {
-  background: var(--green);
-  border-color: var(--green);
-  box-shadow: 0 0 10px rgba(74, 222, 128, 0.5), 0 0 20px rgba(74, 222, 128, 0.2);
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 10px var(--accent-soft), 0 0 20px var(--accent-soft);
 }
 
 .category-dot::after {
@@ -193,6 +199,113 @@ html, body {
 
 .categories-open .category-dot::after {
   opacity: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CATEGORY NAVIGATION — Curved, left-leaning navigation rail
+   Derives from relative focus along an arc with typography-driven hierarchy.
+   ═══════════════════════════════════════════════════════════════════════════ */
+#category-wheel-overlay {
+  position: fixed; inset: 0;
+  z-index: 500;
+  display: flex; align-items: center;
+  justify-content: flex-start;
+  /* Comfortably moved inward for left-side breathing room without invading center art */
+  padding-left: clamp(48px, 6vw, 84px);
+}
+#category-wheel-overlay.hidden { display: none; }
+.wheel-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(6, 6, 12, 0.5);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  opacity: 0;
+  transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+#category-wheel-overlay.open .wheel-backdrop { opacity: 1; }
+
+#category-wheel {
+  position: relative;
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: 20px;
+  opacity: 0;
+  transform: scale(0.97);
+  transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
+              transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+#category-wheel-overlay.open #category-wheel { opacity: 1; transform: none; }
+
+.wheel-hint {
+  font-size: 11px; font-weight: 700; letter-spacing: 4px;
+  color: rgba(255, 255, 255, 0.45);
+  text-shadow: 0 1px 8px rgba(0,0,0,0.6);
+  user-select: none;
+  padding-left: clamp(20px, 2.5vw, 36px);
+}
+.wheel-hint-bottom {
+  font-size: 10px;
+  letter-spacing: 2px;
+  font-weight: 600;
+  opacity: 0.7;
+  padding-left: clamp(12px, 1.8vw, 24px);
+}
+
+#wheel-list {
+  position: relative;
+  height: 380px;
+  width: 520px;
+  max-width: 60vw;
+  overflow: visible;
+  touch-action: none;
+  cursor: grab;
+  /* Clean horizontal text orientation: curve derives entirely from mathematical positioning */
+  transform: none;
+}
+#wheel-list:active { cursor: grabbing; }
+
+.wheel-item {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+  height: 64px;
+  display: flex; align-items: center;
+  justify-content: flex-start;
+  font-size: 36px;
+  font-weight: 800; letter-spacing: -0.2px;
+  color: #fff;
+  white-space: nowrap;
+  transition: none; /* JS rAF drives every frame — zero CSS fighting */
+  will-change: transform, opacity, filter;
+  cursor: pointer;
+  user-select: none;
+  text-shadow: 0 4px 28px rgba(0, 0, 0, 0.65);
+}
+.wheel-item .wheel-label {
+  line-height: 1;
+  transition: color 240ms ease;
+}
+.wheel-item.focused .wheel-label {
+  color: #ffffff;
+  text-shadow: 0 0 24px rgba(255, 255, 255, 0.25), 0 4px 28px rgba(0, 0, 0, 0.7);
+}
+.wheel-item .wheel-count {
+  font-size: 12px; font-weight: 700; letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.35);
+  margin-left: 16px;
+  font-variant-numeric: tabular-nums;
+  transform: translateY(2px);
+  transition: color 240ms ease;
+}
+.wheel-item.focused .wheel-count {
+  color: var(--accent, #4ade80);
+}
+
+/* Reduced motion: wheel snaps instead of rolling. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) #category-wheel-overlay .wheel-backdrop,
+  body:not(.force-motion) #category-wheel,
+  body:not(.force-motion) .wheel-item { transition: none !important; }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -294,6 +407,7 @@ html, body {
 #game-list-panel.focused .game-item.active::after {
   left: auto; right: -14px;
 }
+/* (kept for layout parity — the indicator itself is disabled above) */
 
 /* Add game — glass circle at top */
 #btn-add-game {
@@ -317,11 +431,11 @@ html, body {
   background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
 }
 #btn-add-game:hover {
-  border-color: var(--green);
-  color: var(--green);
-  background: rgba(74, 222, 128, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
   transform: scale(1.1);
-  box-shadow: 0 0 24px rgba(74, 222, 128, 0.3);
+  box-shadow: 0 0 24px var(--accent-soft);
 }
 
 /* ── Game logo item ───────────────────────────────────────────────────────── */
@@ -406,18 +520,10 @@ html, body {
   text-shadow: 0 0 20px rgba(255,255,255,0.25);
 }
 
-/* Vertical selection indicator — parked on the alignment line just left of the
-   logos, so the focused logo visibly leaves it behind as it moves out. */
-.game-item.active::after {
-  content: '';
-  position: absolute;
-  left: calc(-1 * var(--rail-gap, 16px));
-  top: 50%; transform: translateY(-50%);
-  width: 3px; height: 28px;
-  background: var(--green);
-  border-radius: 3px;
-  box-shadow: 0 0 12px rgba(74,222,128,0.4), 0 0 4px rgba(74,222,128,0.6);
-}
+/* Vertical selection indicator — REMOVED (was a green line left of the focused
+   logo); the focused state is carried by the carousel scale alone. */
+.game-item.active::after { content: none; }
+#game-list-panel.focused .game-item.active::after { content: none; }
 
 /* ── Logo transition clone ────────────────────────────────────────────────── */
 #logo-transition-clone {
@@ -533,21 +639,36 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 }
 /* (fallback text hiding is handled above — logo takes over whenever it exists) */
 
-/* Stats — floating text, no boxes */
+/* Stats — floating text, no boxes. Even spacing, shared baseline: the row is a
+   grid so every block gets an identical column, thin low-opacity vertical rules
+   separate them, and both value and label are baseline-aligned across blocks. */
 #details-stats {
-  display: flex; gap: 56px; margin-bottom: 0;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  column-gap: 28px;
+  align-items: baseline;
+  margin-bottom: 0;
 }
 
 .stat-block {
   background: none; border: none; padding: 0;
+  min-width: 0;
+  display: flex; flex-direction: column;
   animation: fadeInUp 0.35s ease both;
 }
 .stat-block:nth-child(2) { animation-delay: 0.05s; }
 .stat-block:nth-child(3) { animation-delay: 0.1s; }
 
+/* Thin, low-opacity vertical rule between stat blocks — never a color line. */
+.stat-block + .stat-block {
+  border-left: 1px solid rgba(255, 255, 255, 0.10);
+  padding-left: 28px;
+}
+
 .stat-value {
   font-size: 22px; font-weight: 700; color: #fff;
-  font-variant-numeric: tabular-nums; line-height: 1;
+  font-variant-numeric: tabular-nums; line-height: 1.15;
   text-shadow: 0 2px 16px rgba(0,0,0,0.6);
   white-space: nowrap; /* keep "12h 3m" on one line */
 }
@@ -562,14 +683,15 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   cursor: pointer;
   appearance: none;
   padding-right: 18px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23fff' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' fill-opacity='0.55' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right center;
+  background-position: right 2px center;
   transition: color 0.2s;
   height: 22px; /* match line height */
 }
 .status-select:hover {
-  color: var(--green);
+  color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' fill-opacity='0.9' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
 }
 .status-select option {
   background: #1a1a2e;
@@ -581,8 +703,9 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 
 .stat-label {
   font-size: 8px; letter-spacing: 3px;
-  color: rgba(255,255,255,0.45); margin-top: 4px; font-weight: 600;
+  color: rgba(255,255,255,0.45); margin-top: 5px; font-weight: 600;
   text-shadow: 0 1px 8px rgba(0,0,0,0.4);
+  white-space: nowrap;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1126,11 +1249,11 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #scan-results-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
 
 #btn-settings:hover {
-  border-color: var(--green);
-  color: var(--green);
-  background: rgba(74, 222, 128, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
   transform: scale(1.1);
-  box-shadow: 0 0 24px rgba(74, 222, 128, 0.3);
+  box-shadow: 0 0 24px var(--accent-soft);
 }
 
 /* ── Sidebar search toggle + filter ──────────────────────────────────────── */
@@ -1157,7 +1280,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 /* While searching: hide the + add button, blur settings, highlight the X */
 #game-list-panel.search-mode #btn-add-game { display: none; }
 #game-list-panel.search-mode #btn-settings { filter: blur(2px); opacity: 0.35; pointer-events: none; }
-#game-list-panel.search-mode #btn-search-toggle { color: var(--green); border-color: var(--green); background: rgba(74,222,128,0.12); }
+#game-list-panel.search-mode #btn-search-toggle { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 /* Filter bar: hidden until search mode, then slides in under the search box */
 #filter-bar { display: none; box-sizing: border-box; align-items: center; width: calc(100% - 112px); margin: 2px 0 10px 112px; align-self: flex-start; }
@@ -1308,7 +1431,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   background: var(--green);
   border: 1px solid var(--green);
   color: #06210f;
-  box-shadow: 0 0 0 1px rgba(74,222,128,0.2), 0 4px 22px rgba(74,222,128,0.3);
+  box-shadow: 0 0 0 1px var(--accent-soft), 0 4px 22px var(--accent-soft);
 }
 .btn-primary:hover { background: var(--green-dark); border-color: var(--green-dark); }
 .btn-primary::before, .btn-primary::after { display: none; }
@@ -1359,9 +1482,9 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   max-height: 64px; max-width: 220px;
   object-fit: contain;
   border-radius: 8px;
-  border: 1px solid rgba(74,222,128,0.5);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   background: rgba(0,0,0,0.30);
-  box-shadow: 0 0 0 3px rgba(74,222,128,0.12);
+  box-shadow: 0 0 0 3px var(--accent-soft);
   padding: 4px;
 }
 
@@ -1467,12 +1590,24 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   letter-spacing: 2px; color: var(--text); margin-bottom: 24px;
 }
 
-/* Standardized 11px uppercase labels */
+/* Standardized 11px uppercase labels (form field labels only — toggle rows
+   opt out via .settings-toggle-row, they carry their own typography) */
 #modal label, #settings-modal label, #uninstall-modal label, #backup-name-modal label {
   font-family: 'Inter', sans-serif;
   font-size: 11px; text-transform: uppercase; font-weight: 600;
   letter-spacing: 1.5px; color: var(--text-muted);
   display: block; margin-bottom: 8px;
+}
+#settings-modal label.settings-toggle-row {
+  display: flex;
+  text-transform: none; letter-spacing: normal;
+  font-size: 14px; font-weight: 400; color: var(--text);
+  margin-bottom: 0;
+}
+#settings-modal label.settings-check {
+  text-transform: none; letter-spacing: normal;
+  font-size: 14px; font-weight: 400; color: var(--text);
+  margin-bottom: 0;
 }
 #modal label .optional, #settings-modal label .optional,
 #uninstall-modal label .optional, #backup-name-modal label .optional {
@@ -1497,7 +1632,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 #settings-modal input:focus, #settings-modal select:focus,
 #uninstall-modal input:focus, #backup-name-modal input:focus {
   border-color: var(--green);
-  box-shadow: 0 0 0 2px rgba(74,222,128,0.25);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 #modal input::placeholder, #settings-modal input::placeholder,
 #uninstall-modal input::placeholder, #backup-name-modal input::placeholder { color: var(--text-muted); }
@@ -1566,7 +1701,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 .segmented button + button { border-left: 1px solid rgba(255,255,255,0.10); }
 .segmented button:hover { background: #20202b; }
-.segmented button.active { background: rgba(74,222,128,0.16); color: var(--green); box-shadow: inset 0 0 0 1px rgba(74,222,128,0.35); }
+.segmented button.active { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 
 /* Asset picker — 72x72 box with dashed-empty-state "+", ghost actions below */
 .asset-picker { display: flex; align-items: center; gap: 14px; }
@@ -1674,8 +1809,9 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 #settings-modal.settings-modal {
   width: 600px; max-width: 94vw;
-  max-height: 90vh; overflow-y: auto;
-  padding: 36px 40px;
+  max-height: 90vh; overflow: hidden;
+  padding: 0;
+  display: flex; flex-direction: column;
   background: rgba(24, 24, 28, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
@@ -1684,22 +1820,66 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   -webkit-backdrop-filter: blur(10px);
   text-align: left;
 }
+
+/* Header pinned at the top, body scrolls, footer sticks below — Save Changes
+   is always reachable instead of hiding at the bottom of the list. */
+.settings-head { padding: 30px 36px 6px; flex-shrink: 0; }
+.settings-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+  padding: 0 36px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.16) transparent;
+}
+.settings-body::-webkit-scrollbar { width: 4px; }
+.settings-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.16); border-radius: 2px; }
+.settings-footer {
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 36px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
 #settings-modal::before, #settings-modal::after { display: none; }
 #settings-modal, #settings-modal label, #settings-modal input,
 #settings-modal button, #settings-modal select {
   font-family: 'Inter', sans-serif;
 }
 
-/* Typography */
+/* Typography — headers stepped up so sections read at a glance */
 .settings-title { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; color: #F5F5F5; margin-bottom: 4px; }
-.settings-desc { font-size: 13px; color: #9A9A9A; margin-bottom: 34px; }
-.settings-section { margin-bottom: 30px; }
+.settings-desc { font-size: 13px; color: #9A9A9A; margin-bottom: 20px; }
+.settings-section { margin-bottom: 26px; }
 .settings-section-title {
-  font-size: 12px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 2px; color: #9A9A9A; margin-bottom: 14px;
+  font-size: 14px; font-weight: 800; text-transform: uppercase;
+  letter-spacing: 2.5px; color: #F5F5F5; margin-bottom: 10px;
 }
+.settings-card {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  padding: 18px;
+}
+.settings-card .settings-toggle-row { padding: 10px 0; }
+.settings-card .settings-toggle-row + .settings-toggle-row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
 .settings-field-label { display: block; font-size: 13px; font-weight: 600; color: #F5F5F5; margin-bottom: 8px; }
 .settings-hint { font-size: 12px; color: #9A9A9A; margin-top: 9px; line-height: 1.55; }
+
+/* API key show/hide — visible toggle, no permanently masked mystery field */
+.settings-key-row { display: flex; gap: 8px; align-items: stretch; }
+.settings-key-row .settings-input { flex: 1; }
+.settings-key-toggle {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  color: #9A9A9A;
+  font-family: var(--font-mono);
+  font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+  padding: 0 14px;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+.settings-key-toggle:hover { color: #F5F5F5; border-color: rgba(255, 255, 255, 0.25); }
 
 /* Inputs */
 .settings-input {
@@ -1714,10 +1894,10 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
 .settings-input::placeholder { color: rgba(245, 245, 245, 0.55); }
-.settings-input:focus { border-color: #A5B8FF; box-shadow: 0 0 0 2px rgba(165, 184, 255, 0.20); }
+.settings-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 /* Checkbox — minimal, accent-colored */
-.settings-check { display: flex; align-items: center; gap: 11px; font-size: 14px; color: #F5F5F5; cursor: pointer; margin-bottom: 20px; }
+.settings-check { display: flex; align-items: center; gap: 11px; font-size: 14px; color: #F5F5F5; cursor: pointer; margin-bottom: 0; }
 .settings-check input[type="checkbox"] {
   appearance: none; -webkit-appearance: none;
   width: 18px; height: 18px; margin: 0;
@@ -1727,14 +1907,14 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   cursor: pointer; position: relative; flex-shrink: 0;
   transition: background 180ms ease, border-color 180ms ease;
 }
-.settings-check input[type="checkbox"]:checked { background: #A5B8FF; border-color: #A5B8FF; }
+.settings-check input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
 .settings-check input[type="checkbox"]:checked::after {
   content: ''; position: absolute; left: 5px; top: 1px;
   width: 5px; height: 10px;
   border: solid #0F1115; border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
-.settings-check input[type="checkbox"]:focus-visible { outline: 2px solid #A5B8FF; outline-offset: 2px; }
+.settings-check input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Buttons — flat, quiet, subtle 1.02 hover scale */
 .settings-btn {
@@ -1751,11 +1931,12 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .settings-row { display: flex; gap: 12px; }
 .settings-row .settings-btn { flex: 1; }
 .settings-btn-primary {
-  width: 100%; margin-top: 4px;
-  background: #A5B8FF; border-color: #A5B8FF; color: #0F1115;
+  width: auto; margin-top: 0;
+  background: var(--accent); border-color: var(--accent); color: #0F1115;
   font-weight: 700;
+  padding: 12px 28px;
 }
-.settings-btn-primary:hover { background: #b6c6ff; border-color: #b6c6ff; }
+.settings-btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
 
 /* Advanced collapsible section */
 .settings-btn-advanced-toggle {
@@ -1766,7 +1947,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   text-align: left; padding: 14px 0; cursor: pointer;
   transition: color 180ms ease;
 }
-.settings-btn-advanced-toggle:hover { color: #A5B8FF; }
+.settings-btn-advanced-toggle:hover { color: var(--accent); }
 .advanced-body { display: grid; grid-template-rows: 0fr; overflow: hidden; transition: grid-template-rows 200ms ease; }
 #settings-advanced.open .advanced-body { grid-template-rows: 1fr; }
 .advanced-inner { overflow: hidden; }
@@ -1855,7 +2036,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 #save-path-status .sp-path-tag {
   color: var(--green);
-  border: 1px solid rgba(74, 222, 128, 0.4);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius: 3px;
   padding: 1px 4px;
   margin-right: 6px;
@@ -1956,8 +2137,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 .sp-range-btn + .sp-range-btn { border-left: 1px solid rgba(255, 255, 255, 0.14); }
 .sp-range-btn.active {
-  background: rgba(74, 222, 128, 0.16);
-  color: var(--green);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 .sp-range-btn:hover { color: #fff; }
 
@@ -2007,8 +2188,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   width: 100%;
   max-width: 30px;
   border-radius: 3px 3px 0 0;
-  background: linear-gradient(180deg, #6ee7a0, var(--green-dark));
-  box-shadow: 0 0 12px rgba(74, 222, 128, 0.25);
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  box-shadow: 0 0 12px var(--accent-soft);
   transition: height 480ms cubic-bezier(0.22, 1, 0.36, 1);
   height: 0%;
 }
@@ -2058,7 +2239,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 .stats-view-toggle { margin-bottom: 20px; }
 .stats-view-toggle button.active {
-  background: rgba(74, 222, 128, 0.14);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--green);
 }
 
@@ -2185,8 +2366,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 .stats-game-btn:hover { background: rgba(255, 255, 255, 0.07); }
 .stats-game-btn.active {
-  background: rgba(74, 222, 128, 0.10);
-  border-color: rgba(74, 222, 128, 0.45);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .stats-game-btn .gb-name {
   font-size: 12px;
@@ -2315,7 +2496,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   opacity: 0;
   transform: translateY(1px);
   transition: opacity 0.5s ease, transform 0.5s ease;
-  filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.55));
+  filter: drop-shadow(0 0 4px var(--accent-soft));
 }
 #sp-flame.show { opacity: 1; transform: none; }
 
@@ -2350,7 +2531,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .toggle-track.on {
   background: var(--green);
   border-color: var(--green);
-  box-shadow: 0 0 12px rgba(74, 222, 128, 0.35);
+  box-shadow: 0 0 12px var(--accent-soft);
 }
 .toggle-track input {
   position: absolute;
@@ -2376,7 +2557,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 .toggle-track.on .toggle-thumb { transform: translateX(18px); }
 .toggle-track input:focus-visible + .toggle-thumb {
-  outline: 2px solid rgba(74, 222, 128, 0.7);
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: 3px;
 }
 
