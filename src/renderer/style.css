@@ -11,7 +11,7 @@
 :root {
   --bg:            #06060c;
   --text:          #f0f0f8;
-  --text-muted:    rgba(240, 240, 248, 0.45);
+  --text-muted:    rgba(240, 240, 248, 0.55);
   --text-dim:      rgba(240, 240, 248, 0.20);
   --green:         #4ade80;
   --green-dark:    #22c55e;
@@ -224,6 +224,33 @@ html, body {
   pointer-events: none;
 }
 
+/* ══ Focus flow (navigate right) ═════════════════════════════════════════
+   Focused mode: the other logos fade away while the focused logo slides to
+   the RIGHT edge of the sidebar and parks there (the translateX is applied by
+   centerActiveItem because the inline transform wins over CSS). The details
+   panel occupies the space to the LEFT of the logo. Navigating left removes
+   .focused — all logos return to the line. */
+#game-list-panel.focused .game-item {
+  opacity: 0;
+  pointer-events: none;
+  filter: blur(4px);
+}
+#game-list-panel.focused .game-item.active {
+  opacity: 1;
+  pointer-events: auto;
+  filter: brightness(1) blur(0);
+  transform: scale(1.06);
+}
+#game-list-panel.focused {
+  /* Give the sliding logo breathing room against the details panel. */
+  --sidebar-w: 220px;
+}
+#game-list-panel.focused .sidebar-toolbar,
+#game-list-panel.focused #filter-bar {
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* Viewport that clips the scrolling list */
 #game-list-viewport {
   flex: 1;
@@ -237,12 +264,35 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: var(--rail-item-gap, 14px);
   width: 100%;
   position: absolute;
   left: 0; right: 0;
-  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Same duration and curve as the logos themselves, so the stack scroll and
+     the per-logo focus transfer read as one motion instead of two settling apart. */
+  transition: transform var(--rail-ms, 520ms) var(--rail-ease, cubic-bezier(0.215, 0.61, 0.355, 1));
   will-change: transform;
+}
+
+/* Rail mode: the logos share one alignment line (just right of the indicator)
+   and the rail widens only as far as the detached focused logo needs, so the
+   focused logo always has room to move out without being clipped. */
+#game-list-panel:not(.focused) {
+  width: var(--rail-w, var(--sidebar-w));
+}
+#game-list-panel:not(.focused) #game-list {
+  align-items: flex-start;
+  padding-left: calc(var(--rail-line-x, 64px) + var(--rail-gap, 16px));
+}
+/* Full details keeps its compact rail: the artwork settles back onto the line
+   (the border between the focused logo and the stats stays) while the meta and
+   actions take the stage, and the indicator returns to the logo's right. */
+#game-list-panel.focused .game-item img,
+#game-list-panel.focused .game-item .fallback-letter {
+  transform: none;
+}
+#game-list-panel.focused .game-item.active::after {
+  left: auto; right: -14px;
 }
 
 /* Add game — glass circle at top */
@@ -275,8 +325,15 @@ html, body {
 }
 
 /* ── Game logo item ───────────────────────────────────────────────────────── */
+/* One box per game on the rail. The box itself never moves — it holds the
+   shared alignment line and the selection indicator — while the artwork inside
+   carries the carousel transform (see the rail carousel block at the end of
+   this file). Only ever one logo is focused; the rest recede by distance via
+   the --rail-* custom properties app.js writes onto each item. The fallbacks
+   here reproduce the resting look. */
 .game-item {
-  width: 140px; height: 140px;
+  width: var(--rail-item, 140px);
+  height: var(--rail-item, 140px);
   border-radius: 20px;
   cursor: pointer;
   position: relative;
@@ -285,44 +342,52 @@ html, body {
   overflow: visible;
   display: flex; align-items: center; justify-content: center;
   background: transparent;
-  opacity: 0.4;
-  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-              filter 0.4s ease;
-  filter: brightness(0.4) blur(1px);
+  opacity: var(--rail-op, 0.4);
+  filter: brightness(var(--rail-bright, 0.4)) blur(var(--rail-blur, 1px));
+  /* Opacity rides the compositor along with the travel; the dim/blur is a paint,
+     so it resolves on its own shorter timing and never competes with the move. */
+  transition: opacity var(--rail-ms, 520ms) var(--rail-ease, cubic-bezier(0.215, 0.61, 0.355, 1)),
+              filter var(--rail-fade-ms, 260ms) var(--rail-ease, cubic-bezier(0.215, 0.61, 0.355, 1));
 }
 
-.game-item:hover {
+.game-item:hover:not(.active) {
   opacity: 0.7;
   filter: brightness(0.7) blur(0.5px);
 }
 
-/* Active = centered, full size, full opacity */
+/* Active = the focused logo: full opacity, crisp, in front of the others
+   (its z-index is written per item by the carousel). */
 .game-item.active { z-index: 10; opacity: 1; filter: brightness(1) blur(0); }
-.game-item.near { z-index: 5; opacity: 0.6; }
 
 .game-item.uninstalled {
-  opacity: 0.4;
-  filter: grayscale(80%) brightness(0.6);
+  opacity: var(--rail-op, 0.4);
+  filter: grayscale(80%) brightness(var(--rail-bright, 0.6));
 }
-.game-item.active.uninstalled {
-  opacity: 0.7;
-  filter: grayscale(80%) brightness(0.8);
+.game-item.uninstalled.active {
+  opacity: 1;
+  filter: grayscale(80%) brightness(calc(var(--rail-bright, 1) * 0.85));
 }
 
-/* Adjacent to active */
-.game-item.near {
-  opacity: 0.6;
-  filter: brightness(0.6) blur(0.5px);
+/* The artwork is what leaves the line and grows. The origin sits on its left
+   edge, so the offset reads as "detached from the rail" and never as a
+   re-centering of the same logo. */
+.game-item img,
+.game-item .fallback-letter {
+  transform-origin: left center;
+  transform: translateX(var(--rail-x, 0px)) scale(var(--rail-scale, 1));
+  transition: transform var(--rail-ms, 520ms) var(--rail-ease, cubic-bezier(0.215, 0.61, 0.355, 1)),
+              opacity var(--rail-ms, 520ms) var(--rail-ease, cubic-bezier(0.215, 0.61, 0.355, 1)),
+              filter var(--rail-fade-ms, 260ms) var(--rail-ease, cubic-bezier(0.215, 0.61, 0.355, 1));
+  will-change: transform, opacity;
+  backface-visibility: hidden;
 }
 
 .game-item img {
-  width: 130px; height: 130px;
+  width: calc(var(--rail-item, 140px) - 10px);
+  height: calc(var(--rail-item, 140px) - 10px);
   object-fit: contain;
   pointer-events: none;
   filter: drop-shadow(0 3px 12px rgba(0,0,0,0.6));
-  transition: filter 250ms ease, opacity 300ms ease, transform 300ms ease;
-  will-change: transform, opacity;
 }
 
 .game-item.active img {
@@ -341,11 +406,13 @@ html, body {
   text-shadow: 0 0 20px rgba(255,255,255,0.25);
 }
 
-/* Active glow bar */
+/* Vertical selection indicator — parked on the alignment line just left of the
+   logos, so the focused logo visibly leaves it behind as it moves out. */
 .game-item.active::after {
   content: '';
   position: absolute;
-  right: -14px; top: 50%; transform: translateY(-50%);
+  left: calc(-1 * var(--rail-gap, 16px));
+  top: 50%; transform: translateY(-50%);
   width: 3px; height: 28px;
   background: var(--green);
   border-radius: 3px;
@@ -381,17 +448,13 @@ html, body {
 #details-panel.is-preview #details-logo-area {
   display: none;
 }
-/* Logo-first hero: when the focused game has a logo, show it big in preview
-   with the caption (if enabled) underneath. Games without a logo fall back to
-   the styled text title via #details-game-name-fallback. */
+/* Rail view: the focused logo ON THE RAIL is the big logo now (it detaches
+   from the line and grows), so the main-area hero is not drawn — that would
+   put the same logo on screen twice and leave the rail copy looking like a
+   thumbnail. The text fallback still appears for games with no logo asset, and
+   for 'Show game titles' (see the rules below). */
 #details-panel.is-preview.has-logo #details-logo-area {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  min-height: 0;
-  margin: 0;
+  display: none;
 }
 /* When 'Show game titles' is ON: hide the logo, show the text title instead. */
 body.show-game-titles #details-panel.is-preview.has-logo #details-logo-area {
@@ -401,11 +464,9 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   display: block;
 }
 /* Keep the SaveGuard status line out of the hero's vertical centering math,
-   tucked quietly under the bottom edge of the panel instead. */
-#details-panel.is-preview.has-logo #save-path-status {
-  position: absolute;
-  left: 60px;
-  bottom: 14px;
+   tucked quietly under the bottom edge of the panel instead (rail view places
+   it — see the grid rules in the RAIL CAROUSEL section). */
+#details-panel.is-preview #save-path-status {
   max-width: min(44vw, 540px);
   pointer-events: none;
 }
@@ -429,6 +490,19 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   display: none;
 }
 #details-panel.is-preview #btn-close-details {
+  display: none;
+}
+
+/* Focused mode (details open): stats and action buttons sit LEFT of the parked
+   sidebar logo. The sidebar is narrower here (220px), so pull the content left
+   and cap its width so the logo's parking spot stays clear. No text title —
+   the logo IS the identity. */
+#details-panel:not(.is-preview) #details-inner {
+  padding-right: 0;
+  max-width: calc(100vw - 320px);
+}
+#details-panel:not(.is-preview).has-logo #details-game-name-fallback,
+#details-panel:not(.is-preview) #details-logo-area {
   display: none;
 }
 
@@ -790,7 +864,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 
 #btn-close-details {
   margin-top: 18px; background: none; border: none;
-  color: var(--text-dim); font-size: 10px; letter-spacing: 2px;
+  color: var(--text-muted); font-size: 10px; letter-spacing: 2px;
   cursor: pointer; padding: 6px 0; font-family: inherit; font-weight: 600;
   transition: color 150ms, opacity 0.4s ease;
 }
@@ -804,7 +878,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 #empty-icon { font-size: 56px; opacity: 0.05; }
 #empty-title { font-size: 11px; letter-spacing: 5px; color: var(--text-muted); font-weight: 700; }
-#empty-sub { font-size: 10px; color: var(--text-dim); }
+#empty-sub { font-size: 10px; color: var(--text-muted); }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
 #modal-overlay, #launch-overlay, #restore-overlay, #uninstall-overlay, #backup-name-overlay, #scan-results-overlay, #settings-overlay, #metadata-overlay, #backup-manager-overlay, #online-art-overlay, #stats-overlay {
@@ -1078,7 +1152,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 #game-list-panel.search-mode #search-input { display: block; animation: searchGrow 280ms cubic-bezier(0.4, 0, 0.2, 1); }
 #search-input:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
-#search-input::placeholder { color: var(--text-dim); }
+#search-input::placeholder { color: var(--text-muted); }
 
 /* While searching: hide the + add button, blur settings, highlight the X */
 #game-list-panel.search-mode #btn-add-game { display: none; }
@@ -1254,7 +1328,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .secondary-btn {
   background: var(--glass-bg);
   border: 1px solid rgba(255,255,255,0.25);
-  border-radius: 12px;
+  border-radius: 8px;
   color: var(--text);
   font-size: 12px; font-weight: 700;
   padding: 11px 14px;
@@ -1426,7 +1500,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   box-shadow: 0 0 0 2px rgba(74,222,128,0.25);
 }
 #modal input::placeholder, #settings-modal input::placeholder,
-#uninstall-modal input::placeholder, #backup-name-modal input::placeholder { color: var(--text-dim); }
+#uninstall-modal input::placeholder, #backup-name-modal input::placeholder { color: var(--text-muted); }
 
 /* Focus ring — controller-first, keep on every interactive element */
 #modal button:focus-visible, #modal input:focus-visible, #modal select:focus-visible,
@@ -1492,6 +1566,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 .segmented button + button { border-left: 1px solid rgba(255,255,255,0.10); }
 .segmented button:hover { background: #20202b; }
+.segmented button.active { background: rgba(74,222,128,0.16); color: var(--green); box-shadow: inset 0 0 0 1px rgba(74,222,128,0.35); }
 
 /* Asset picker — 72x72 box with dashed-empty-state "+", ghost actions below */
 .asset-picker { display: flex; align-items: center; gap: 14px; }
@@ -1506,7 +1581,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .asset-box .asset-plus {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  color: var(--text-dim); font-size: 26px; font-weight: 400;
+  color: var(--text-muted); font-size: 26px; font-weight: 400;
   pointer-events: none;
 }
 .asset-box img {
@@ -1638,7 +1713,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   outline: none;
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
-.settings-input::placeholder { color: rgba(245, 245, 245, 0.38); }
+.settings-input::placeholder { color: rgba(245, 245, 245, 0.55); }
 .settings-input:focus { border-color: #A5B8FF; box-shadow: 0 0 0 2px rgba(165, 184, 255, 0.20); }
 
 /* Checkbox — minimal, accent-colored */
@@ -2329,13 +2404,152 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
    REDUCED MOTION — keep hierarchy/functionality, drop reveal & pulse motion
    ═══════════════════════════════════════════════════════════════════════════ */
 @media (prefers-reduced-motion: reduce) {
-  .sp-trend.sp-anim .sp-line,
-  .sp-trend.sp-anim .sp-area,
-  .sp-trend.sp-anim .sp-end-dot { animation: none; }
-  .sp-trend.sp-anim.sp-streak .sp-end-glow { animation: none; opacity: 0.45; }
-  .sp-trend .sp-end-glow { opacity: 0; }
-  #details-panel.is-preview.hero-anim.has-logo #details-logo-img,
-  #details-panel.is-preview.hero-anim #details-game-name-fallback,
-  #details-panel.is-preview.hero-anim .stat-block { animation: none; }
-  #sp-flame { transition: none; }
+  body:not(.force-motion) .sp-trend.sp-anim .sp-line,
+  body:not(.force-motion) .sp-trend.sp-anim .sp-area,
+  body:not(.force-motion) .sp-trend.sp-anim .sp-end-dot { animation: none; }
+  body:not(.force-motion) .sp-trend.sp-anim.sp-streak .sp-end-glow { animation: none; opacity: 0.45; }
+  body:not(.force-motion) .sp-trend .sp-end-glow { opacity: 0; }
+  body:not(.force-motion) #details-panel.is-preview.hero-anim.has-logo #details-logo-img,
+  body:not(.force-motion) #details-panel.is-preview.hero-anim #details-game-name-fallback,
+  body:not(.force-motion) #details-panel.is-preview.hero-anim .stat-block { animation: none; }
+  body:not(.force-motion) #sp-flame { transition: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RAIL CAROUSEL — the focused logo detaches from the shared alignment line and
+   grows while the logos around it recede with distance. app.js derives each
+   item's distance from selectedIndex and writes these custom properties onto
+   it, so the browser interpolates them: change focus and the old logo returns
+   to the rail while the new one moves out, in the same frame. The values below
+   are fallbacks — app.js publishes the live RAIL config as the same properties
+   at start-up and on every resize. */
+:root {
+  --rail-item: 140px;
+  --rail-item-gap: 14px;
+  --rail-line-x: 64px;
+  --rail-gap: 16px;
+  --rail-head-h: 70px;
+  --rail-w: 300px;
+  --rail-ms: 520ms;
+  --rail-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --rail-buttons-ms: 240ms;
+  --rail-exit-ms: 180ms;
+  --rail-fade-ms: 260ms;   /* dim/blur settle — shorter than the travel */
+  --rail-block-gap: 26px;   /* stats row → buttons row */
+}
+
+/* Rail view placement: the stats sit BESIDE the focused logo, level with it,
+   rather than hanging off the bottom of the window. The panel starts its
+   content at the same offset as the rail's stack (--rail-head-h is measured
+   from the real toolbar), so the two centres land on the same line. */
+#details-panel.is-preview {
+  justify-content: center;
+  padding-top: var(--rail-head-h, 70px);
+  padding-bottom: 0;
+  padding-left: 44px;
+}
+
+/* The stats row is the anchor. The column becomes a three-row grid — one
+   elastic row either side of the stats — so the stats always land exactly on
+   the focused logo's centre line, whatever else the block is showing:
+     row 1 (elastic) → title, hanging just above the row
+     row 2           → the stats row itself
+     row 3 (elastic) → buttons lifted to just under the row, path dropped to
+                       the bottom edge of the panel
+   Because the two outer rows are equal shares, nothing is measured in pixels:
+   the centring holds at any window size and with either stats size. */
+#details-panel.is-preview #details-inner {
+  flex: 1 1 auto;
+  align-items: stretch;
+}
+#details-panel.is-preview #details-content {
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  align-items: center;
+  gap: 0;
+}
+#details-panel.is-preview #details-stats {
+  grid-row: 2;
+  grid-column: 1;
+  justify-self: start;
+}
+#details-panel.is-preview #details-game-name-fallback {
+  grid-row: 1;
+  grid-column: 1;
+  align-self: end;
+  justify-self: start;
+  margin-bottom: var(--rail-block-gap);
+  max-width: 46vw;
+}
+#details-panel.is-preview #details-actions {
+  grid-row: 3;
+  grid-column: 1;
+  align-self: start;
+  justify-self: start;
+  margin-top: var(--rail-block-gap);
+}
+#details-panel.is-preview #save-path-status {
+  grid-row: 3;
+  grid-column: 1;
+  align-self: end;
+  justify-self: start;
+  margin-bottom: 14px;
+}
+
+/* Stepped into the focused game: the rest of the rail fades back, so the game
+   you are on is the only logo in play. Stepping out brings them all back. */
+#game-list-panel.rail-entered .game-item:not(.active) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Browsing shows the stats only. Stepping into the game (.fx-buttons-in) brings
+   the buttons out below the row. They hang off the stats rather than sharing
+   their centring, so they cost the block nothing in either state and the stats
+   never shift when they arrive. */
+#details-panel.is-preview #details-actions {
+  display: flex;
+  opacity: 0;
+  transform: translateX(-14px);
+  pointer-events: none;
+  transition: opacity var(--rail-exit-ms) ease, transform var(--rail-exit-ms) ease;
+}
+#details-panel.is-preview.fx-buttons-in #details-actions {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+  transition: opacity var(--rail-buttons-ms) cubic-bezier(0.22, 1, 0.36, 1),
+              transform var(--rail-buttons-ms) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Instant mode (list rebuilds, returning from full details, rapid nav):
+   re-attach state with no transition ghosts. */
+body.rail-fx-instant {
+  --rail-ms: 0ms;   /* the carousel's properties apply without interpolation */
+}
+body.rail-fx-instant #game-list .game-item,
+body.rail-fx-instant #game-list .game-item img,
+body.rail-fx-instant #game-list .game-item .fallback-letter,
+body.rail-fx-instant #details-panel #details-actions {
+  transition: none !important;
+}
+
+/* Reduced motion: the hierarchy stays (the focused logo still detaches and
+   grows) but it lands immediately instead of travelling. 'Always animate' in
+   Settings lifts all of this — see body.force-motion. */
+@media (prefers-reduced-motion: reduce) {
+  /* Fallbacks only: app.js publishes these inline, and the override wins there. */
+  :root { --rail-ms: 1ms; --rail-fade-ms: 1ms; }
+  body:not(.force-motion) #details-panel.is-preview #details-actions,
+  body:not(.force-motion) #details-panel.is-preview.fx-buttons-in #details-actions {
+    transform: none;
+    transition: opacity 120ms ease;
+  }
+  /* The rail still cross-fades rather than hard-cutting: the hierarchy changes
+     in place, so reduced motion reads as a fade instead of a jump. */
+  body:not(.force-motion) #game-list .game-item,
+  body:not(.force-motion) #game-list .game-item img,
+  body:not(.force-motion) #game-list .game-item .fallback-letter {
+    transition: opacity 140ms ease;
+  }
 }

@@ -14,6 +14,7 @@ let searchQuery = '';
 let sortMode = 'name'; // 'name' | 'playtime' | 'recent'
 let showGameTitles = false; // 'Show game titles' Display setting
 let lastHeroRenderedId = null;
+let pendingLaunchTarget = null; // Edit-modal selection: 'auto' | 'launcher' | 'game'
 
 // Gamepad
 const DEADZONE = 0.4;
@@ -58,13 +59,193 @@ const ITEM_SIZE = 140;
 const ITEM_GAP = 14;
 const ITEM_STEP = ITEM_SIZE + ITEM_GAP;
 
+/* ── Rail carousel — config ────────────────────────────────────────────────
+   The rail is a vertical stack of logos that share one alignment line. Every
+   logo's look is derived from its distance to the focused index:
+
+       distance = itemIndex - selectedIndex
+
+   Distance 0 is the focused logo: it detaches from the line and grows.
+   Distances ≥ 1 recede — smaller, fainter, softly blurred — the further out
+   they sit; anything past the last entry reuses it. Everything is tuneable
+   from here: the numbers are published as CSS custom properties and the
+   geometry is recomputed from the window size on start-up and on resize. */
+const RAIL = {
+  MS: 560,                             // duration of one focus transition
+  FADE_MS: 260,                        // how fast the dim/blur settles (see below)
+  // Ease-out-cubic: a smooth start and a firm settle. The previous curve
+  // (ease-out-quint) left the line at full speed and spent most of its time
+  // crawling, which read as a snap followed by a drift.
+  EASE: 'cubic-bezier(0.215, 0.61, 0.355, 1)',
+  LINE_X: 64,                          // px from the sidebar edge to the line
+  GAP: 16,                             // gap between the line and a resting logo
+  PAD: 18,                             // breathing room right of the focused logo
+  MIN_W: 236,                          // the rail never shrinks past this
+  MAX_W: 400,                          // …nor grows past this
+  WIDTH_RATIO: 0.32,                   // …nor past this share of the window
+  FOCUS_SCALE: 2.0,                    // how much larger the focused logo gets
+  FOCUS_OFFSET: 44,                    // px it slides off the line
+  SCALE:   [1.00, 0.66, 0.48, 0.38],   // by distance 0…3+ (0 uses FOCUS_SCALE)
+  OPACITY: [1.00, 0.42, 0.20, 0.07],
+  BRIGHT:  [1.00, 0.72, 0.50, 0.34],
+  BLUR:    [0.00, 0.60, 1.60, 2.80],
+  Z:       [40, 20, 10, 5],
+};
+
+/* Rail view, two levels: browsing the rail attaches the focused game's stats to
+   its logo; stepping INTO the game adds the action buttons. Those two timings
+   live here. */
+const RAIL_FX = {
+  BUTTONS_MS: 240,      // buttons row reveal duration
+  EXIT_MS: 180,         // fade-out duration when stepping back out
+};
+
+let railEntered = false;   // the focused game has been stepped into (buttons out)
+
+/* Room the focused logo needs, derived from the window instead of hard-coded:
+   line + gap + offset + ITEM_SIZE × scale + padding. The offset is reserved
+   first and the scale takes what is left, so the carousel stays consistent
+   across window sizes. */
+const railGeo = { scale: RAIL.FOCUS_SCALE, offset: RAIL.FOCUS_OFFSET, width: 378 };
+const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+
+/* The OS reduce-motion setting is respected by default, but it is not the last
+   word: 'Always animate' in Settings overrides it for the launcher. Stored
+   locally so it survives restarts without a backend round-trip. */
+const MOTION_PREF_KEY = 'silo.forceMotion';
+let forceMotion = false;
+try { forceMotion = localStorage.getItem(MOTION_PREF_KEY) === '1'; } catch { /* private mode */ }
+
+/* True when the launcher should drop its travel animations: the system asked
+   for reduced motion and the override is off. */
+function motionReduced() {
+  return !!reduceMotion?.matches && !forceMotion;
+}
+
+/* Drops instant-mode on the next frame (so the re-attached state lands without
+   interpolating), with a timer backstop: if that frame is throttled — minimised
+   window, heavy load — the class would otherwise stick and silently kill every
+   rail transition from then on. */
+function releaseRailInstant() {
+  requestAnimationFrame(() => document.body.classList.remove('rail-fx-instant'));
+  setTimeout(() => document.body.classList.remove('rail-fx-instant'), 150);
+}
+
+function syncMotionToggle() {
+  const row = document.querySelector('label[for="input-force-motion"]');
+  const cb = document.getElementById('input-force-motion');
+  if (cb) cb.checked = forceMotion;
+  row?.querySelector('.toggle-track')?.classList.toggle('on', forceMotion);
+  const sub = row?.querySelector('.toggle-sub');
+  if (sub) {
+    sub.textContent = reduceMotion?.matches
+      ? 'Your system asks for reduced motion, so the rail is standing still. Turn this on to animate fully anyway.'
+      : 'Your system does not ask for reduced motion. Turn this on to keep animating even if it ever does.';
+  }
+}
+
+/* Applies the override to the live UI: the body class lifts the CSS-side
+   reduced-motion rules, layoutRail republishes the durations, and the setting
+   is remembered. No restart, no flicker. */
+function applyMotionPref() {
+  document.body.classList.toggle('force-motion', forceMotion);
+  try { localStorage.setItem(MOTION_PREF_KEY, forceMotion ? '1' : '0'); } catch { /* ignore */ }
+  syncMotionToggle();
+  layoutRail();
+}
+
+function layoutRail() {
+  const maxW = Math.max(RAIL.MIN_W, Math.min(RAIL.MAX_W, window.innerWidth * RAIL.WIDTH_RATIO));
+  const budget = Math.max(0, maxW - RAIL.LINE_X - RAIL.GAP - RAIL.PAD);
+  const offset = Math.round(Math.min(RAIL.FOCUS_OFFSET, budget * 0.22));
+  const scale = Math.min(RAIL.FOCUS_SCALE, Math.max(1.15, (budget - offset) / ITEM_SIZE));
+  railGeo.offset = offset;
+  railGeo.scale = scale;
+  railGeo.width = RAIL.LINE_X + RAIL.GAP + offset + ITEM_SIZE * scale + RAIL.PAD;
+
+  const s = document.documentElement.style;
+  s.setProperty('--rail-w', Math.round(railGeo.width) + 'px');
+  s.setProperty('--rail-line-x', RAIL.LINE_X + 'px');
+  s.setProperty('--rail-gap', RAIL.GAP + 'px');
+  s.setProperty('--rail-item', ITEM_SIZE + 'px');
+  s.setProperty('--rail-item-gap', ITEM_GAP + 'px');
+  // The rail's head (toolbar + filter bar) is where the focused logo's stack
+  // starts; the details block reuses that offset so the stats and buttons sit
+  // level with the logo instead of hanging off the bottom of the window.
+  const panelEl = document.getElementById('game-list-panel');
+  const viewportEl = document.getElementById('game-list-viewport');
+  if (panelEl && viewportEl) {
+    const head = viewportEl.getBoundingClientRect().top - panelEl.getBoundingClientRect().top;
+    s.setProperty('--rail-head-h', Math.max(0, Math.round(head)) + 'px');
+  }
+  // Reduced motion keeps the hierarchy but lands on it immediately. The value
+  // is published here (not in CSS) because the live config is an inline style.
+  s.setProperty('--rail-ms', (motionReduced() ? 1 : RAIL.MS) + 'ms');
+  s.setProperty('--rail-fade-ms', (motionReduced() ? 1 : RAIL.FADE_MS) + 'ms');
+  s.setProperty('--rail-ease', RAIL.EASE);
+  s.setProperty('--rail-buttons-ms', RAIL_FX.BUTTONS_MS + 'ms');
+  s.setProperty('--rail-exit-ms', RAIL_FX.EXIT_MS + 'ms');
+}
+
+/* distance → visual state: the single place scale, opacity, offset, blur and
+   stacking order come from. */
+function railState(distance) {
+  const d = Math.min(Math.abs(distance), RAIL.SCALE.length - 1);
+  const focused = distance === 0;
+  return {
+    scale: focused ? railGeo.scale : RAIL.SCALE[d],
+    x: focused ? railGeo.offset : 0,
+    opacity: RAIL.OPACITY[d],
+    brightness: RAIL.BRIGHT[d],
+    blur: RAIL.BLUR[d],
+    z: RAIL.Z[d],
+  };
+}
+
+/* Push that state onto every logo. Each item only carries custom properties,
+   so the browser interpolates them: a focus change sends the old logo back to
+   the line while the new one moves out, in the same frame, and rapid input
+   simply re-targets the transitions in flight — never a queued or stuck logo. */
+function applyRailCarousel() {
+  document.querySelectorAll('#game-list .game-item').forEach((el, i) => {
+    const st = railState(i - selectedIndex);
+    const s = el.style;
+    s.setProperty('--rail-scale', String(st.scale));
+    s.setProperty('--rail-x', st.x + 'px');
+    s.setProperty('--rail-op', String(st.opacity));
+    s.setProperty('--rail-bright', String(st.brightness));
+    s.setProperty('--rail-blur', st.blur + 'px');
+    s.zIndex = String(st.z);
+  });
+}
+
+reduceMotion?.addEventListener?.('change', () => layoutRail());
+
+/* Resizing changes the room the focused logo has: recompute the geometry and
+   re-apply the rail in one frame, with transitions suppressed, then re-center
+   the stack (the viewport height moved too). */
+let railResizeRaf = 0;
+window.addEventListener('resize', () => {
+  if (railResizeRaf) return;
+  railResizeRaf = requestAnimationFrame(() => {
+    railResizeRaf = 0;
+    layoutRail();
+    document.body.classList.add('rail-fx-instant');
+    applyRailCarousel();
+    centerActiveItem(false);
+    void document.body.offsetHeight;
+    releaseRailInstant();
+  });
+});
+
 /* ── Tauri IPC Shim ────────────────────────────────────────────────────────*/
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 window.vault = {
   getGames: () => invoke('get_games'),
-  addGame: (data) => invoke('add_game', { name: data.name, exePath: data.exePath || null, wallpaper: data.wallpaper || null, logoPath: data.logoPath || null, fontFamily: data.fontFamily || null, fontColor: data.fontColor || null, savePath: data.savePath || null }),
+  addGame: (data) => invoke('add_game', { name: data.name, exePath: data.exePath || null, wallpaper: data.wallpaper || null, logoPath: data.logoPath || null, fontFamily: data.fontFamily || null, fontColor: data.fontColor || null, savePath: data.savePath || null, launchTarget: data.launchTarget || null }),
   updateGame: (id, updates) => invoke('update_game', { id, updates }),
+  detectLaunchTarget: (exePath) => invoke('detect_launch_target', { exePath }),
   deleteGame: (id) => invoke('delete_game', { id }),
   pickExe: () => invoke('pick_exe'),
   pickSaveFolder: () => invoke('pick_save_folder'),
@@ -121,6 +302,10 @@ function showToast(type, title, msg) {
 
 /* ── Init ──────────────────────────────────────────────────────────────────*/
 async function init() {
+  // Apply the motion override before anything measures or animates.
+  document.body.classList.toggle('force-motion', forceMotion);
+  syncMotionToggle();
+  layoutRail();   // publish the rail geometry before the first logo renders
   allGames = await window.vault.getGames();
   try {
     const s = await window.vault.getSettings();
@@ -304,10 +489,12 @@ function renderGameList() {
     else if (dist === 1) cls += ' near';
     if (g.isInstalled === false) cls += ' uninstalled';
 
+    // Sidebar is logos-only: no text titles, no tooltips. Games without a logo
+    // asset fall back to the first letter styled with the game's font/color.
     return `
-    <div class="${cls}" data-index="${i}" title="${esc(g.name)}">
+    <div class="${cls}" data-index="${i}" aria-label="${esc(g.name)}">
       ${g.logoPath
-        ? `<img data-logo-path="${esc(g.logoPath)}" alt="${esc(g.name)}"
+        ? `<img data-logo-path="${esc(g.logoPath)}" alt=""
              onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
            <span class="fallback-letter" style="display:none; color:${esc(g.fontColor||'')}; font-family:'${esc(g.fontFamily||'')}';">${esc(String(g.name).charAt(0))}</span>`
         : `<span class="fallback-letter" style="color:${esc(g.fontColor||'')}; font-family:'${esc(g.fontFamily||'')}';">${esc(String(g.name).charAt(0))}</span>`}
@@ -320,9 +507,17 @@ function renderGameList() {
   });
 
   list.querySelectorAll('.game-item').forEach(el => {
-    el.addEventListener('click', () => selectGame(parseInt(el.dataset.index)));
+    el.addEventListener('click', () => {
+      const i = parseInt(el.dataset.index);
+      if (i === selectedIndex) railEnterGame();   // clicking the focused logo steps in
+      else selectGame(i);
+    });
     el.addEventListener('dblclick', () => { selectGame(parseInt(el.dataset.index)); openDetails(); });
   });
+
+  // The list was rebuilt: reconcile the carousel with no animation so the
+  // focused logo takes its place in one frame.
+  syncRailInstant();
 }
 
 function openCategories() {
@@ -376,6 +571,7 @@ function toggleSearch(forceOpen) {
   const next = typeof forceOpen === 'boolean' ? forceOpen : !isSearchOpen;
   isSearchOpen = next;
   panel.classList.toggle('search-mode', next);
+  requestAnimationFrame(layoutRail);   // the filter bar changes the rail's head height
   toggle.innerHTML = next ? X_ICON : SEARCH_ICON;
   if (next) {
     document.getElementById('search-input').focus();
@@ -399,37 +595,71 @@ function centerActiveItem(animate = true) {
   // Position of active item center relative to list top
   const itemCenterY = selectedIndex * ITEM_STEP + ITEM_SIZE / 2;
   const translateY = centerY - itemCenterY;
+  // In focused mode the focused logo parks to the right edge of the sidebar:
+  // handled here because the inline transform overrides any CSS-only rule.
+  const focused = document.getElementById('game-list-panel').classList.contains('focused');
+  const translateX = focused ? 60 : 0;
 
   if (!animate) list.style.transition = 'none';
-  list.style.transform = `translateY(${translateY}px)`;
+  list.style.transform = `translateY(${translateY}px) translateX(${translateX}px)`;
   if (!animate) {
     // Force reflow then re-enable transitions
     list.offsetHeight;
     list.style.transition = '';
   }
+  // Per-logo scale/offset/fade is not set here: the rail carousel derives all
+  // of it from selectedIndex (applyRailCarousel), so scroll position and
+  // visual focus stay independent.
+}
 
-  list.querySelectorAll('.game-item').forEach((el, i) => {
-    const dist = Math.abs(i - selectedIndex);
-    const xOffset = -1 * (dist * dist * 8);
-    const scale = i === selectedIndex ? 1 : (dist === 1 ? 0.82 : 0.7);
-    if (!animate) el.style.transition = 'none';
-    el.style.transform = `translateX(${xOffset}px) scale(${scale})`;
-    if (!animate) {
-      el.offsetHeight;
-      el.style.transition = '';
-    }
-  });
+/* ── Rail view: browsing vs stepped in ────────────────────────────────────
+   Browsing the rail attaches the focused game's stats to its logo. Stepping
+   into the game (RIGHT / click on the focused logo) brings the action buttons
+   in beside them; moving to another game steps back out, so while you browse
+   it is always stats only. */
+function railSetEntered(on) {
+  railEntered = on;
+  document.getElementById('details-panel')?.classList.toggle('fx-buttons-in', on);
+  // Stepping in also clears the rail: the logos you are not on fade back so the
+  // one you are on is the only one in play. Stepping out (LEFT) brings them back.
+  document.getElementById('game-list-panel')?.classList.toggle('rail-entered', on);
+}
+
+function railEnterGame() {
+  if (detailsOpen || railEntered || !games.length) return;
+  railSetEntered(true);
+  vibrate(false);   // right side
+}
+
+function railExitGame() {
+  if (!railEntered) return;
+  railSetEntered(false);
+  vibrate(true);    // left side
+}
+
+/* Reconcile the rail without animation after a list rebuild (search, sort,
+   category switch, add/delete) or when returning from full details: the
+   carousel re-attaches to whatever is focused, with transitions suppressed so
+   nothing ghosts in from the previous logo. */
+function syncRailInstant() {
+  document.body.classList.add('rail-fx-instant');
+  applyRailCarousel();
+  void document.body.offsetHeight;
+  releaseRailInstant();
 }
 
 /* ── Select game — with transitions ───────────────────────────────────────*/
 function selectGame(i) {
   if (i < 0 || i >= games.length || i === selectedIndex) return;
   selectedIndex = i;
-  updateGameListSelection();
+  updateGameListSelection();   // recalculates the visual state of every logo
   centerActiveItem(true);
   crossfadeWallpaper();
   if (games[i]) renderDetails(games[i]);
-  if (!detailsOpen) retriggerHeroAnimation();
+  if (!detailsOpen) {
+    railExitGame();            // moving on drops back to browsing: stats only
+    retriggerHeroAnimation();
+  }
 }
 
 /* Re-run the hero entrance (logo scales up, stats glide in) whenever the focused
@@ -444,14 +674,18 @@ function retriggerHeroAnimation() {
   panel.classList.add('hero-anim');
 }
 
+/* Selection changed: re-tag the items (active / near) and hand the whole rail
+   to the carousel so every logo's scale, opacity and offset follow the new
+   focus. Nothing animates here — CSS transitions carry the change. */
 function updateGameListSelection() {
   const items = document.querySelectorAll('#game-list .game-item');
   items.forEach((el, i) => {
     const dist = Math.abs(i - selectedIndex);
-    el.className = 'game-item';
-    if (i === selectedIndex) el.classList.add('active');
-    else if (dist === 1) el.classList.add('near');
+    el.className = 'game-item'
+      + (i === selectedIndex ? ' active' : dist === 1 ? ' near' : '')
+      + (el.classList.contains('uninstalled') ? ' uninstalled' : '');
   });
+  applyRailCarousel();
 }
 
 /* ── Wallpaper crossfade between two layers ───────────────────────────────*/
@@ -510,13 +744,18 @@ function openDetails() {
   detailsOpen = true;
   document.getElementById('empty-state').style.display = 'none';
   renderDetails(games[selectedIndex]);
+  // Full details takes over the layout: the rail settles back onto the line
+  // (see #game-list-panel.focused in style.css) while the stats and buttons
+  // step forward together.
   const sidebar = document.getElementById('game-list-panel');
   const details = document.getElementById('details-panel');
-  // The CSS transitions handle the crossfade: the sidebar slides/fades out while
-  // the details panel (and its logo) fade in. No flying logo clone.
+  // Focus flow (navigate right): the OTHER logos fade away while the focused
+  // logo slides to the right edge of the sidebar and STAYS. The details panel
+  // (stats + buttons) appears in the space to the LEFT of the logo.
   details.classList.remove('hidden');
   details.classList.remove('is-preview');
-  sidebar.classList.add('collapsed');
+  sidebar.classList.add('focused');
+  sidebar.classList.remove('logos-mode');
 }
 
 function closeDetails() {
@@ -525,13 +764,17 @@ function closeDetails() {
   detailsOpen = false;
   const sidebar = document.getElementById('game-list-panel');
   const details = document.getElementById('details-panel');
-  // CSS transitions crossfade: the logo fades back to preview as the sidebar returns.
-  sidebar.classList.remove('collapsed');
+  // Navigate left: other game logos reappear on the line and the focused logo
+  // returns to its centered spot among them.
+  sidebar.classList.remove('focused');
   details.classList.add('is-preview');
   if (!games.length) {
     details.classList.add('hidden');
     document.getElementById('empty-state').style.display = 'flex';
   }
+  // Back to browsing: re-attach the carousel to the focused logo, stats only.
+  railSetEntered(false);
+  syncRailInstant();
 }
 
 function renderDetails(g) {
@@ -615,7 +858,7 @@ function renderDetails(g) {
     
     restoreBtn.onclick = async () => {
       if (!g.savePath) {
-        showToast('error', 'Not Ready', 'Launch the game — SaveGuard will find the save folder and backups will start automatically.');
+        showToast('error', 'Not Ready', 'Launch the game - SaveGuard will find the save folder and backups will start automatically.');
         return;
       }
       
@@ -658,7 +901,7 @@ function renderDetails(g) {
 
     backupBtn.onclick = async () => {
       if (!g.savePath) {
-        showToast('error', 'Not Ready', 'Launch the game — SaveGuard will find the save folder and backups will start automatically.');
+        showToast('error', 'Not Ready', 'Launch the game - SaveGuard will find the save folder and backups will start automatically.');
         return;
       }
       
@@ -914,6 +1157,58 @@ document.getElementById('btn-launch-cancel').addEventListener('click', () => {
 });
 
 /* ── Add / Edit modal ──────────────────────────────────────────────────────*/
+// Launch Target segmented control: 'auto' | 'launcher' | 'game'. SILO inspects
+// the chosen exe and shows what it detected; the user can pin the choice.
+const LAUNCH_TARGET_IDS = { auto: 'lt-auto', launcher: 'lt-launcher', game: 'lt-game' };
+
+function setLaunchTargetUI(value, hint) {
+  Object.entries(LAUNCH_TARGET_IDS).forEach(([val, id]) => {
+    document.getElementById(id)?.classList.toggle('active', val === value);
+  });
+  const hintEl = document.getElementById('launch-target-hint');
+  if (hintEl) hintEl.textContent = hint || '';
+}
+
+function setLaunchTarget(value) {
+  pendingLaunchTarget = value;
+  setLaunchTargetUI(value, null);
+  refreshLaunchTargetHint();
+}
+
+// Ask the backend what the exe looks like and render the guidance line.
+async function refreshLaunchTargetHint() {
+  const exe = document.getElementById('input-exe').value.trim();
+  if (!exe) {
+    setLaunchTargetUI(pendingLaunchTarget || 'auto', '');
+    return;
+  }
+  try {
+    const info = await window.vault.detectLaunchTarget(exe);
+    let hint;
+    if (info.launcherLike && info.realGamePath) {
+      // Show the path relative to the install folder — "x64/Cyberpunk2077.exe"
+      // says more than just the file name.
+      const parts = info.realGamePath.replace(/\\/g, '/').split('/');
+      const gameExe = parts.slice(-2).join('/');
+      hint = `Launcher detected — game found at ${gameExe}. Auto and Game start that binary directly; Launcher starts the exe above. Saves are found either way.`;
+    } else if (info.launcherLike) {
+      hint = 'Launcher detected, but no game binary was found below it. SILO starts the exe above; saves are still detected by name after the session.';
+    } else {
+      hint = 'This looks like the game itself. Saves are auto-detected on launch.';
+    }
+    setLaunchTargetUI(pendingLaunchTarget || 'auto', hint);
+  } catch (e) {
+    setLaunchTargetUI(pendingLaunchTarget || 'auto', '');
+  }
+}
+
+function bindLaunchTargetButtons() {
+  Object.entries(LAUNCH_TARGET_IDS).forEach(([val, id]) => {
+    document.getElementById(id)?.addEventListener('click', () => setLaunchTarget(val));
+  });
+}
+bindLaunchTargetButtons();
+
 function openAddModal() {
   editingGameId = null; modalWallpaperPath = null; modalLogoPath = null;
   document.getElementById('modal-title').textContent = 'ADD GAME';
@@ -928,6 +1223,8 @@ function openAddModal() {
   document.getElementById('input-tags').value = '';
   document.getElementById('backup-count-group').style.display = 'none';
   document.getElementById('input-backup-count').value = 5;
+  pendingLaunchTarget = 'auto';
+  setLaunchTargetUI('auto', '');
 
   document.getElementById('edit-wallpaper-preview-img').style.display = 'none';
   document.getElementById('edit-logo-preview-img').style.display = 'none';
@@ -953,6 +1250,9 @@ function openEditModal(g) {
   document.getElementById('input-tags').value = (g.tags || []).join(', ');
   document.getElementById('backup-count-group').style.display = 'block';
   document.getElementById('input-backup-count').value = g.backupCount || 5;
+  pendingLaunchTarget = g.launchTarget || 'auto';
+  setLaunchTargetUI(pendingLaunchTarget, '');
+  refreshLaunchTargetHint();
 
   const wImg = document.getElementById('edit-wallpaper-preview-img');
   if (modalWallpaperPath) {
@@ -1022,7 +1322,7 @@ document.getElementById('btn-autofill').addEventListener('click', async () => {
   } catch (err) {
     showToast('error', 'API Error', 'Failed to contact metadata service');
   } finally {
-    btn.textContent = '✨ Auto-Fill Metadata';
+    btn.textContent = 'Auto-Fill Metadata';
   }
 });
 
@@ -1176,7 +1476,7 @@ async function runOnlineArtSearch() {
   if (res.hasSgdb && res.sgdbCount === 0) {
     showArtNotice('SteamGridDB is enabled but returned no art for this search. Check Settings → Open Logs Folder.');
   } else if (!res.hasSgdb) {
-    showArtNotice('SteamGridDB off — add your free key in Settings to see custom art.');
+    showArtNotice('SteamGridDB off - add your free key in Settings to see custom art.');
   }
 }
 
@@ -1438,8 +1738,12 @@ document.getElementById('btn-clear-save-path').addEventListener('click', () => {
 
 document.getElementById('btn-pick-exe').addEventListener('click', async () => {
   const p = await window.vault.pickExe();
-  if (p) document.getElementById('input-exe').value = p;
+  if (p) {
+    document.getElementById('input-exe').value = p;
+    refreshLaunchTargetHint();
+  }
 });
+document.getElementById('input-exe')?.addEventListener('change', () => refreshLaunchTargetHint());
 
 document.getElementById('btn-pick-logo').addEventListener('click', async () => {
   if (!editingGameId) return;
@@ -1509,6 +1813,7 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
         fontFamily: fontFamily || undefined,
         fontColor: fontColor || undefined,
         savePath: savePath || null,
+        launchTarget: pendingLaunchTarget || null,
         tags,
       };
       if (!isNaN(backupCount) && backupCount >= 1 && backupCount <= 50) updates.backupCount = backupCount;
@@ -1519,7 +1824,7 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
       if (detailsOpen && games[selectedIndex]?.id === editingGameId) renderDetails(u);
       showToast('success', 'Updated', `${name} saved`);
     } else {
-      const g = await window.vault.addGame({ name, exePath, wallpaper: modalWallpaperPath, logoPath: modalLogoPath, fontFamily: fontFamily || undefined, fontColor: fontColor || undefined, savePath: savePath || null });
+      const g = await window.vault.addGame({ name, exePath, wallpaper: modalWallpaperPath, logoPath: modalLogoPath, fontFamily: fontFamily || undefined, fontColor: fontColor || undefined, savePath: savePath || null, launchTarget: pendingLaunchTarget || null });
       if (g && tags.length) {
         try {
           const updated = await window.vault.updateGame(g.id, { tags });
@@ -1534,6 +1839,7 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
 
     updateGameListSelection();
     centerActiveItem(true);
+    syncRailInstant();
     crossfadeWallpaper();
     document.getElementById('modal-overlay').classList.add('hidden');
   } catch (err) {
@@ -1633,16 +1939,33 @@ document.addEventListener('keydown', e => {
   }
 
   switch (e.key) {
-    case 'ArrowUp':    e.preventDefault(); if (!detailsOpen && selectedIndex > 0) selectGame(selectedIndex - 1); break;
-    case 'ArrowDown':  e.preventDefault(); if (!detailsOpen && selectedIndex < games.length - 1) selectGame(selectedIndex + 1); break;
-    case 'ArrowRight': e.preventDefault(); if (!detailsOpen && games.length) openDetails(); break;
-    case 'ArrowLeft':  e.preventDefault();
-      if (detailsOpen) closeDetails();
-      else openCategories();
+    // Two levels: UP/DOWN browse the rail (the focused game's stats follow it),
+    // RIGHT steps into the machine so its action buttons come out, LEFT steps
+    // back out. A / Enter still opens the full details view.
+    case 'ArrowUp':
+      e.preventDefault();
+      if (!detailsOpen && selectedIndex > 0) selectGame(selectedIndex - 1);
+      break;
+    case 'ArrowDown':
+      e.preventDefault();
+      if (!detailsOpen && selectedIndex < games.length - 1) selectGame(selectedIndex + 1);
+      break;
+    case 'ArrowRight':
+      e.preventDefault();
+      if (!detailsOpen) railEnterGame();
+      break;
+    case 'ArrowLeft':
+      e.preventDefault();
+      if (detailsOpen) closeDetails();          // LEFT from full details returns
+      else railExitGame();
       break;
     case 'Enter':      e.preventDefault();
       if (!detailsOpen && games.length) openDetails();
       else if (detailsOpen && games[selectedIndex]) openLaunchModal(games[selectedIndex].id);
+      break;
+    // LEFT is "previous game" now, so the category dots keep a key of their own.
+    case 'c': case 'C':
+      if (!detailsOpen && !categoriesOpen) { e.preventDefault(); openCategories(); }
       break;
     case 'Escape': if (detailsOpen) closeDetails(); break;
   }
@@ -1712,12 +2035,16 @@ function handlePad(pad) {
     savePad(pad); return;
   }
 
-  if (up   && now - lastNavTime > NAV_REPEAT && selectedIndex > 0) { lastNavTime = now; if (!detailsOpen) selectGame(selectedIndex - 1); vibrateVertical(); }
-  if (down && now - lastNavTime > NAV_REPEAT && selectedIndex < games.length - 1) { lastNavTime = now; if (!detailsOpen) selectGame(selectedIndex + 1); vibrateVertical(); }
-  if (right && !prevAxes.right && !detailsOpen && games.length) openDetails();
-  if (left  && !prevAxes.left) {
-    if (detailsOpen) closeDetails();
-    else openCategories();
+  // Two levels: d-pad / stick UP+DOWN browse the rail (hold to scrub), RIGHT
+  // steps into the focused game so its buttons come out, LEFT steps back out.
+  if (!detailsOpen) {
+    if (up    && now - lastNavTime > NAV_REPEAT && selectedIndex > 0) { lastNavTime = now; selectGame(selectedIndex - 1); vibrateVertical(); }
+    if (down  && now - lastNavTime > NAV_REPEAT && selectedIndex < games.length - 1) { lastNavTime = now; selectGame(selectedIndex + 1); vibrateVertical(); }
+    if (right && !prevAxes.right) railEnterGame();
+    if (left  && !prevAxes.left)  railExitGame();
+    if (btnPressed(pad, 4, 'LB')) openCategories();
+  } else if (left && !prevAxes.left) {
+    closeDetails();
   }
 
   prevAxes.right = right; prevAxes.left = left;
@@ -1727,7 +2054,8 @@ function handlePad(pad) {
   const xPressed = !!pad.buttons[2]?.pressed;
   const yPressed = !!pad.buttons[3]?.pressed;
 
-  if (detailsOpen && games[selectedIndex]) {
+  // The direct action buttons work inside the game — full details or stepped in.
+  if ((detailsOpen || railEntered) && games[selectedIndex]) {
     const handleGamepadHold = (isPressed, btnId) => {
       const btn = document.getElementById(btnId);
       if (!btn) return;
@@ -1800,7 +2128,7 @@ let cachedSettings = null;
 // Applies the 'Show game titles' preference to the live UI (body class drives CSS).
 function applyShowGameTitles(syncCheckbox = true) {
   document.body.classList.toggle('show-game-titles', !!showGameTitles);
-  const track = document.querySelector('.toggle-track');
+  const track = document.querySelector('label[for="input-show-game-titles"] .toggle-track');
   if (track) track.classList.toggle('on', !!showGameTitles);
   if (syncCheckbox) {
     const cb = document.getElementById('input-show-game-titles');
@@ -1817,6 +2145,7 @@ async function openSettingsModal() {
     document.getElementById('input-sgdb-key').value = s.sgdbApiKey || '';
     document.getElementById('input-check-updates').checked = !!s.checkUpdatesOnLaunch;
     applyShowGameTitles();
+    syncMotionToggle();
   } catch (err) {
     console.error(err);
   }
@@ -1846,6 +2175,13 @@ document.getElementById('input-show-game-titles')?.addEventListener('change', as
     showToast('error', 'Save Failed', err);
   }
 });
+// 'Always animate' — overrides the system reduce-motion setting for the launcher.
+// Applies instantly (no Save required); stored locally, not in the settings file.
+document.getElementById('input-force-motion')?.addEventListener('change', (e) => {
+  forceMotion = e.target.checked;
+  applyMotionPref();
+});
+
 document.getElementById('btn-settings-close').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.add('hidden');
 });
@@ -2068,7 +2404,7 @@ function renderSavePathStatus(g) {
       : '';
     el.innerHTML = `${tag}<span title="${esc(g.savePath)}">${esc(g.savePath)}</span>`;
   } else {
-    el.textContent = 'SAVE FOLDER — auto-detected when you launch';
+    el.textContent = 'SAVE FOLDER - auto-detected when you launch';
   }
 }
 
@@ -2170,7 +2506,7 @@ function renderChartBars(host, sessions, gameId, metric, days) {
     const hint = hasAny
       ? 'No sessions in this range yet.'
       : (metric === 'sessions' ? 'No sessions tracked yet.' : 'No playtime tracked yet.');
-    host.innerHTML = `<div class="stats-empty">${hint}<br><span style="font-size:10px;color:rgba(255,255,255,0.28);">Launch a game — history appears after your first session.</span></div>`;
+    host.innerHTML = `<div class="stats-empty">${hint}<br><span style="font-size:10px;color:rgba(255,255,255,0.28);">Launch a game - history appears after your first session.</span></div>`;
     return;
   }
 
@@ -2187,8 +2523,8 @@ function renderChartBars(host, sessions, gameId, metric, days) {
   const labelEvery = days <= 7 ? 1 : 5;
   const cols = buckets.map((b, i) => {
     const tip = metric === 'sessions'
-      ? `${fmtDayTitle(b.date)} — ${b.count} session${b.count === 1 ? '' : 's'}${b.minutes ? ` · ${fmtShort(b.minutes)}` : ''}`
-      : `${fmtDayTitle(b.date)} — ${fmtShort(b.minutes)} in ${b.count} session${b.count === 1 ? '' : 's'}`;
+      ? `${fmtDayTitle(b.date)} - ${b.count} session${b.count === 1 ? '' : 's'}${b.minutes ? ` · ${fmtShort(b.minutes)}` : ''}`
+      : `${fmtDayTitle(b.date)} - ${fmtShort(b.minutes)} in ${b.count} session${b.count === 1 ? '' : 's'}`;
     return `<div class="act-col${disp[i] === 0 ? ' zero' : ''}" title="${esc(tip)}"><div class="act-bar" style="transition-delay:${i * 18}ms;"></div></div>`;
   }).join('');
   const axis = buckets.map((b, i) =>
@@ -2260,7 +2596,7 @@ function renderTrendLine(host, sessions, gameId, days, metric = 'playtime') {
 
   if (!buckets.some(b => value(b) > 0)) {
     const hint = hasAny ? emptyMsg : noDataMsg;
-    host.innerHTML = `<div class="stats-empty">${hint}<br><span style="font-size:10px;color:rgba(255,255,255,0.28);">Launch a game — history appears after your first session.</span></div>`;
+    host.innerHTML = `<div class="stats-empty">${hint}<br><span style="font-size:10px;color:rgba(255,255,255,0.28);">Launch a game - history appears after your first session.</span></div>`;
     return false;
   }
 
@@ -2403,7 +2739,7 @@ function renderStatsOverall() {
         <span class="rank-time">${fmtTime(g.playtimeMinutes)}</span>
       </div>`).join('');
   } else {
-    rankWrap.innerHTML = '<div class="stats-empty">No playtime yet — launch a game to get started.</div>';
+    rankWrap.innerHTML = '<div class="stats-empty">No playtime yet - launch a game to get started.</div>';
   }
   sec.appendChild(rankWrap);
   el.appendChild(sec);
@@ -2543,7 +2879,11 @@ function bindStatPopoverHover() {
     const block = document.getElementById('stat-block-' + metric);
     if (!block) return;
     block.addEventListener('mouseenter', () => {
-      if (!detailsOpen || !games[selectedIndex]) return;
+      // Available wherever the stats are on screen: the rail view (browsing or
+      // stepped into the game) as well as the full details pane. Requiring
+      // full details here is why the chart never appeared in the rail.
+      const panel = document.getElementById('details-panel');
+      if (!panel || panel.classList.contains('hidden') || !games[selectedIndex]) return;
       openStatPopover(metric, games[selectedIndex].id);
     });
     block.addEventListener('mouseleave', scheduleStatPopoverHide);
