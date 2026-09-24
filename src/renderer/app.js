@@ -235,6 +235,7 @@ window.addEventListener('resize', () => {
     centerActiveItem(false);
     void document.body.offsetHeight;
     releaseRailInstant();
+    if (categoriesOpen) renderWheel(wheelPos);
   });
 });
 
@@ -520,33 +521,317 @@ function renderGameList() {
   syncRailInstant();
 }
 
+/* ── Category option wheel (LEFT from the rail / C / LB) ─────────────────
+/* ═══════════════════════════════════════════════════════════════════════════
+   CATEGORY SELECTION RAIL — Curved Navigation Rail
+
+   The categories are arranged along a smooth, continuous mathematical arc
+   with the selected category sitting at the apex / focal point.
+   Surrounding categories follow that same curvature, progressively receding
+   toward the LEFT as distance increases.
+
+   Positions derive continuously from relative distance = i - pos:
+     x = focusX - curveStrength * (|distance|^curveExponent)
+     y = centerY + distance * verticalSpacing
+   ═══════════════════════════════════════════════════════════════════════════ */
+const CATEGORY_CURVE = {
+  // Positioning geometry
+  focusX: 88,              // horizontal X position of the focal apex (px, restrained & connected)
+  focusY: 0,               // vertical anchor offset (px, relative to center)
+  verticalSpacing: 74,     // px vertical distance per category row
+  curveStrength: 46,       // horizontal leftward curvature displacement factor (px)
+  curveExponent: 1.62,     // nonlinear exponent for the curved arc (smooth, continuous arc)
+  downwardLean: 2,         // subtle directional bias to preserve natural left-leaning flow (px)
+  leanDeg: 0,              // rail rotation (degrees, text remains horizontal)
+
+  // Scale hierarchy (distance-based)
+  focusedScale: 1.0,       // scale at distance 0 (selected/focal item)
+  unfocusedScale: 0.78,   // scale at distance 1
+  distanceScaleRate: 0.82, // scale decay per unit distance beyond 1
+  minScale: 0.50,          // minimum scale floor
+
+  // Opacity hierarchy (distance-based)
+  focusedOpacity: 1.0,     // opacity at distance 0
+  unfocusedOpacity: 0.44, // opacity at distance 1 (35%–50%)
+  distanceOpacityRate: 0.45,// opacity decay per unit distance beyond 1 (distance 2: ~20%)
+  minOpacity: 0.08,        // minimum visible opacity floor (does not abruptly vanish)
+
+  // Softening / Blur hierarchy
+  adjacentBlur: 0.5,       // blur at distance 1 (px)
+  distanceBlurRate: 1.0,   // blur increase per unit distance beyond 1
+  maxBlur: 3.0,            // blur cap (px)
+
+  // Visibility cutoff
+  maxVisibleDistance: 4.2, // elements beyond this are hidden
+
+  // Motion & Animation
+  animationDuration: 480,  // transition duration in ms (400-600ms range)
+  dragSnapDuration: 280,   // duration of drag release snap (ms)
+  ease: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2), // easeInOutCubic
+};
+
+// Aliases for compatibility
+CATEGORY_CURVE.focusScale = CATEGORY_CURVE.focusedScale;
+CATEGORY_CURVE.adjacentScale = CATEGORY_CURVE.unfocusedScale;
+CATEGORY_CURVE.focusOpacity = CATEGORY_CURVE.focusedOpacity;
+CATEGORY_CURVE.adjacentOpacity = CATEGORY_CURVE.unfocusedOpacity;
+
+let wheelItems = [];
+let wheelDrag = null;   // { startY, startOffset, moved }
+let wheelAnim = null;   // rAF handle for focus-travel animation
+let wheelPos = 0;       // continuous focus position (index units)
+
+function wheelCountFor(cat) {
+  if (cat === 'ALL GAMES') return allGames.length;
+  if (cat === 'RECENTLY PLAYED') return Math.min(4, allGames.length);
+  if (cat === 'FAVORITES') return allGames.filter(g => g.favorite).length;
+  return allGames.filter(g => (g.tags || []).includes(cat)).length;
+}
+
+function buildWheel() {
+  const list = document.getElementById('wheel-list');
+  if (!list) return;
+  const cats = getCategories();
+  list.innerHTML = cats.map((c, i) =>
+    `<div class="wheel-item" data-index="${i}"><span class="wheel-label">${esc(c)}</span><span class="wheel-count">${wheelCountFor(c)}</span></div>`
+  ).join('');
+  wheelItems = [...list.querySelectorAll('.wheel-item')];
+
+  wheelItems.forEach((el, i) => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (categorySelectedIndex === i) {
+        closeCategories(true);
+      } else {
+        categorySelectedIndex = i;
+        wheelTravelTo(i, CATEGORY_CURVE.animationDuration);
+        document.querySelectorAll('.category-dot').forEach((d, idx) => {
+          d.classList.toggle('active', idx === categorySelectedIndex);
+        });
+      }
+    });
+  });
+}
+
+/* Calculate horizontal position x along the curved, left-leaning rail.
+   The selected category is the focal/rightmost point (apex at focusX).
+   Categories farther from the selected category progressively curve toward the LEFT. */
+function calculateCurveX(rel, boundsWidth = 480) {
+  const ard = Math.abs(rel);
+  // Nonlinear arc displacement: apex is at focusX (rel = 0).
+  // All other items curve away to the LEFT (xOffset < 0).
+  const nonLinearDist = Math.pow(ard, CATEGORY_CURVE.curveExponent);
+  let xOffset = -CATEGORY_CURVE.curveStrength * nonLinearDist;
+
+  // Subtle downward lean for natural left-leaning flow
+  if (rel > 0) {
+    xOffset -= CATEGORY_CURVE.downwardLean * rel;
+  }
+
+  // Responsive container scaling
+  const widthFactor = Math.min(1.2, Math.max(0.8, boundsWidth / 480));
+  return (CATEGORY_CURVE.focusX + xOffset) * widthFactor;
+}
+
+/* Single source of truth for visual positioning.
+   pos = continuous focus position (index units); every visual property
+   derives mathematically from rel = i - pos. */
+function renderWheel(pos) {
+  const list = document.getElementById('wheel-list');
+  if (!list) return;
+  const H = list.clientHeight || 380;
+  const W = list.clientWidth || 480;
+
+  // Responsive spacing: scales slightly on constrained viewport heights
+  const spacingFactor = Math.min(1, Math.max(0.85, H / 380));
+  const spacing = CATEGORY_CURVE.verticalSpacing * spacingFactor;
+  const centerY = H / 2 - (CATEGORY_CURVE.verticalSpacing * spacingFactor) / 2;
+
+  wheelItems.forEach((el, i) => {
+    const rel = i - pos;                     // signed continuous distance from focus
+    const ard = Math.abs(rel);               // absolute distance
+
+    if (ard > CATEGORY_CURVE.maxVisibleDistance) {
+      el.style.visibility = 'hidden';
+      return;
+    }
+    el.style.visibility = 'visible';
+
+    // Position along the curved, left-leaning rail: selected is apex / rightmost
+    const x = calculateCurveX(rel, W);
+    const y = centerY + rel * spacing;
+
+    // Distance-based progressive scale: apex is largest (1.0)
+    let s;
+    if (ard <= 1) {
+      s = CATEGORY_CURVE.focusScale - ard * (CATEGORY_CURVE.focusScale - CATEGORY_CURVE.adjacentScale);
+    } else {
+      s = Math.max(CATEGORY_CURVE.minScale, CATEGORY_CURVE.adjacentScale * Math.pow(CATEGORY_CURVE.distanceScaleRate, ard - 1));
+    }
+
+    // Distance-based progressive opacity: apex is brightest (1.0)
+    let op;
+    if (ard <= 1) {
+      op = CATEGORY_CURVE.focusOpacity - ard * (CATEGORY_CURVE.focusOpacity - CATEGORY_CURVE.adjacentOpacity);
+    } else {
+      op = Math.max(CATEGORY_CURVE.minOpacity, CATEGORY_CURVE.adjacentOpacity * Math.pow(CATEGORY_CURVE.distanceOpacityRate, ard - 1));
+    }
+
+    // Distance-based progressive softening (blur): apex is sharpest (0px)
+    let blur = 0;
+    if (ard <= 1) {
+      blur = ard * CATEGORY_CURVE.adjacentBlur;
+    } else {
+      blur = Math.min(CATEGORY_CURVE.maxBlur, CATEGORY_CURVE.adjacentBlur + (ard - 1) * CATEGORY_CURVE.distanceBlurRate);
+    }
+
+    el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) scale(${s.toFixed(3)})`;
+    el.style.transformOrigin = 'left center';
+    el.style.opacity = op.toFixed(3);
+    el.style.filter = blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : 'none';
+    el.style.zIndex = String(100 - Math.round(ard * 10));
+
+    // Crisp high-contrast styling for the focused category
+    const isFocused = ard < 0.45;
+    el.classList.toggle('focused', isFocused);
+  });
+}
+
+
+/* Smoothly travel focus along the curved rail to a target index.
+   Interruptible: rapid inputs smoothly retarget from current continuous wheelPos. */
+function wheelTravelTo(target, duration = CATEGORY_CURVE.animationDuration) {
+  cancelAnimationFrame(wheelAnim);
+  const numCats = getCategories().length;
+  target = Math.max(0, Math.min(numCats - 1, target));
+  const startPos = wheelPos;
+  const delta = target - startPos;
+  if (Math.abs(delta) < 0.001) {
+    wheelPos = target;
+    renderWheel(wheelPos);
+    return;
+  }
+  const dur = Math.min(
+    CATEGORY_CURVE.animationDuration * 1.25,
+    Math.max(160, duration * Math.min(1.2, Math.abs(delta)))
+  );
+  const t0 = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / dur);
+    wheelPos = startPos + delta * CATEGORY_CURVE.ease(t);
+    renderWheel(wheelPos);
+    if (t < 1) {
+      wheelAnim = requestAnimationFrame(step);
+    } else {
+      wheelPos = target;
+      renderWheel(wheelPos);
+    }
+  };
+  wheelAnim = requestAnimationFrame(step);
+}
+
 function openCategories() {
   if (detailsOpen || (!games.length && allGames.length === 0)) return;
   categoriesOpen = true;
-  document.body.classList.add('categories-open');
+  buildWheel();
+  const overlay = document.getElementById('category-wheel-overlay');
+  const cats = getCategories();
+  categorySelectedIndex = Math.max(0, cats.indexOf(currentCategory));
+  wheelPos = categorySelectedIndex;
+  renderWheel(wheelPos);
+  overlay.classList.remove('hidden');
+  requestAnimationFrame(() => overlay.classList.add('open'));
   vibrate(true); // Left side
 }
 
 function closeCategories(apply = false) {
+  if (!categoriesOpen) return;
   categoriesOpen = false;
-  document.body.classList.remove('categories-open');
+  cancelAnimationFrame(wheelAnim);
+  const overlay = document.getElementById('category-wheel-overlay');
+  overlay.classList.remove('open');
+  const overlay2 = overlay;
+  setTimeout(() => { if (!categoriesOpen) overlay2.classList.add('hidden'); }, 240);
   if (apply) {
-    const cats = getCategories();
-    if (currentCategory !== cats[categorySelectedIndex]) {
-      currentCategory = cats[categorySelectedIndex];
+    // Clamped, never wrapped — the rail has hard ends.
+    const idx = Math.max(0, Math.min(getCategories().length - 1, Math.round(wheelPos)));
+    const chosen = getCategories()[idx];
+    categorySelectedIndex = idx;
+    if (currentCategory !== chosen) {
+      currentCategory = chosen;
       applyCategoryFilter();
     }
   }
   vibrate(false); // Right side
 }
 
+/* One source of truth for the selected index — keyboard, controller and
+   wheel input all land here.
+   IMPORTANT BOUNDARY BEHAVIOR:
+   If at index 0 and moving UP: DO NOTHING (no animation, no state change, no wrap).
+   If at last index and moving DOWN: DO NOTHING (no animation, no state change, no wrap). */
 function changeCategorySelection(delta) {
   const numCats = getCategories().length;
-  categorySelectedIndex = (categorySelectedIndex + delta + numCats) % numCats;
+  if (numCats <= 1) return;
+  if (delta < 0 && categorySelectedIndex <= 0) return;             // boundary — ignore
+  if (delta > 0 && categorySelectedIndex >= numCats - 1) return;    // boundary — ignore
+
+  const next = categorySelectedIndex + delta;
+  if (next < 0 || next > numCats - 1) return;
+
+  categorySelectedIndex = next;
+  wheelTravelTo(next);
   document.querySelectorAll('.category-dot').forEach((el, i) => {
     el.classList.toggle('active', i === categorySelectedIndex);
   });
 }
+
+// Drag / scroll interaction on the wheel list.
+(() => {
+  const list = document.getElementById('wheel-list');
+  if (!list) return;
+  list.addEventListener('pointerdown', (e) => {
+    if (!categoriesOpen) return;
+    if (e.target.closest('.wheel-item')) return; // allow item click handlers
+    e.preventDefault();
+    cancelAnimationFrame(wheelAnim);
+    wheelDrag = { startY: e.clientY, startOffset: wheelPos, moved: false };
+    list.setPointerCapture(e.pointerId);
+  });
+  list.addEventListener('pointermove', (e) => {
+    if (!wheelDrag) return;
+    const dy = e.clientY - wheelDrag.startY;
+    if (Math.abs(dy) > 4) wheelDrag.moved = true;
+    // Drag clamped to rail ends — resistance, no wrap, no overscroll.
+    const numCats = getCategories().length;
+    const raw = wheelDrag.startOffset - dy / CATEGORY_CURVE.verticalSpacing;
+    wheelPos = Math.max(0, Math.min(numCats - 1, raw));
+    renderWheel(wheelPos);
+  });
+  const end = () => {
+    if (!wheelDrag) return;
+    wheelDrag = null;
+    const numCats = getCategories().length;
+    const snapped = Math.max(0, Math.min(numCats - 1, Math.round(wheelPos)));
+    categorySelectedIndex = snapped;
+    wheelTravelTo(snapped, CATEGORY_CURVE.dragSnapDuration);
+    document.querySelectorAll('.category-dot').forEach((el, i) => {
+      el.classList.toggle('active', i === categorySelectedIndex);
+    });
+  };
+  list.addEventListener('pointerup', end);
+  list.addEventListener('pointercancel', end);
+  list.addEventListener('wheel', (e) => {
+    if (!categoriesOpen) return;
+    e.preventDefault();
+    if (Math.abs(e.deltaY) < 10) return; // ignore sub-pixel trackpad jitter
+    changeCategorySelection(e.deltaY > 0 ? 1 : -1);   // boundary-aware, no wrap
+  }, { passive: false });
+  // Click outside the wheel cancels.
+  document.getElementById('category-wheel-overlay')?.addEventListener('pointerdown', (e) => {
+    if (e.target.classList.contains('wheel-backdrop')) closeCategories(false);
+  });
+})();
 
 // Search & sort controls in the sidebar
 document.getElementById('search-input')?.addEventListener('input', (e) => {
@@ -562,7 +847,7 @@ document.getElementById('sort-select')?.addEventListener('change', (e) => {
 // blurs the settings button, and filters the list live as you type.
 let isSearchOpen = false;
 
-const SEARCH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>';
+const SEARCH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>';
 const X_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 
 function toggleSearch(forceOpen) {
@@ -688,8 +973,163 @@ function updateGameListSelection() {
   applyRailCarousel();
 }
 
+/* ── Dynamic accent color (item 4) ────────────────────────────────────────
+   Derives an accent from the focused game's wallpaper: draw the image small,
+   bucket the pixels, and pick the most saturated dominant color. Falls back to
+   a neutral light gray when there is no wallpaper or nothing saturated enough.
+   Published as CSS custom properties; every accent consumer reads var(--accent)
+   (the legacy --green alias included), so one update re-themes the whole UI. */
+const ACCENT_FALLBACK = { r: 232, g: 232, b: 238 };   // #e8e8ee neutral
+let accentApplyTimer = 0;
+let accentLastKey = null;
+
+function applyAccentColor(r, g, b) {
+  const root = document.documentElement.style;
+  root.setProperty('--accent', `rgb(${r}, ${g}, ${b})`);
+  root.setProperty('--accent-strong', `rgb(${Math.round(r * 0.78)}, ${Math.round(g * 0.78)}, ${Math.round(b * 0.78)})`);
+  root.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
+}
+
+function resetAccentColor() {
+  applyAccentColor(ACCENT_FALLBACK.r, ACCENT_FALLBACK.g, ACCENT_FALLBACK.b);
+}
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [h * 60, s, l];
+}
+
+/* Contrast check against near-black so a mud-dark dominant never becomes the
+   accent: lift lightness into the readable band instead of rejecting outright. */
+function normalizeAccent(r, g, b) {
+  let [h, s, l] = rgbToHsl(r, g, b);
+  l = Math.min(0.78, Math.max(0.6, l));
+  s = Math.min(0.85, Math.max(0.35, s));
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const seg = Math.floor(h / 60) % 6;
+  const table = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]];
+  const [rr, gg, bb] = table[seg];
+  return [Math.round((rr + m) * 255), Math.round((gg + m) * 255), Math.round((bb + m) * 255)];
+}
+
+function extractDominantColor(img) {
+  try {
+    const SIZE = 48;
+    const canvas = document.createElement('canvas');
+    canvas.width = SIZE; canvas.height = SIZE;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, SIZE, SIZE);
+    let data;
+    try {
+      data = ctx.getImageData(0, 0, SIZE, SIZE).data;
+    } catch {
+      return null; // tainted canvas (no CORS on this source)
+    }
+    // 4-bit-per-channel buckets; score = saturation-weighted frequency so vivid
+    // colors beat big dull areas (dark vignettes, gray skies).
+    const buckets = new Map();
+    for (let i = 0; i < data.length; i += 4) {
+      const a = data[i + 3];
+      if (a < 125) continue;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const [, s, l] = rgbToHsl(r, g, b);
+      if (l < 0.08 || l > 0.95) continue;      // crush blacks / blown whites
+      const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+      const e = buckets.get(key) || { r: 0, g: 0, b: 0, n: 0, w: 0 };
+      e.r += r; e.g += g; e.b += b; e.n += 1; e.w += 0.25 + s;
+      buckets.set(key, e);
+    }
+    let best = null;
+    for (const e of buckets.values()) {
+      const score = e.w * e.n;
+      if (!best || score > best.score) best = { r: e.r / e.n, g: e.g / e.n, b: e.b / e.n, score };
+    }
+    if (!best) return null;
+    const [h, s] = rgbToHsl(best.r, best.g, best.b);
+    if (s < 0.18) return null;                 // effectively grayscale art
+    return [best.r, best.g, best.b];
+  } catch { return null; }                     // tainted canvas, OOM, anything
+}
+
+/* The wallpaper is served through Tauri's asset protocol (convertFileSrc),
+   which taints a plain <img> canvas. Load with CORS first; if that is
+   refused, refetch the bytes into a blob URL — blob images are same-origin
+   and never taint. Results are memoized per wallpaper. */
+function loadImageCors(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+async function loadImageViaFetch(url) {
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error('accent fetch failed');
+  const blob = await res.blob();
+  const objUrl = URL.createObjectURL(blob);
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = objUrl;
+    });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+  }
+}
+
+const accentCache = new Map();   // wallpaper key -> [r,g,b] | null
+
+async function accentForWallpaper(url) {
+  if (accentCache.has(url)) return accentCache.get(url);
+  let result = null;
+  try {
+    let img;
+    try { img = await loadImageCors(url); }
+    catch { img = await loadImageViaFetch(url); }
+    result = extractDominantColor(img);
+  } catch { result = null; }
+  if (accentCache.size > 24) accentCache.clear();
+  accentCache.set(url, result);
+  return result;
+}
+
+/* Debounced: fires on every rail scroll, but only the focused game's wallpaper
+   matters and loads race through wallpaperGeneration, so cheap re-entries just
+   reschedule. */
+function updateAccentFromGame() {
+  const g = games[selectedIndex];
+  const key = g?.wallpaper || '';
+  if (key === accentLastKey) return;
+  accentLastKey = key;
+  clearTimeout(accentApplyTimer);
+  if (!key) { resetAccentColor(); return; }
+  accentApplyTimer = setTimeout(async () => {
+    const dom = await accentForWallpaper(key);
+    if (dom) { const [r, gg, b] = normalizeAccent(dom[0], dom[1], dom[2]); applyAccentColor(r, gg, b); }
+    else resetAccentColor();
+  }, 120);
+}
+
 /* ── Wallpaper crossfade between two layers ───────────────────────────────*/
 function crossfadeWallpaper() {
+  updateAccentFromGame();
   const g = games[selectedIndex];
   const url = g?.wallpaper || '';
 
@@ -1957,7 +2397,8 @@ document.addEventListener('keydown', e => {
     case 'ArrowLeft':
       e.preventDefault();
       if (detailsOpen) closeDetails();          // LEFT from full details returns
-      else railExitGame();
+      else if (railEntered) railExitGame();     // LEFT steps back out first...
+      else openCategories();                    // ...then LEFT reveals the wheel
       break;
     case 'Enter':      e.preventDefault();
       if (!detailsOpen && games.length) openDetails();
@@ -2027,8 +2468,21 @@ function handlePad(pad) {
   if (modalOpen || metadataOpen || onlineArtOpen || backupManagerOpen || settingsOpen) { savePad(pad); return; }
 
   if (categoriesOpen) {
-    if (up && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; changeCategorySelection(-1); vibrateVertical(); }
-    if (down && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; changeCategorySelection(1); vibrateVertical(); }
+    const numCats = getCategories().length;
+    if (up && now - lastNavTime > NAV_REPEAT) {
+      if (categorySelectedIndex > 0) {
+        lastNavTime = now;
+        changeCategorySelection(-1);
+        vibrateVertical();
+      }
+    }
+    if (down && now - lastNavTime > NAV_REPEAT) {
+      if (categorySelectedIndex < numCats - 1) {
+        lastNavTime = now;
+        changeCategorySelection(1);
+        vibrateVertical();
+      }
+    }
     if ((right && !prevAxes.right) || btnPressed(pad, 0, 'A')) { closeCategories(true); }
     if (btnPressed(pad, 1, 'B')) { closeCategories(false); }
     prevAxes.right = right; prevAxes.left = left;
@@ -2184,6 +2638,16 @@ document.getElementById('input-force-motion')?.addEventListener('change', (e) =>
 
 document.getElementById('btn-settings-close').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.add('hidden');
+});
+// API key show/hide — visible eye-toggle instead of a permanently masked field.
+document.getElementById('btn-toggle-key-visibility')?.addEventListener('click', () => {
+  const key = document.getElementById('input-sgdb-key');
+  const btn = document.getElementById('btn-toggle-key-visibility');
+  if (!key || !btn) return;
+  const show = key.type === 'password';
+  key.type = show ? 'text' : 'password';
+  btn.textContent = show ? 'HIDE' : 'SHOW';
+  btn.title = show ? 'Hide key' : 'Show key';
 });
 // Advanced section collapse (settings page)
 document.getElementById('settings-advanced-toggle')?.addEventListener('click', () => {
@@ -2622,22 +3086,22 @@ function renderTrendLine(host, sessions, gameId, days, metric = 'playtime') {
   const lineGrad = `tl-line-${seq}`;
   const areaGrad = `tl-area-${seq}`;
   const glowGrad = `tl-glow-${seq}`;
-  const lineStroke = streak ? `url(#${lineGrad})` : '#4ade80';
+  const lineStroke = streak ? `url(#${lineGrad})` : 'var(--accent)';
 
   host.innerHTML = `
   <svg class="sp-trend${streak ? ' streak' : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
     <defs>
       <linearGradient id="${lineGrad}" x1="0" y1="0" x2="1" y2="0">
-        <stop offset="0%" stop-color="#3fae70" />
-        <stop offset="100%" stop-color="#86eeb0" />
+        <stop offset="0%" stop-color="var(--accent-strong)" />
+        <stop offset="100%" stop-color="var(--accent)" />
       </linearGradient>
       <linearGradient id="${areaGrad}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#4ade80" stop-opacity="0.16" />
-        <stop offset="100%" stop-color="#4ade80" stop-opacity="0" />
+        <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.16" />
+        <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
       </linearGradient>
       <radialGradient id="${glowGrad}">
-        <stop offset="0%" stop-color="#4ade80" stop-opacity="0.42" />
-        <stop offset="100%" stop-color="#4ade80" stop-opacity="0" />
+        <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.42" />
+        <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
       </radialGradient>
     </defs>
     <line class="sp-base" x1="${padX}" y1="${bottom}" x2="${W - padX}" y2="${bottom}" />
