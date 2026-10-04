@@ -6,7 +6,8 @@
   "scripts": {
     "start": "tauri dev",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "tauri": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
