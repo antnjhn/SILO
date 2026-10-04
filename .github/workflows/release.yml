@@ -70,7 +70,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: .
 
       - name: Get version from tag
         id: get_version
@@ -85,6 +85,6 @@ jobs:
           prerelease: false
           generate_release_notes: false
           files: |
-            dist/silo-windows/*.exe
-            dist/silo-linux/*.deb
-            dist/silo-linux/*.AppImage
+            silo-windows/*.exe
+            silo-linux/deb/*.deb
+            silo-linux/appimage/*.AppImage
