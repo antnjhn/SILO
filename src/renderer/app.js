@@ -3424,7 +3424,7 @@ function renderStatsOverall() {
       <div class="rank-row">
         <span class="rank-pos">${i + 1}</span>
         <span class="rank-name" title="${esc(g.name)}">${esc(g.name)}</span>
-        <span class="rank-track"><span class="rank-fill" style="width:${Math.max(2, Math.round((g.playtimeMinutes || 0) / maxMin * 100))}%"></span></span>
+        <span class="rank-track"><span class="rank-fill" style="width:${Math.max(0, Math.min(100, ((g.playtimeMinutes || 0) / maxMin) * 100))}%;"></span></span>
         <span class="rank-time">${fmtTime(g.playtimeMinutes)}</span>
       </div>`).join('');
   } else {
