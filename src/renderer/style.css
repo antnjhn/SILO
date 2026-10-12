@@ -1,52 +1,22 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    SILO LAUNCHER — style.css
-   Pure glassmorphism, dynamic accent, centered scrolling sidebar,
-   animated pill launch buttons, animated × remove button
+   Flat, OLED-black, editorial surfaces. Dynamic accent, centered scrolling
+   sidebar, animated pill launch buttons, animated × remove button.
+
+   Theme values (color / radius / spacing / type / motion) and the self-hosted
+   @font-face rules live in tokens.css — change the theme there, not here.
+   No glassmorphism anywhere: no backdrop-filter, no frosted panels, no glows.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@500;700&display=swap');
-
-:root {
-  --bg:             #0a0a12;
-  --text:           #e8e0ec;
-  --text-muted:     rgba(230, 220, 240, 0.55);
-  --text-dim:       rgba(230, 220, 240, 0.18);
-  /* Watermelon dynamic accent — derived from the focused game's wallpaper by app.js.
-     Falls back to a soft watermelon pink when no dominant color exists. The old
-     --green names are kept as aliases so every accent consumer follows it. */
-  --accent:         #ff6b9d;
-  --accent-strong:  #ff4d80;
-  --green:          var(--accent);
-  --green-dark:     var(--accent-strong);
-  --accent-soft:    rgba(255, 107, 157, 0.14);
-  --red:            #ff6b9d;
-  --titlebar-h:     36px;
-  --sidebar-w:      300px;
-  --font-mono:      'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
-
-  /* Flat modal surfaces (modals sit on these, not on glass) */
-  --surface-1:      #0f0a14;
-  --surface-2:      #1a1622;
-
-  /* Glass / slight translucency */
-  --glass-bg:         rgba(255, 255, 255, 0.05);
-  --glass-border:     rgba(255, 255, 255, 0.25);
-  --glass-blur:       blur(8px);
-  --glass-shadow:     0 8px 32px rgba(0, 0, 0, 0.15),
-                      inset 0 1px 0 rgba(255, 255, 255, 0.3),
-                      inset 0 -1px 0 rgba(255, 255, 255, 0.2),
-                      inset 0 0 4px 2px rgba(255, 255, 255, 0.25);
-  --glass-highlight:  rgba(255, 255, 255, 0.6);
-}
 
 html, body {
   width: 100%; height: 100%;
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
   user-select: none;
   -webkit-font-smoothing: antialiased;
 }
@@ -125,9 +95,8 @@ html, body {
 #titlebar-controls { display: flex; gap: 2px; -webkit-app-region: no-drag; }
 
 #titlebar-controls button {
-  background: var(--glass-bg);
+  background: var(--surface-1);
   border: 1px solid rgba(255,255,255,0.15);
-  backdrop-filter: var(--glass-blur);
   color: rgba(255,255,255,0.5);
   width: 28px; height: 24px;
   border-radius: 6px; font-size: 10px;
@@ -216,9 +185,7 @@ html, body {
 #category-wheel-overlay.hidden { display: none; }
 .wheel-backdrop {
   position: absolute; inset: 0;
-  background: rgba(6, 6, 12, 0.5);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  background: var(--scrim);
   opacity: 0;
   transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -414,8 +381,7 @@ html, body {
   width: 46px; height: 46px;
   border-radius: 50%;
   border: 1px solid rgba(255,255,255,0.2);
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
+  background: var(--surface-1);
   color: rgba(255,255,255,0.35);
   font-size: 22px;
   cursor: pointer;
@@ -428,7 +394,7 @@ html, body {
 }
 #btn-add-game::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+  background: linear-gradient(90deg, transparent, var(--hairline-strong), transparent);
 }
 #btn-add-game:hover {
   border-color: var(--accent);
@@ -639,15 +605,14 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 }
 /* (fallback text hiding is handled above — logo takes over whenever it exists) */
 
-/* Stats — floating text, no boxes. Even spacing, shared baseline: the row is a
-   grid so every block gets an identical column, thin low-opacity vertical rules
-   separate them, and both value and label are baseline-aligned across blocks. */
+/* Stats — floating text, no boxes: one flex row, wide even gaps and no divider
+   rules (they sat inside the gap and touched the text). Every value shares one
+   line-height, so all four sit on the same baseline. */
 #details-stats {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: max-content;
-  column-gap: 28px;
-  align-items: baseline;
+  display: flex;
+  flex-flow: row wrap;
+  gap: 56px;
+  align-items: flex-start;
   margin-bottom: 0;
 }
 
@@ -660,34 +625,34 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 .stat-block:nth-child(2) { animation-delay: 0.05s; }
 .stat-block:nth-child(3) { animation-delay: 0.1s; }
 
-/* Thin, low-opacity vertical rule between stat blocks — never a color line. */
-.stat-block + .stat-block {
-  border-left: 1px solid rgba(255, 255, 255, 0.10);
-  padding-left: 28px;
-}
+/* No vertical rules between blocks — the 56px gap does the separating. */
 
 .stat-value {
-  font-size: 22px; font-weight: 700; color: #fff;
-  font-variant-numeric: tabular-nums; line-height: 1.15;
-  text-shadow: 0 2px 16px rgba(0,0,0,0.6);
+  font-family: var(--font-ui);
+  font-size: var(--fs-stat); font-weight: 500; color: #fff;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2; letter-spacing: -0.01em;
+  text-shadow: var(--ink-shadow);
   white-space: nowrap; /* keep "12h 3m" on one line */
 }
 
 .status-select {
-  font-size: 22px; font-weight: 700; color: #fff;
-  font-family: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--fs-stat); font-weight: 500; color: #fff;
+  line-height: 1.2; letter-spacing: -0.01em;
   background: transparent;
   border: none;
   outline: none;
-  text-shadow: 0 2px 16px rgba(0,0,0,0.6);
+  text-shadow: var(--ink-shadow);
   cursor: pointer;
   appearance: none;
-  padding-right: 18px;
+  width: fit-content;
+  field-sizing: content;      /* hug the *selected* stage, not the widest option */
+  padding: 0 20px 0 0; /* chevron sits 8px right of the text, never pushed out */
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' fill-opacity='0.55' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 2px center;
+  background-position: right center;
   transition: color 0.2s;
-  height: 22px; /* match line height */
 }
 .status-select:hover {
   color: var(--accent);
@@ -702,9 +667,12 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 }
 
 .stat-label {
-  font-size: 8px; letter-spacing: 3px;
-  color: rgba(255,255,255,0.45); margin-top: 5px; font-weight: 600;
-  text-shadow: 0 1px 8px rgba(0,0,0,0.4);
+  font-family: var(--font-mono);
+  font-size: 10.5px; font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgba(255,255,255,0.50); margin-top: 8px;
+  text-shadow: var(--ink-shadow);
   white-space: nowrap;
 }
 
@@ -717,8 +685,8 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   background: rgba(255, 255, 255, 0.1);
   padding: 0;
   border-radius: 9999px;
-  min-width: 8.5rem;
-  height: 2.92rem;
+  min-width: 160px;   /* px, not rem: html now runs at 13px, rem would shrink the row */
+  height: 46px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -785,26 +753,26 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 
 /* Arrow icon inside circle */
 .pill-circle-icon {
-  width: 0.8rem; height: 0.8rem;
+  width: 13px; height: 13px;
   color: #000;
   transition: all 1s cubic-bezier(0.51, 0.026, 0.368, 1.016);
 }
 
-.pill-btn:not(.xbox-pill):hover .pill-circle-icon {
+.pill-btn:not(.launch-pill):hover .pill-circle-icon {
   color: #fff;
 }
 
-.pill-btn:not(.xbox-pill).holding .pill-circle-icon {
+.pill-btn:not(.launch-pill).holding .pill-circle-icon {
   color: #fff;
 }
 
 /* Launch pill: the icon spins inside on hover, and turns white by the end of the hold */
-.pill-btn.xbox-pill:hover .pill-circle-icon {
+.pill-btn.launch-pill:hover .pill-circle-icon {
   color: #fff;
   transform: rotate(45deg);
   transition: color 250ms ease, transform 250ms ease;
 }
-.pill-btn.xbox-pill.holding .pill-circle-icon {
+.pill-btn.launch-pill.holding .pill-circle-icon {
   color: #fff;
   transform: rotate(180deg);
   transition: all 5s linear;
@@ -817,8 +785,8 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 
 /* Label text */
 .pill-label {
-  padding-left: 3.4rem;
-  padding-right: 1.1rem;
+  padding-left: 54px;
+  padding-right: 18px;
   transition: all 1s cubic-bezier(0.51, 0.026, 0.368, 1.016);
   color: #fff;
   font-size: 11px;
@@ -828,23 +796,19 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 }
 
 .pill-btn:hover .pill-label {
-  padding-left: 1.1rem;
-  padding-right: 3.4rem;
+  padding-left: 18px;
+  padding-right: 54px;
   color: #000;
 }
 
 .pill-btn.holding .pill-label {
-  padding-left: 1.1rem;
-  padding-right: 3.4rem;
+  padding-left: 18px;
+  padding-right: 54px;
   color: #000;
   transition: all 5s linear;
 }
 
-/* Xbox variant — same style */
-.pill-btn.xbox-pill .pill-label::before {
-  content: '⬡ ';
-  font-size: 10px;
-}
+/* (No glyph before LAUNCH any more.) */
 
 /* ═══════════════════════════════════════════════════════════════════════════
    ANIMATED × REMOVE BUTTON — Tailwind custom conversion
@@ -852,8 +816,8 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 .new-remove-btn {
   position: relative;
   border: 2px solid rgba(255,255,255,0.3);
-  width: 2.92rem;
-  height: 2.92rem;
+  width: 46px;
+  height: 46px;
   transition: border-color 0.5s;
   overflow: hidden;
   cursor: pointer;
@@ -875,7 +839,7 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 }
 .new-remove-btn p {
   font-family: inherit;
-  font-size: 1.8rem;
+  font-size: 29px;
   font-weight: 200; /* Thin X */
   height: 100%;
   width: 100%;
@@ -899,14 +863,12 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   transform: scale(0.97);
 }
 
-body.gamepad-active #btn-launch-normal .pill-circle-icon,
-body.gamepad-active #btn-launch-xbox .pill-circle-icon,
+body.gamepad-active #btn-launch .pill-circle-icon,
 body.gamepad-active #btn-edit-game .pill-circle-icon {
   display: none;
 }
 
-body.gamepad-active #btn-launch-normal .pill-circle::after { content: 'A'; font-weight: 900; font-size: 16px; color: #fff; }
-body.gamepad-active #btn-launch-xbox .pill-circle::after { content: 'B'; font-weight: 900; font-size: 16px; color: #fff; }
+body.gamepad-active #btn-launch .pill-circle::after { content: 'B'; font-weight: 900; font-size: 16px; color: #fff; }
 body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weight: 900; font-size: 16px; color: #fff; }
 
 /* Remove button hold logic */
@@ -945,22 +907,19 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   gap: 6px;
   padding: 11px 22px;
   border-radius: 14px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
   color: var(--text);
   font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
   cursor: pointer; font-family: inherit;
   transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
   white-space: nowrap;
-  box-shadow: var(--glass-shadow);
   position: relative; overflow: hidden;
 }
 
 .glass-btn::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+  background: linear-gradient(90deg, transparent, var(--hairline-strong), transparent);
 }
 .glass-btn::after {
   content: ''; position: absolute; top: 0; left: 0; width: 1px; height: 100%;
@@ -1004,16 +963,14 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 #empty-sub { font-size: 10px; color: var(--text-muted); }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
-#modal-overlay, #launch-overlay, #restore-overlay, #uninstall-overlay, #backup-name-overlay, #scan-results-overlay, #settings-overlay, #metadata-overlay, #backup-manager-overlay, #online-art-overlay, #stats-overlay {
+#modal-overlay, #restore-overlay, #uninstall-overlay, #backup-name-overlay, #scan-results-overlay, #settings-overlay, #metadata-overlay, #backup-manager-overlay, #online-art-overlay, #stats-overlay {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.35);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: var(--scrim);
   z-index: 500;
   display: flex; align-items: center; justify-content: center;
   transition: opacity 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-#modal-overlay.hidden, #launch-overlay.hidden, #restore-overlay.hidden, #uninstall-overlay.hidden, #backup-name-overlay.hidden, #scan-results-overlay.hidden, #settings-overlay.hidden, #metadata-overlay.hidden, #backup-manager-overlay.hidden, #online-art-overlay.hidden, #stats-overlay.hidden {
+#modal-overlay.hidden, #restore-overlay.hidden, #uninstall-overlay.hidden, #backup-name-overlay.hidden, #scan-results-overlay.hidden, #settings-overlay.hidden, #metadata-overlay.hidden, #backup-manager-overlay.hidden, #online-art-overlay.hidden, #stats-overlay.hidden {
   opacity: 0; pointer-events: none;
 }
 /* The art picker opens over the still-visible add/edit modal, so it must sit above it. */
@@ -1022,10 +979,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 .glass-panel {
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.3);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   border-radius: 24px; padding: 32px;
-  box-shadow: var(--glass-shadow);
   position: relative; overflow: hidden;
   transform: scale(1);
   transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -1056,7 +1010,7 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 .glass-panel::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+  background: linear-gradient(90deg, transparent, var(--hairline-strong), transparent);
 }
 .glass-panel::after {
   content: ''; position: absolute; top: 0; left: 0; width: 1px; height: 100%;
@@ -1164,33 +1118,6 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
   display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px;
 }
 
-/* Launch Modal */
-#launch-modal { width: 420px; text-align: center; }
-
-#launch-logo-area {
-  margin-bottom: 20px; min-height: 60px;
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
-}
-#launch-logo-img {
-  max-height: 80px; max-width: 280px; object-fit: contain;
-  filter: drop-shadow(0 2px 16px rgba(0,0,0,0.5)); display: none;
-}
-#launch-logo-img.visible { display: block; }
-#launch-game-name { font-size: 18px; font-weight: 900; }
-#launch-question {
-  font-size: 9px; letter-spacing: 2.5px; color: var(--text-muted);
-  margin-bottom: 20px; font-weight: 600;
-}
-#launch-buttons {
-  display: flex; gap: 12px; margin-bottom: 4px; justify-content: center;
-}
-.launch-choice {
-  flex: 1; flex-direction: column; padding: 22px 14px; gap: 6px; height: auto;
-}
-.lc-icon { font-size: 24px; }
-.lc-label { font-size: 13px; font-weight: 700; }
-.lc-sub { font-size: 8px; color: var(--text-muted); letter-spacing: 1.5px; }
-
 /* ── Toast ────────────────────────────────────────────────────────────────── */
 #toast-container {
   position: fixed; top: 50px; right: 20px; z-index: 2000;
@@ -1198,20 +1125,18 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 .toast {
   pointer-events: auto;
-  background: var(--glass-bg);
+  background: var(--surface-1);
   border: 1px solid rgba(255,255,255,0.25);
-  backdrop-filter: var(--glass-blur);
   border-radius: 14px;
   padding: 14px 20px; max-width: 380px;
   font-size: 11px; line-height: 1.5; color: var(--text);
-  box-shadow: var(--glass-shadow);
   animation: toastIn 0.3s ease, toastOut 0.3s ease 4.7s forwards;
   display: flex; align-items: flex-start; gap: 10px;
   position: relative; overflow: hidden;
 }
 .toast::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+  background: linear-gradient(90deg, transparent, var(--hairline-strong), transparent);
 }
 .toast-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
 .toast-body { flex: 1; }
@@ -1378,10 +1303,10 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 
 /* ── Favorite pill active state ──────────────────────────────────────────── */
 .pill-btn.fav-pill .pill-circle-icon { font-size: 14px; }
-.pill-btn.fav-pill.fav-active .pill-circle { background: #facc15; }
-.pill-btn.fav-pill.fav-active .pill-circle-icon { color: #000; }
+.pill-btn.fav-pill.fav-active .pill-circle { background: var(--accent); }
+.pill-btn.fav-pill.fav-active .pill-circle-icon { color: var(--accent-ink); }
 .pill-btn.fav-pill:hover .pill-circle-icon { color: #fff; }
-.pill-btn.fav-pill.fav-active:hover .pill-circle-icon { color: #000; }
+.pill-btn.fav-pill.fav-active:hover .pill-circle-icon { color: var(--accent-ink); }
 
 /* ── Metadata picker & backup manager list scrolling ─────────────────────── */
 #metadata-list, #backup-manager-list {
@@ -1449,14 +1374,12 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 
 /* Scan / import / browse secondaries in the glass language */
 .secondary-btn {
-  background: var(--glass-bg);
+  background: var(--surface-1);
   border: 1px solid rgba(255,255,255,0.25);
   border-radius: 8px;
   color: var(--text);
   font-size: 12px; font-weight: 700;
   padding: 11px 14px;
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
   transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .secondary-btn:hover { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.4); }
@@ -1466,7 +1389,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   margin-top: 12px;
   padding: 14px 16px;
   border-radius: 12px;
-  background: rgba(0,0,0,0.30);
+  background: var(--scrim);
   border: 1px dashed rgba(255,255,255,0.22);
   font-size: 26px; font-weight: 800; line-height: 1.1;
   color: var(--text);
@@ -1483,7 +1406,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   object-fit: contain;
   border-radius: 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  background: rgba(0,0,0,0.30);
+  background: var(--scrim);
   box-shadow: 0 0 0 3px var(--accent-soft);
   padding: 4px;
 }
@@ -1499,8 +1422,6 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   border: none;
   border-radius: 8px;
   box-shadow: 0 24px 80px rgba(0,0,0,0.55);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   color: var(--text);
 }
 /* Restore Save dialog polish */
@@ -1579,8 +1500,6 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* Modal overlays: flat dim behind the panel — no backdrop blur (blur is for
    glass panels floating over game art in the library view, not modals). */
 #modal-overlay, #settings-overlay, #uninstall-overlay, #backup-name-overlay {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 
 /* One consistent title across all four modals */
@@ -1620,7 +1539,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 #uninstall-modal input, #backup-name-modal input {
   width: 100%; min-width: 0;
   background: var(--surface-2);
-  border: 1px solid transparent;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   color: var(--text);
   font-family: 'Inter', sans-serif;
@@ -1784,16 +1703,12 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* Settings: translucent backdrop (library shows through dimmed), no boxed
    panel, JetBrains Mono menu type. */
 #settings-overlay {
-  background: rgba(15, 17, 21, 0.50);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--scrim);
 }
 #settings-modal {
   background: transparent;
   border: none;
   box-shadow: none;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 #settings-modal, #settings-modal label, #settings-modal input,
 #settings-modal button, #settings-modal select {
@@ -1802,21 +1717,16 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 
 /* ── Settings & Backup page — console-inspired frosted panel ─────────────── */
 #settings-overlay {
-  background: rgba(15, 17, 21, 0.50);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--scrim);
 }
 #settings-modal.settings-modal {
   width: 560px; max-width: 96vw;
   max-height: 92vh; overflow: hidden;
   padding: 0;
   display: flex; flex-direction: column;
-  background: rgba(25, 25, 30, 0.75);
-  border: 1px solid var(--glass-border);
+  background: var(--scrim);
+  border: 1px solid var(--hairline);
   border-radius: 16px;
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   text-align: left;
 }
 
@@ -1828,15 +1738,15 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   overflow-y: auto;
   padding: 0 32px 10px;
   scrollbar-width: thin;
-  scrollbar-color: var(--glass-border) transparent;
+  scrollbar-color: var(--hairline) transparent;
 }
 .settings-body::-webkit-scrollbar { width: 4px; }
-.settings-body::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 2px; }
+.settings-body::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 2px; }
 .settings-footer {
   flex-shrink: 0;
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 32px 16px;
-  border-top: 1px solid color-mix(in srgb, var(--glass-border) 50%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--hairline) 50%, transparent);
 }
 #settings-modal::before, #settings-modal::after { display: none; }
 #settings-modal, #settings-modal label, #settings-modal input,
@@ -1853,13 +1763,13 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   letter-spacing: 2px; color: var(--accent); margin-bottom: 8px;
 }
 .settings-card {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
   border-radius: 12px;
   padding: 16px;
 }
 .settings-card .settings-toggle-row { padding: 8px 0; }
-.settings-card .settings-toggle-row + .settings-toggle-row { border-top: 1px solid color-mix(in srgb, var(--glass-border) 30%, transparent); }
+.settings-card .settings-toggle-row + .settings-toggle-row { border-top: 1px solid color-mix(in srgb, var(--hairline) 30%, transparent); }
 .settings-field-label { display: block; font-size: 12px; font-weight: 550; color: var(--text); margin-bottom: 6px; }
 .settings-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
 
@@ -1868,8 +1778,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .settings-key-row .settings-input { flex: 1; }
 .settings-key-toggle {
   flex-shrink: 0;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -1883,8 +1793,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* Inputs */
 .settings-input {
   width: 100%;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   padding: 11px 12px;
   color: var(--text);
@@ -1900,9 +1810,9 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .settings-check input[type="checkbox"] {
   appearance: none; -webkit-appearance: none;
   width: 16px; height: 16px; margin: 0;
-  border: 1px solid var(--glass-border);
+  border: 1px solid var(--hairline);
   border-radius: 4px;
-  background: var(--glass-bg);
+  background: var(--surface-1);
   cursor: pointer; position: relative; flex-shrink: 0;
   transition: background 180ms ease, border-color 180ms ease;
 }
@@ -1917,8 +1827,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 
 /* Buttons — flat, quiet, subtle */
 .settings-btn {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
   color: var(--text);
   border-radius: 10px;
   font-size: 13px; font-weight: 550;
@@ -1926,7 +1836,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   cursor: pointer;
   transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
 }
-.settings-btn:hover { background: color-mix(in srgb, var(--glass-bg), var(--accent)); transform: scale(1.02); }
+.settings-btn:hover { background: color-mix(in srgb, var(--surface-1), var(--accent)); transform: scale(1.02); }
 .settings-row { display: flex; gap: 8px; }
 .settings-row .settings-btn { flex: 1; }
 .settings-btn-primary {
@@ -1940,7 +1850,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* Advanced collapsible section */
 .settings-btn-advanced-toggle {
   width: 100%;
-  background: none; border: none; border-top: 1px solid color-mix(in srgb, var(--glass-border) 20%, transparent);
+  background: none; border: none; border-top: 1px solid color-mix(in srgb, var(--hairline) 20%, transparent);
   color: var(--text);
   font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: 1px;
   text-align: left; padding: 10px 0; cursor: pointer;
@@ -1972,20 +1882,15 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 
 /* Remove Game — same console frosted panel + typography as Settings */
 #uninstall-overlay {
-  background: rgba(15, 17, 21, 0.50);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: var(--scrim);
 }
-i #uninstall-modal { width: 520px; max-width: 94vw; max-height: 90vh; overflow-y: auto; padding: 24px 28px; background: rgba(25, 25, 30, 0.75); border: 1px solid var(--glass-border); border-radius: 16px; box-shadow: var(--glass-shadow); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-family: var(--font-mono); }
   width: 520px; max-width: 94vw;
   max-height: 90vh; overflow-y: auto;
   padding: 36px 40px;
-  background: rgba(24, 24, 28, 0.72);
+  background: var(--scrim);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   font-family: 'Inter', sans-serif;
 }
 #uninstall-modal::before, #uninstall-modal::after { display: none; }
@@ -2010,10 +1915,7 @@ i #uninstall-modal { width: 520px; max-width: 94vw; max-height: 90vh; overflow-y
 }
 #uninstall-overlay {
   background: linear-gradient(180deg, rgba(248, 113, 113, 0.14) 0%, rgba(15, 17, 21, 0.55) 65%);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
-i #uninstall-modal { width: 520px; max-width: 94vw; max-height: 90vh; overflow-y: auto; padding: 24px 28px; background: rgba(25, 25, 30, 0.75); border: 1px solid var(--glass-border); border-radius: 16px; box-shadow: var(--glass-shadow); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-family: var(--font-mono); }
   background: linear-gradient(160deg, rgba(248, 113, 113, 0.18) 0%, rgba(24, 24, 28, 0.80) 55%);
 }
 
@@ -2067,17 +1969,14 @@ i #uninstall-modal { width: 520px; max-width: 94vw; max-height: 90vh; overflow-y
 .stat-hover:hover::after { transform: scaleX(1); }
 
 /* Hover popover — translucent, matches the frosted console panels */
-i #stat-popover { position: fixed; z-index: 900; width: 320px; padding: 14px 16px 10px; background: rgba(25, 25, 30, 0.70); border: 1px solid var(--glass-border); border-radius: 14px; box-shadow: var(--glass-shadow); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); opacity: 0; transform: translateY(6px); transition: opacity 160ms ease, transform 160ms ease; pointer-events: none; }
   position: fixed;
   z-index: 900;
   width: 302px;
   padding: 16px 18px 12px;
-  background: rgba(16, 16, 22, 0.68);
+  background: var(--scrim);
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 12px;
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   opacity: 0;
   transform: translateY(6px);
   transition: opacity 160ms ease, transform 160ms ease;
@@ -2226,9 +2125,7 @@ i #stat-popover { position: fixed; z-index: 900; width: 320px; padding: 14px 16p
 
 /* ── Stats hub modal ── */
 #stats-overlay {
-  background: rgba(15, 17, 21, 0.50);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: var(--scrim);
 }
 #stats-modal.stats-modal {
   width: 760px;
@@ -2567,16 +2464,12 @@ i #stat-popover { position: fixed; z-index: 900; width: 320px; padding: 14px 16p
     max-width: min(24vw, 400px);
   }
   #details-panel.is-preview #details-inner { gap: 32px; }
-  #details-panel.is-preview #details-stats { gap: 40px; }
 }
 @media (max-width: 1200px) {
   #details-panel.is-preview.has-logo #details-logo-img {
     max-width: min(22vw, 330px);
   }
   #details-panel.is-preview #details-inner { gap: 22px; }
-  #details-panel.is-preview #details-stats { gap: 24px; }
-  #details-panel.is-preview .stat-value,
-  #details-panel.is-preview .status-select { font-size: 18px; }
   #details-panel.is-preview #details-content { gap: 14px; }
 }
 
@@ -2732,4 +2625,959 @@ body.rail-fx-instant #details-panel #details-actions {
   body:not(.force-motion) #game-list .game-item .fallback-letter {
     transition: opacity 140ms ease;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FLAT EDITORIAL PRIMITIVES — canonical, token-driven
+
+   This section is the single authoritative definition for shared surfaces:
+   panels, titles, buttons, inputs, labels, tabs and toggles. It sits last so
+   it wins the cascade over the earlier per-screen experiments, and every value
+   comes from tokens.css. No glass: solid black surfaces + 1px hairlines only.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Panels: every modal body is one flat black surface ──────────────────── */
+.glass-panel {
+  background: var(--surface-0);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-panel);
+  padding: var(--modal-pad);
+  box-shadow: none;
+  outline: 1px solid rgba(0, 0, 0, 0.9);   /* crisp separation from wallpaper */
+  font-family: var(--font-ui);
+}
+/* Kill the old glass sheen layers. */
+.glass-panel::before,
+.glass-panel::after,
+.glass-btn::before,
+.glass-btn::after,
+.toast::before {
+  content: none;
+  display: none;
+}
+
+/* ── Modal titles: sentence case, 600, tight tracking (no wide-spaced caps) ── */
+.panel-title,
+#modal-title,
+.modal-title,
+#scan-results-title,
+#restore-title,
+#online-art-title,
+.settings-title,
+#uninstall-title {
+  font-family: var(--font-ui);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+  margin: 0 0 var(--sp-1);
+  line-height: 1.3;
+}
+
+/* Sub-line under a panel title. */
+.panel-desc,
+.settings-desc,
+#online-art-sub,
+#restore-subtitle,
+#uninstall-subtitle {
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  font-weight: 400;
+  color: var(--text-muted);
+  margin: 0 0 var(--sp-4);
+  line-height: 1.5;
+}
+
+/* The Remove Game overlay lost its dimmer when the old translucent rules were
+   flattened; give it the same flat scrim as every other modal. */
+#uninstall-overlay { background: var(--scrim); }
+
+/* Inputs inside modals are pinned by ID+attribute rules in the older layers
+   (one of which set `border: 1px solid transparent`). Restate the flat input at
+   the same specificity, later in the file, so it wins everywhere. */
+#modal input[type="text"],
+#modal input[type="number"],
+#modal select,
+#settings-modal input[type="text"],
+#settings-modal input[type="password"],
+#settings-modal select,
+#uninstall-modal input,
+#backup-name-modal input {
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  outline: none;
+}
+#modal input::placeholder,
+#settings-modal input::placeholder,
+#uninstall-modal input::placeholder,
+#backup-name-modal input::placeholder { color: var(--text-dim); }
+
+/* Modal panels carry ID selectors in the older layers, which outrank
+   `.glass-panel`; restate the flat surface at ID specificity so every panel —
+   including the add/edit modal — is one solid black card. */
+#modal,
+#settings-modal,
+#stats-modal,
+#uninstall-modal,
+#backup-name-modal,
+#restore-modal,
+#scan-results-modal,
+#metadata-modal,
+#online-art-modal,
+#backup-manager-modal {
+  background: var(--surface-0);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-panel);
+  box-shadow: none;
+  color: var(--text);
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+.glass-btn,
+.btn-primary,
+.btn-secondary,
+.settings-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 10px var(--sp-4);
+  border-radius: var(--r-input);
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease,
+              color var(--dur-fast) ease;
+}
+.glass-btn:hover,
+.btn-secondary:hover,
+.settings-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--hairline-strong);
+  transform: none;
+}
+.glass-btn:active,
+.btn-secondary:active,
+.settings-btn:active { background: var(--surface-3); transform: none; }
+.glass-btn.small { padding: 8px var(--sp-3); font-size: var(--fs-body); border-radius: var(--r-input); }
+.glass-btn { font-size: var(--fs-body); letter-spacing: 0; border-radius: var(--r-input); }
+.glass-btn.small { font-size: var(--fs-body); letter-spacing: 0; }
+
+/* Ghost / cancel: transparent with a hairline outline. */
+.btn-ghost,
+.settings-ghost,
+.settings-back {
+  background: transparent;
+  border: 1px solid var(--hairline);
+  color: var(--text-muted);
+  border-radius: var(--r-input);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  padding: 10px var(--sp-4);
+  cursor: pointer;
+  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease,
+              background var(--dur-fast) ease;
+}
+.btn-ghost:hover,
+.settings-ghost:hover,
+.settings-back:hover {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  background: var(--surface-2);
+}
+
+/* Primary: accent fill, ink text auto-picked for contrast. */
+.btn-primary,
+.settings-btn-primary,
+.glass-btn.highlight {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  padding: 10px var(--sp-5);
+  box-shadow: none;
+}
+.btn-primary:hover,
+.settings-btn-primary:hover,
+.glass-btn.highlight:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--accent-ink);
+}
+
+/* Destructive: muted red text, red fill only on hover. */
+.btn-ghost.danger,
+.settings-btn-danger {
+  background: transparent;
+  border: 1px solid var(--hairline);
+  color: var(--danger);
+}
+.btn-ghost.danger:hover,
+.settings-btn-danger:hover {
+  background: var(--danger-surface);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btn-ghost { padding: 9px var(--sp-3); }
+.btn-ghost.danger { border-color: var(--hairline); }
+
+/* ── Inputs, selects, textareas: one flat treatment ──────────────────────── */
+.glass-input,
+.settings-input,
+.field-group input[type="text"],
+.field-group input[type="number"],
+.field-group select,
+#input-backup-name,
+#online-art-search {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  padding: 10px var(--sp-3);
+  outline: none;
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+}
+.glass-input::placeholder,
+.settings-input::placeholder,
+.field-group input::placeholder { color: var(--text-dim); }
+
+/* 2px accent focus ring, flat — no glow. */
+.glass-input:focus,
+.settings-input:focus,
+.glass-select:focus,
+.field-group input:focus,
+.field-group select:focus,
+#input-backup-name:focus,
+#online-art-search:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.field-group select option,
+.status-select option,
+#sort-select option { background: var(--surface-1); color: var(--text); }
+
+/* ── Field labels: mono, uppercase, tracked, 60% white ───────────────────── */
+.field-group { margin-bottom: var(--sp-4); }
+.field-group label,
+#modal label,
+.settings-field-label,
+.field-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: rgba(255, 255, 255, 0.60);
+  margin-bottom: var(--sp-2);
+}
+.field-group .optional { text-transform: none; letter-spacing: 0; color: var(--text-dim); font-weight: 400; }
+/* Helper text: shorter and dimmer. */
+.field-group .hint,
+.settings-hint,
+#launch-target-hint {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-faint);
+  margin-top: var(--sp-2);
+  line-height: 1.45;
+}
+
+/* ── Segmented control / tabs: flat, accent only when active ─────────────── */
+.segmented {
+  display: flex;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  overflow: hidden;
+  background: var(--surface-1);
+}
+.segmented button {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  padding: 10px var(--sp-3);
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.segmented button + button { border-left: 1px solid var(--hairline); }
+.segmented button:hover { background: var(--surface-2); color: var(--text); }
+.segmented button.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+/* ── Checkbox rows + switches: flat, accent when on ─────────────────────── */
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body-lg);
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-check input[type="checkbox"] {
+  appearance: none;
+  width: 16px; height: 16px;
+  flex-shrink: 0;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+.settings-check input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── Focus ring: 2px accent, keyboard only ──────────────────────────────── */
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* ── Motion: subtle, 8px translate, 150-200ms ease-out ─────────────────── */
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(var(--slide)); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(var(--slide)); }
+  to   { opacity: 1; transform: none; }
+}
+/* Modal overlays fade fast and flat (no blur anywhere). */
+#modal-overlay, #restore-overlay, #uninstall-overlay,
+#backup-name-overlay, #scan-results-overlay, #settings-overlay,
+#metadata-overlay, #backup-manager-overlay, #online-art-overlay, #stats-overlay {
+  transition: opacity var(--dur-fast) ease-out;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TOASTS — top right, solid, status bar, no blur
+   ═══════════════════════════════════════════════════════════════════════════ */
+#toast-container {
+  position: fixed;
+  top: 50px; right: var(--sp-5);
+  z-index: 2000;
+  display: flex; flex-direction: column;
+  gap: var(--sp-2);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  position: relative;
+  display: flex; align-items: flex-start;
+  gap: var(--sp-3);
+  width: 320px; max-width: 320px;
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) calc(var(--sp-3) + 3px);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-left: 3px solid var(--accent);   /* status bar */
+  border-radius: var(--r-card);
+  box-shadow: none;
+  color: var(--text);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  animation: toastIn var(--dur-slow) var(--ease-out) both;
+}
+.toast.warning { border-left-color: var(--warn); }
+.toast.error   { border-left-color: var(--danger); }
+.toast.leaving { animation: toastOut var(--dur) ease-out both; }
+
+.toast-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--accent);
+}
+.toast.warning .toast-icon { color: var(--warn); }
+.toast.error   .toast-icon { color: var(--danger); }
+
+.toast-body { flex: 1 1 auto; min-width: 0; }
+.toast-title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+  margin: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.toast-msg {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Optional text action + dismiss */
+.toast-action {
+  flex-shrink: 0;
+  align-self: center;
+  background: none; border: none;
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 12px; font-weight: 600;
+  padding: 2px 2px;
+  cursor: pointer;
+}
+.toast-action:hover { text-decoration: underline; }
+.toast-close {
+  flex-shrink: 0;
+  background: none; border: none;
+  color: var(--text-dim);
+  font-size: 12px; line-height: 1;
+  padding: 3px;
+  cursor: pointer;
+  transition: color var(--dur-fast) ease;
+}
+.toast-close:hover { color: var(--text); }
+
+@keyframes toastIn  { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+@keyframes toastOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(16px); } }
+
+/* Reduced motion: fade only, no slide. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) .toast { animation: none; }
+  body:not(.force-motion) .toast.leaving { animation: none; opacity: 0.4; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STAT ROW — one typographic system, shared baseline, no clipping
+   ═══════════════════════════════════════════════════════════════════════════ */
+#details-stats,
+#details-panel.is-preview #details-stats {
+  display: flex;
+  flex-flow: row wrap;
+  align-items: flex-start;   /* every value's line box starts at the same y */
+  gap: 56px;
+  margin-bottom: 0;
+}
+
+.stat-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: none; border: none; padding: 0;
+}
+
+/* Value + stage select share one type system so all four baselines line up. */
+.stat-value,
+.status-select {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: var(--fs-stat);
+  font-weight: 500;
+  line-height: var(--lh-stat);
+  letter-spacing: -0.01em;
+  color: #FFFFFF;
+  margin: 0;
+  overflow: visible;                 /* never clip descenders (g / y) */
+  font-variant-numeric: tabular-nums;
+  text-shadow: var(--ink-shadow);
+}
+
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgba(255, 255, 255, 0.50);
+  margin-top: 8px;
+  text-shadow: var(--ink-shadow);
+  white-space: nowrap;
+}
+
+/* Stage: fit-content instead of a fixed box, chevron 8px right of the text. */
+.status-select {
+  appearance: none; -webkit-appearance: none;
+  height: auto;
+  width: fit-content;
+  field-sizing: content;      /* hug the *selected* stage, not the widest option */
+  min-width: 0;
+  max-width: 16ch;
+  padding: 0 20px 0 0;               /* 12px chevron + 8px gap, never over the text */
+  background-color: transparent;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' fill-opacity='0.55' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right center;
+}
+.status-select:hover,
+.status-select:focus-visible { color: var(--accent); }
+
+/* The hover underline used to render a stray 1px row, which pushed two of the
+   four labels off the shared baseline and made the values look staggered. The
+   hover popover is the affordance now. */
+.stat-hover { padding: 0; margin: 0; }
+.stat-hover::after { content: none; display: none; }
+
+/* Canonical value size. The old per-breakpoint rules (at 1200px and below)
+   dropped these to 18px and beat the token by specificity, so restate them
+   here with the same specificity — later in the file, so this wins. */
+.stat-value,
+#details-panel.is-preview .stat-value,
+.status-select,
+#details-panel.is-preview .status-select { font-size: var(--fs-stat); }
+
+/* Below 900px the row wraps onto as many lines as it needs — never clips. */
+@media (max-width: 900px) {
+  #details-panel.is-preview #details-stats { gap: 32px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SEARCH — never clipped, dropdown aligned to the input
+   ═══════════════════════════════════════════════════════════════════════════ */
+#search-input,
+#game-list-panel.search-mode #search-input {
+  flex: 1 1 auto;
+  min-width: 0;                      /* allow shrinking instead of overflowing */
+  width: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  padding: 9px var(--sp-3);
+  outline: none;
+}
+#search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+#search-input::placeholder { color: var(--text-dim); }
+
+/* Opening search only fades the input in — no width animation, so the
+   toolbar icons beside it never shift or clip. */
+#game-list-panel.search-mode #search-input { animation: searchFade 160ms ease-out; }
+@keyframes searchGrow { from { opacity: 0; } to { opacity: 1; } }
+
+/* The sort dropdown sits exactly under the input: same left edge, same width.
+   --search-x / --search-w are measured from the real input by app.js. */
+#filter-bar,
+#game-list-panel.search-mode #filter-bar {
+  display: none;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: var(--sp-1) 0 var(--sp-3) var(--search-x, 0px);
+  width: var(--search-w, 100%);
+}
+#game-list-panel.search-mode #filter-bar {
+  display: flex;
+  animation: searchFade 160ms ease-out;
+}
+#sort-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  padding: 8px var(--sp-3);
+  outline: none;
+  cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23ffffff' fill-opacity='0.5' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--sp-3) center;
+  padding-right: 28px;
+}
+#sort-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ACTION ROW — the original pill set, restored (flat: no blur, no glass)
+   Geometry measured off the pre-redesign build: 160px pill, 28px row gap,
+   46px tall, accent chip, 11px/700 tracked labels, sliding-circle hover.
+   Everything else (chip fill, hover, label slide) comes from the .pill-btn
+   block further up the file.
+   ═══════════════════════════════════════════════════════════════════════════ */
+#details-actions {
+  display: flex;
+  flex-flow: row wrap;
+  align-items: center;
+  gap: 28px;
+}
+
+/* Launch is the one filled pill: accent body and accent chip read as a single
+   shape, so the arrow and the label use --accent-ink to stay legible on any
+   wallpaper's accent. Declared after the hover rules so it holds in both
+   states; hover only deepens the fill. */
+.pill-btn.launch-pill { background: var(--accent); }
+.pill-btn.launch-pill:hover,
+.pill-btn.launch-pill.holding { background: var(--accent-strong); }
+.pill-btn.launch-pill .pill-label,
+.pill-btn.launch-pill:hover .pill-label,
+.pill-btn.launch-pill.holding .pill-label { color: var(--accent-ink); }
+.pill-btn.launch-pill .pill-circle-icon { color: var(--accent-ink); }
+
+/* Secondary chips carry the same accent, dimmed — Launch and Favorite stay
+   bright. Hover/holding still slam the chip to black, as the original did. */
+.pill-btn.edit-pill .pill-circle,
+.pill-btn.restore-pill .pill-circle,
+.pill-btn.backup-pill .pill-circle {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.pill-btn.edit-pill:hover .pill-circle,
+.pill-btn.restore-pill:hover .pill-circle,
+.pill-btn.backup-pill:hover .pill-circle,
+.pill-btn.edit-pill.holding .pill-circle,
+.pill-btn.restore-pill.holding .pill-circle,
+.pill-btn.backup-pill.holding .pill-circle { background: #000; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SETTINGS / STATS / GENERIC MODAL SHELLS — solid black, 24px padding
+   ═══════════════════════════════════════════════════════════════════════════ */
+#settings-modal.settings-modal,
+#stats-modal.stats-modal {
+  background: var(--surface-0);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-panel);
+  padding: 0;
+  box-shadow: none;
+}
+.settings-head { padding: var(--modal-pad) var(--modal-pad) var(--sp-2); }
+.settings-body { padding: 0 var(--modal-pad) var(--sp-2); }
+.settings-footer {
+  padding: var(--sp-3) var(--modal-pad) var(--sp-4);
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-0);
+}
+.settings-section { margin-bottom: var(--sp-5); }
+.settings-section-title {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: rgba(255, 255, 255, 0.60);
+  margin: 0 0 var(--sp-2);
+}
+.settings-card {
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  padding: var(--sp-4);
+}
+.settings-card + .settings-card { margin-top: var(--sp-2); }
+.settings-card .settings-toggle-row { padding: var(--sp-2) 0; }
+.settings-card .settings-toggle-row + .settings-toggle-row {
+  border-top: 1px solid var(--hairline);
+}
+.settings-toggle-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-4);
+  cursor: pointer;
+}
+.toggle-title { font-size: var(--fs-body-lg); font-weight: 500; color: var(--text); }
+.toggle-sub { font-size: 12px; color: var(--text-faint); line-height: 1.45; }
+
+/* Flat switch: accent when on, no glow. */
+.toggle-track {
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-pill);
+  box-shadow: none;
+}
+.toggle-track.on,
+.toggle-track:has(input:checked) {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: none;
+}
+.toggle-thumb { box-shadow: none; background: #fff; }
+.toggle-track.on .toggle-thumb,
+.toggle-track:has(input:checked) .toggle-thumb { transform: translateX(18px); }
+
+/* ── Statistics: flat cards, thin accent charts, flat bars ─────────────── */
+.stats-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-2); }
+.stats-cards .stat-card {
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3);
+}
+.stat-card .sc-value {
+  font-family: var(--font-ui);
+  font-size: 22px; font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  overflow: visible;
+}
+.stat-card .sc-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label-sm); font-weight: 500;
+  text-transform: uppercase; letter-spacing: var(--ls-label);
+  color: rgba(255, 255, 255, 0.52);
+  margin-top: var(--sp-2);
+}
+
+/* Activity bars: flat fills, no glow or gradient sheen. */
+.act-bar {
+  background: var(--accent);
+  box-shadow: none;
+  border-radius: 2px 2px 0 0;
+  max-width: none;
+}
+.act-col.zero .act-bar { background: var(--surface-2); box-shadow: none; }
+.act-col.hovered .act-bar { background: #fff; box-shadow: none; }
+.act-col.hovered.zero .act-bar { background: var(--surface-3); }
+.act-axis span { font-family: var(--font-mono); font-size: 9px; color: var(--text-dim); }
+
+.rank-row .rank-fill { background: var(--accent); border-radius: 3px; }
+.rank-row .rank-track { background: var(--surface-2); border-radius: 3px; }
+.rank-row .rank-pos { font-family: var(--font-mono); color: var(--text-dim); }
+.rank-row .rank-time { font-family: var(--font-mono); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* Thin accent line charts (trend / popover). */
+.sp-line, .sp-path-tag { stroke: var(--accent); }
+
+/* Stats hub headings that still use raw hex. */
+.stats-chart-head { font-family: var(--font-mono); font-size: var(--fs-label); text-transform: uppercase; letter-spacing: var(--ls-label); color: rgba(255, 255, 255, 0.60); }
+
+/* ── List rows (restore, scans, backup manager, metadata, online art) ──── */
+.restore-item,
+.scan-result-item,
+.backup-item,
+.online-art-thumb {
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+.restore-item:hover,
+.scan-result-item:hover,
+.backup-item:hover,
+.online-art-thumb:hover {
+  background: var(--surface-2) !important;
+  border-color: var(--hairline-strong);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   INSTALL STATUS — Phase 2 silent state
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Library rail badge (kept for legacy CSS; no longer injected in JS) */
+.install-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono); font-size: var(--fs-label-sm); font-weight: 500;
+  text-transform: uppercase; letter-spacing: var(--ls-label);
+  padding: 3px var(--sp-2); border-radius: var(--r-pill);
+  border: 1px solid var(--hairline); background: var(--surface-1);
+  color: var(--text-muted); white-space: nowrap;
+}
+.install-badge.missing   { border-color: color-mix(in srgb, var(--warn) 45%, transparent); color: var(--warn); }
+.install-badge.unavailable { border-color: var(--hairline-strong); color: var(--text-faint); }
+
+/* Not-installed artwork: grayscale + dim. Transition 300ms so switching games feels smooth. */
+.game-item.install-missing img,
+.game-item.install-missing .fallback-letter,
+.game-item.active.install-missing img,
+.game-item.active.install-missing .fallback-letter {
+  filter: grayscale(1);
+  opacity: 0.35;
+  transition: filter 300ms ease, opacity 300ms ease;
+}
+
+/* Wallpaper for not-installed game: grayscale + dim, 300ms. */
+#bg-wallpaper-1, #bg-wallpaper-2 {
+  transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+              filter 300ms ease;
+}
+
+/* STATUS stat block — amber hollow dot + quiet Locate link */
+.stat-install-value-wrap {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+}
+.stat-install-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid #f59e0b;        /* amber */
+  background: transparent;
+  flex-shrink: 0;
+}
+.stat-install-value {
+  color: var(--text);
+  font-size: inherit;
+}
+.stat-locate-btn {
+  background: none; border: none; padding: 0;
+  color: rgba(255,255,255,0.55);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+.stat-locate-btn:hover { color: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SIDEBAR TOOLBAR — circular icon buttons, flat
+   ═══════════════════════════════════════════════════════════════════════════ */
+.sidebar-toolbar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 14px;
+  margin: var(--sp-3) 0;
+  justify-content: flex-start;
+}
+.tool-btn,
+#btn-settings,
+#btn-stats,
+#btn-search-toggle,
+#btn-add-game {
+  width: 40px; height: 40px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  color: var(--text-faint);
+  font-size: 17px;
+  cursor: pointer;
+  position: relative;
+  overflow: visible;
+  box-shadow: none;
+  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease,
+              background var(--dur-fast) ease;
+}
+.tool-btn::before,
+#btn-add-game::before { content: none; display: none; }
+.tool-btn:hover,
+#btn-settings:hover,
+#btn-stats:hover,
+#btn-search-toggle:hover,
+#btn-add-game:hover {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  background: var(--surface-2);
+  transform: none;
+  box-shadow: none;
+}
+/* Search toggle while searching. */
+#game-list-panel.search-mode #btn-search-toggle,
+#btn-search-toggle.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+/* De-emphasise (no blur) the icons that are inert during search. */
+#game-list-panel.search-mode #btn-settings,
+#game-list-panel.search-mode #btn-stats {
+  filter: none;
+  opacity: 0.30;
+  pointer-events: none;
+}
+#btn-add-game { color: var(--text-muted); font-size: 20px; }
+
+/* ── ID-level corrections ──────────────────────────────────────────────────
+   A few older rules use ID+attribute selectors, which outrank the class-based
+   primitives above. Restate them here at equal-or-higher specificity, later in
+   the file, so the flat design actually wins everywhere. */
+
+/* The Remove Game modal forced the mono face onto all of its buttons. */
+#uninstall-modal button,
+#uninstall-modal p { font-family: var(--font-ui); }
+
+/* Backup-name title is a plain `> div:first-child`, so it escaped .panel-title. */
+#backup-name-modal > div:first-child,
+#backup-manager-modal > div:first-child,
+#metadata-modal > div:first-child {
+  font-family: var(--font-ui);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+  margin: 0 0 var(--sp-1);
+  line-height: 1.3;
+}
+#backup-name-modal > div:nth-child(2) {
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* Backup Name input pins its own surface with `.glass-input`. */
+#backup-name-modal .glass-input {
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-input);
+  color: var(--text);
+  font-size: var(--fs-body);
+}
+#backup-name-modal .glass-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  outline: none;
+}
+
+/* The Remove Game title was a 30px / 800 red heading — off the type scale.
+   Keep the destructive cue, at the shared title size. */
+#uninstall-modal .settings-title {
+  font-family: var(--font-ui);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--danger);
+  margin: 0 0 var(--sp-1);
+}
+
+/* One 2px accent focus ring on every modal field. */
+#modal input:focus,
+#modal select:focus,
+#settings-modal input:focus,
+#settings-modal select:focus,
+#uninstall-modal input:focus,
+#backup-name-modal input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
 }

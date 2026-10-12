@@ -4,9 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SILO</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Cinzel:wght@700&family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@500;700&family=Oswald:wght@700&family=Outfit:wght@700&family=Playfair+Display:ital,wght@0,700;1,700&family=Press+Start+2P&family=Roboto:wght@700;900&display=swap" rel="stylesheet">
+  <!-- No CDN: fonts are self-hosted and bundled (see tokens.css) -->
+  <link rel="stylesheet" href="tokens.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -51,12 +50,12 @@
 
     <!-- LEFT: Centered logo sidebar -->
     <div id="game-list-panel">
-      <div style="display: flex; align-items: center; gap: 10px; margin: 12px 0;" class="sidebar-toolbar">
-        <button id="btn-settings" title="Settings / Backup" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.35); font-size: 20px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;">⚙</button>
-        <button id="btn-stats" title="Statistics" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); background: var(--glass-bg); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.6); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 0 4px 2px rgba(255,255,255,0.1); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 15v-3"/><path d="M12 15V7"/><path d="M17 15v-5"/></svg></button>
-        <button id="btn-search-toggle" title="Search ( / )" style="width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.32); background: rgba(255,255,255,0.16); backdrop-filter: var(--glass-blur); color: rgba(255,255,255,0.92); font-size: 18px; cursor: pointer; transition: all 250ms ease; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), inset 0 0 4px 2px rgba(255,255,255,0.12), 0 0 10px rgba(255,255,255,0.06); position: relative; overflow: hidden; flex-shrink: 0;"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></button>
+      <div class="sidebar-toolbar">
+        <button id="btn-settings" class="tool-btn" title="Settings / Backup">⚙</button>
+        <button id="btn-stats" class="tool-btn" title="Statistics"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 15v-3"/><path d="M12 15V7"/><path d="M17 15v-5"/></svg></button>
+        <button id="btn-search-toggle" class="tool-btn" title="Search ( / )"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></button>
         <input type="text" id="search-input" placeholder="Search your library" autocomplete="off" />
-        <button id="btn-add-game" title="Add Game (Y)" style="margin: 0;">+</button>
+        <button id="btn-add-game" class="tool-btn" title="Add Game (Y)">+</button>
       </div>
       <div id="filter-bar">
         <select id="sort-select">
@@ -103,13 +102,22 @@
               </select>
               <div class="stat-label">STAGE</div>
             </div>
+            <!-- Not-installed status: only shown when exe is missing / drive offline -->
+            <div class="stat-block" id="stat-block-status" style="display:none;">
+              <div class="stat-value stat-install-value-wrap">
+                <span class="stat-install-dot" aria-hidden="true"></span>
+                <span class="stat-install-value">Not installed</span>
+                <button type="button" class="stat-locate-btn">Locate…</button>
+              </div>
+              <div class="stat-label">STATUS</div>
+            </div>
           </div>
 
           <div id="save-path-status"></div>
 
           <div id="details-actions">
-            <!-- Pill launch button — Performance/Xbox Mode -->
-            <button class="pill-btn xbox-pill" id="btn-launch-xbox">
+            <!-- Launch — the one filled accent pill -->
+            <button class="pill-btn launch-pill" id="btn-launch">
               <div class="pill-inner">
                 <div class="pill-spacer"></div>
                 <div class="pill-circle">
@@ -202,7 +210,7 @@
   <!-- ADD / EDIT MODAL -->
   <div id="modal-overlay" class="hidden">
     <div id="modal" class="glass-panel">
-      <div id="modal-title" class="modal-title">ADD GAME</div>
+      <div id="modal-title" class="modal-title">Add game</div>
       <div class="modal-body">
       <div id="scan-folder-container" style="display: flex; gap: 10px; margin-bottom: 16px;">
         <button id="btn-browse-exe" class="btn-secondary" style="flex: 1;">Browse for .exe</button>
@@ -319,8 +327,8 @@
   <!-- SCAN RESULTS MODAL -->
   <div id="scan-results-overlay" class="hidden">
     <div id="scan-results-modal" class="glass-panel" style="width: 450px;">
-      <div id="scan-results-title" style="font-family: 'Oswald', sans-serif; font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 5px;">SCAN RESULTS</div>
-      <div style="margin-bottom: 15px; color: rgba(255,255,255,0.7); font-size: 14px;">Select the games you want to add:</div>
+      <div id="scan-results-title" class="panel-title">Scan results</div>
+      <div class="panel-desc">Select the games you want to add.</div>
       <div id="scan-results-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow-y: auto; margin-bottom: 20px;"></div>
       <div style="display: flex; gap: 10px; justify-content: flex-end; align-items: center;">
         <span id="scan-selected-count" style="color: rgba(255,255,255,0.5); font-size: 12px; margin-right: auto;"></span>
@@ -333,8 +341,8 @@
   <!-- METADATA PICKER MODAL -->
   <div id="metadata-overlay" class="hidden">
     <div id="metadata-modal" class="glass-panel" style="width: 480px; max-width: 95vw;">
-      <div style="font-family: 'Oswald', sans-serif; font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 5px;">CHOOSE METADATA</div>
-      <div style="margin-bottom: 15px; color: rgba(255,255,255,0.7); font-size: 14px;">Multiple close matches found. Select one to auto-fill:</div>
+      <div class="panel-title">Choose metadata</div>
+      <div class="panel-desc">Multiple close matches found. Select one to auto-fill.</div>
       <div id="metadata-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; margin-bottom: 20px;"></div>
       <div style="display: flex; justify-content: flex-end;">
         <button class="glass-btn small" id="btn-metadata-cancel">Cancel</button>
@@ -345,8 +353,8 @@
   <!-- ONLINE ART PICKER MODAL -->
   <div id="online-art-overlay" class="hidden">
     <div id="online-art-modal" class="glass-panel" style="width: 560px; max-width: 95vw;">
-      <div id="online-art-title" style="font-family: 'Oswald', sans-serif; font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 5px;">FIND ART</div>
-      <div id="online-art-sub" style="margin-bottom: 12px; color: rgba(255,255,255,0.7); font-size: 14px;">Search a game to pick its logo / wallpaper (Steam + SteamGridDB). Click an image to use it.</div>
+      <div id="online-art-title" class="panel-title">Find art</div>
+      <div id="online-art-sub" class="panel-desc">Search a game to pick its logo or wallpaper. Click an image to use it.</div>
       <div style="display: flex; gap: 8px; margin-bottom: 15px;">
         <input type="text" id="online-art-search" class="glass-input" placeholder="Search game title..." style="flex: 1;" autocomplete="off" />
         <button class="glass-btn small highlight" id="btn-online-art-go">Search</button>
@@ -360,35 +368,11 @@
     </div>
   </div>
 
-  <!-- LAUNCH MODE MODAL (gamepad flow) -->
-  <div id="launch-overlay" class="hidden">
-    <div id="launch-modal" class="glass-panel">
-      <div id="launch-logo-area">
-        <img id="launch-wallpaper-img" src="" alt="" style="display:none; max-height: 120px; max-width: 320px; object-fit: contain; border-radius: 8px;" />
-        <img id="launch-logo-img" src="" alt="" />
-        <div id="launch-game-name"></div>
-      </div>
-      <div id="launch-question">How do you want to launch?</div>
-      <div id="launch-buttons">
-        <button class="launch-choice glass-btn" id="btn-launch-mode-normal">
-          <span class="lc-icon">▶</span>
-          <span class="lc-label">Normal</span>
-          <span class="lc-sub">Standard Windows</span>
-        </button>
-        <button class="launch-choice glass-btn" id="btn-launch-mode-xbox">
-          <span class="lc-icon">⬡</span>
-          <span class="lc-label">Xbox Mode</span>
-          <span class="lc-sub">Win+F11 → launch</span>
-        </button>
-      </div>
-      <button class="glass-btn" id="btn-launch-cancel" style="width:100%;margin-top:8px;">Cancel</button>
-    </div>
-  </div>
   <!-- RESTORE MODAL -->
   <div id="restore-overlay" class="hidden">
     <div id="restore-modal" class="glass-panel" style="width: 400px;">
-      <div id="restore-title" style="font-family: 'Oswald', sans-serif; font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 5px;">RESTORE SAVE</div>
-      <div id="restore-subtitle" style="margin-bottom: 20px; color: rgba(255,255,255,0.7); font-size: 14px;">Select a backup snapshot to restore. This will overwrite current save files.</div>
+      <div id="restore-title" class="panel-title">Restore save</div>
+      <div id="restore-subtitle" class="panel-desc">Select a backup snapshot to restore. This overwrites your current save files.</div>
       <div id="restore-list" style="display: flex; flex-direction: column; gap: 10px; max-height: 200px; overflow-y: auto; margin-bottom: 20px;">
         <!-- Backup items injected here -->
       </div>
@@ -418,8 +402,8 @@
   <!-- BACKUP NAME MODAL -->
   <div id="backup-name-overlay" class="hidden">
     <div id="backup-name-modal" class="glass-panel" style="width: 350px;">
-      <div style="font-family: 'Oswald', sans-serif; font-size: 20px; font-weight: 700; color: #fff; margin-bottom: 5px;">NAME YOUR BACKUP</div>
-      <div style="margin-bottom: 15px; color: rgba(255,255,255,0.7); font-size: 14px;">Enter a custom name for this backup (optional):</div>
+      <div class="panel-title">Name your backup</div>
+      <div class="panel-desc">Optional. Leave blank to use the timestamp.</div>
       <input type="text" id="input-backup-name" class="glass-input" placeholder="e.g. Before Boss Fight" style="width: 100%; margin-bottom: 20px;">
       <div style="display: flex; gap: 10px; justify-content: flex-end;">
         <button class="glass-btn small" id="btn-backup-name-cancel">Cancel</button>
@@ -495,6 +479,16 @@
           </div>
         </div>
 
+        <div class="settings-section">
+          <h3 class="settings-section-title">Library</h3>
+          <div class="settings-card">
+            <div class="settings-row">
+              <button id="btn-rescan-installs" class="settings-btn">Rescan installs</button>
+            </div>
+            <p class="settings-hint">Checks every game's executable is still where SILO last saw it. Nothing is changed on disk.</p>
+          </div>
+        </div>
+
         <div class="settings-section settings-advanced" id="settings-advanced">
           <button class="settings-btn-advanced-toggle" id="settings-advanced-toggle">Advanced</button>
           <div class="advanced-body">
@@ -517,8 +511,8 @@
   <!-- BACKUP MANAGER MODAL -->
   <div id="backup-manager-overlay" class="hidden">
     <div id="backup-manager-modal" class="glass-panel" style="width: 540px; max-width: 95vw;">
-      <div style="font-family: 'Oswald', sans-serif; font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 5px;">BACKUP MANAGER</div>
-      <div style="margin-bottom: 15px; color: rgba(255,255,255,0.7); font-size: 14px;">All save backups across your library.</div>
+      <div class="panel-title">Backup manager</div>
+      <div class="panel-desc">All save backups across your library.</div>
       <div id="backup-manager-list" style="display: flex; flex-direction: column; gap: 12px; max-height: 380px; overflow-y: auto; margin-bottom: 20px;"></div>
       <div style="display: flex; justify-content: flex-end;">
         <button class="glass-btn small" id="btn-backup-manager-close">Close</button>

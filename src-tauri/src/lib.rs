@@ -27,6 +27,8 @@ pub fn run() {
     .plugin(tauri_plugin_updater::Builder::new().build())
     .invoke_handler(tauri::generate_handler![
       commands::get_games,
+      commands::verify_library_installs,
+      commands::verify_game_install,
       commands::add_game,
       commands::update_game,
       commands::detect_launch_target,

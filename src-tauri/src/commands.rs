@@ -167,6 +167,240 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
     }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   STARTUP INSTALL CHECK
+
+   Verifies that every game in the library is still installed. Runs fully off
+   the UI thread, a few paths at a time, and each probe is bounded by
+   INSTALL_TIMEOUT so a disconnected network share or an unplugged external
+   drive can never hang startup. Three states per game:
+
+     installed   — the executable (or, for launcher entries, the resolved game
+                   binary) is present
+     missing     — not launchable, but its drive/root is reachable, so the game
+                   was most likely uninstalled or moved
+     unavailable — the drive/root itself is gone (external drive unplugged)
+
+   The result is kept in app state with a timestamp. It is never persisted, and
+   no game, save, backup or statistic is ever modified because of a check.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+pub const INSTALL_INSTALLED: &str = "installed";
+pub const INSTALL_MISSING: &str = "missing";
+pub const INSTALL_UNAVAILABLE: &str = "unavailable";
+
+/// Per-path budget. A path that does not answer within this window is reported
+/// as `unavailable`: we genuinely cannot tell, and we never guess "missing".
+const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How many paths are probed at the same time.
+const INSTALL_WORKERS: usize = 4;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallStatus {
+    #[serde(rename = "game_id")]
+    pub game_id: String,
+    pub status: String,
+}
+
+/// In-memory only: the last check and when it ran. Never written to disk.
+#[derive(Default)]
+struct InstallSnapshot {
+    checked_at: Option<Instant>,
+    entries: Vec<InstallStatus>,
+}
+
+static INSTALL_SNAPSHOT: std::sync::OnceLock<std::sync::Mutex<InstallSnapshot>> =
+    std::sync::OnceLock::new();
+
+fn install_snapshot() -> &'static std::sync::Mutex<InstallSnapshot> {
+    INSTALL_SNAPSHOT.get_or_init(|| std::sync::Mutex::new(InstallSnapshot::default()))
+}
+
+/// Windows: the drive is reachable when the volume root itself (`C:\`) exists.
+#[cfg(target_os = "windows")]
+fn drive_available(path: &Path) -> bool {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            let root = format!("{}\\", prefix.as_os_str().to_string_lossy());
+            Path::new(&root).exists()
+        }
+        // Relative or UNC path: nothing better to probe than the path itself.
+        _ => path.exists(),
+    }
+}
+
+/// Unix: `/` always exists, so the mount point is what carries the meaning —
+/// removable media vanishes with the device under one of the automount roots.
+#[cfg(not(target_os = "windows"))]
+fn drive_available(path: &Path) -> bool {
+    const AUTOMOUNT_ROOTS: [&str; 4] = ["/media", "/mnt", "/run/media", "/Volumes"];
+    for root in AUTOMOUNT_ROOTS {
+        let Ok(rest) = path.strip_prefix(root) else {
+            continue;
+        };
+        // Probe only the volume level: `/media/<user>/<volume>` on most distros.
+        // A deleted game folder deeper down must not read as an unplugged disk.
+        let mut probe = PathBuf::from(root);
+        for part in rest.components().take(2) {
+            probe.push(part);
+            if !probe.exists() {
+                return false;
+            }
+        }
+        return true;
+    }
+    true
+}
+
+/// One game's probe, resolved inside the worker thread (finding the real game
+/// exe for a launcher entry walks the install tree).
+struct InstallJob {
+    game_id: String,
+    exe: Option<PathBuf>,
+    launch_target: String,
+}
+
+fn install_job(game: &Game) -> InstallJob {
+    InstallJob {
+        game_id: game.id.clone(),
+        exe: game
+            .exe_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from),
+        launch_target: game
+            .launch_target
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
+    }
+}
+
+fn install_status_for(job: &InstallJob) -> &'static str {
+    let Some(exe) = job.exe.as_deref() else {
+        // No stored path: nothing to verify, so never nag about it.
+        return INSTALL_INSTALLED;
+    };
+
+    if exe.is_file() {
+        return INSTALL_INSTALLED;
+    }
+
+    // The stored exe is gone. When it was a launcher, SILO would actually run
+    // the resolved game binary, so an install that still has *that* is fine.
+    if job.launch_target != "game" {
+        if let Some(real) = find_real_game_exe(exe) {
+            if real.is_file() {
+                return INSTALL_INSTALLED;
+            }
+        }
+    }
+
+    if drive_available(exe) {
+        INSTALL_MISSING
+    } else {
+        INSTALL_UNAVAILABLE
+    }
+}
+
+/// Probe a batch of games: INSTALL_WORKERS at a time, each probe timed out
+/// individually. A probe that overruns leaves its thread behind rather than
+/// stalling the batch — the app must never wait on a dead disk.
+fn verify_installs(games: &[Game]) -> Vec<InstallStatus> {
+    let jobs: Vec<InstallJob> = games.iter().map(install_job).collect();
+    let mut out = Vec::with_capacity(jobs.len());
+
+    for chunk in jobs.chunks(INSTALL_WORKERS) {
+        let mut pending = Vec::with_capacity(chunk.len());
+        for job in chunk {
+            let (tx, rx) = channel();
+            let probe = InstallJob {
+                game_id: job.game_id.clone(),
+                exe: job.exe.clone(),
+                launch_target: job.launch_target.clone(),
+            };
+            std::thread::spawn(move || {
+                let _ = tx.send(install_status_for(&probe));
+            });
+            pending.push((job.game_id.clone(), rx));
+        }
+        for (game_id, rx) in pending {
+            let status = rx.recv_timeout(INSTALL_TIMEOUT).unwrap_or(INSTALL_UNAVAILABLE);
+            out.push(InstallStatus {
+                game_id,
+                status: status.to_string(),
+            });
+        }
+    }
+
+    out
+}
+
+#[tauri::command]
+pub async fn verify_library_installs(app: AppHandle) -> Vec<InstallStatus> {
+    let games = get_games(app);
+    let results = match tauri::async_runtime::spawn_blocking(move || verify_installs(&games)).await {
+        Ok(results) => results,
+        Err(e) => {
+            log::error!("install check failed to run: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let broken = results
+        .iter()
+        .filter(|r| r.status != INSTALL_INSTALLED)
+        .count();
+
+    if let Ok(mut snap) = install_snapshot().lock() {
+        // Report what changed since the previous check, then store this one.
+        let newly_broken = results
+            .iter()
+            .filter(|r| {
+                r.status != INSTALL_INSTALLED
+                    && !snap
+                        .entries
+                        .iter()
+                        .any(|old| old.game_id == r.game_id && old.status != INSTALL_INSTALLED)
+            })
+            .count();
+        snap.checked_at = Some(Instant::now());
+        snap.entries = results.clone();
+        log::info!(
+            "install check: {} verified, {} need attention ({} newly)",
+            results.len(),
+            broken,
+            newly_broken
+        );
+    }
+
+    results
+}
+
+/// Re-verify a single game right before launching it. Updates the cached entry.
+#[tauri::command]
+pub async fn verify_game_install(app: AppHandle, game_id: String) -> Option<InstallStatus> {
+    let games = get_games(app);
+    let wanted = game_id.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        games
+            .iter()
+            .find(|g| g.id == wanted)
+            .map(|g| install_status_for(&install_job(g)).to_string())
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    let entry = InstallStatus { game_id, status };
+    if let Ok(mut snap) = install_snapshot().lock() {
+        snap.entries.retain(|e| e.game_id != entry.game_id);
+        snap.entries.push(entry.clone());
+        snap.checked_at = Some(Instant::now());
+    }
+    Some(entry)
+}
+
 #[tauri::command]
 pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>, save_path: Option<String>, launch_target: Option<String>) -> Result<Game, String> {
     let mut games = get_games(app.clone());
@@ -780,7 +1014,7 @@ fn save_name_keys(game_name: &str, game_exe: &Path) -> Vec<String> {
 }
 
 #[tauri::command]
-pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Result<(), String> {
+pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> {
     let games = get_games(app.clone());
     let game = games.into_iter().find(|g| g.id == game_id).ok_or("Game not found")?;
     let configured_exe = game.exe_path.clone().ok_or("No executable set")?;
@@ -1256,7 +1490,6 @@ pub async fn launch_game(app: AppHandle, game_id: String, xbox_mode: bool) -> Re
         }
     });
 
-    let _ = xbox_mode; // hide/show now applies to both modes
     Ok(())
 }
 

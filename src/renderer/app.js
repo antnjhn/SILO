@@ -7,7 +7,6 @@ let categorySelectedIndex = 0;
 let selectedIndex = 0;
 let detailsOpen = false;
 let editingGameId = null;
-let pendingLaunchGameId = null;
 let modalWallpaperPath = null;
 let modalLogoPath = null;
 let searchQuery = '';
@@ -230,6 +229,7 @@ window.addEventListener('resize', () => {
   railResizeRaf = requestAnimationFrame(() => {
     railResizeRaf = 0;
     layoutRail();
+    layoutSearch();
     document.body.classList.add('rail-fx-instant');
     applyRailCarousel();
     centerActiveItem(false);
@@ -252,7 +252,7 @@ window.vault = {
   pickSaveFolder: () => invoke('pick_save_folder'),
   pickWallpaper: (gameId) => invoke('pick_wallpaper', { gameId }),
   pickLogo: (gameId) => invoke('pick_logo', { gameId }),
-  launchGame: (gameId, xboxMode) => invoke('launch_game', { gameId, xboxMode }),
+  launchGame: (gameId) => invoke('launch_game', { gameId }),
   listSessions: () => invoke('list_sessions'),
   getSystemFonts: () => invoke('get_system_fonts'),
   onPlaytimeUpdated: async (cb) => await listen('playtime-updated', (event) => cb(event.payload)),
@@ -283,22 +283,71 @@ function getFileSrc(path, imgElement) {
   }
 }
 
-/* ── Toast ─────────────────────────────────────────────────────────────────*/
-function showToast(type, title, msg) {
+/* ── Toast ─────────────────────────────────────────────────────────────────*
+   Flat notifications, top right. At most 3 are visible, each auto-dismisses
+   (errors get longer, warnings/info 4s), hovering or focusing pauses the
+   countdown, and an optional text action ("View", "Undo") sits inline. */
+const TOAST_MAX = 3;
+const TOAST_MS = { info: 4000, success: 4000, warning: 4000, error: 6000 };
+const TOAST_ICON = { error: '⚠', warning: '⚠', success: '✓', info: 'ℹ' };
+
+function dismissToast(toast) {
+  if (!toast || !toast.isConnected || toast.classList.contains('leaving')) return;
+  toast.classList.add('leaving');
+  const kill = () => toast.remove();
+  toast.addEventListener('animationend', kill, { once: true });
+  setTimeout(kill, 400);   // fallback when animation is disabled
+}
+
+function showToast(type, title, msg, opts = {}) {
   const container = document.getElementById('toast-container');
-  const icons = { error: '⚠', success: '✓', info: 'ℹ' };
+  if (!container) return null;
+  const kind = TOAST_MS[type] ? type : 'info';
   const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
+  toast.className = `toast ${kind}`;
+  toast.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  toast.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   toast.innerHTML = `
-    <span class="toast-icon">${icons[type] || 'ℹ'}</span>
+    <span class="toast-icon" aria-hidden="true">${TOAST_ICON[kind]}</span>
     <div class="toast-body">
       <div class="toast-title">${esc(title)}</div>
-      <div class="toast-msg">${esc(msg)}</div>
+      ${msg ? `<div class="toast-msg">${esc(msg)}</div>` : ''}
     </div>
+    ${opts.actionLabel ? `<button type="button" class="toast-action">${esc(opts.actionLabel)}</button>` : ''}
+    <button type="button" class="toast-close" aria-label="Dismiss">✕</button>
   `;
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), 5200);
-  toast.addEventListener('click', () => toast.remove());
+
+  // Cap the stack: the oldest toast leaves to make room.
+  const live = [...container.querySelectorAll('.toast:not(.leaving)')];
+  while (live.length > TOAST_MAX) dismissToast(live.shift());
+
+  // Countdown, paused while the toast is hovered or focused inside.
+  let remaining = opts.duration ?? TOAST_MS[kind];
+  let startedAt = performance.now();
+  let timer = 0;
+  const start = () => {
+    startedAt = performance.now();
+    timer = setTimeout(() => dismissToast(toast), remaining);
+  };
+  const hold = () => {
+    clearTimeout(timer);
+    remaining -= performance.now() - startedAt;
+  };
+  if (remaining > 0) start();
+  toast.addEventListener('mouseenter', hold);
+  toast.addEventListener('mouseleave', () => { if (remaining > 0) start(); });
+  toast.addEventListener('focusin', hold);
+  toast.addEventListener('focusout', () => { if (remaining > 0) start(); });
+
+  const action = toast.querySelector('.toast-action');
+  if (action) action.addEventListener('click', () => { dismissToast(toast); opts.onAction?.(); });
+  toast.querySelector('.toast-close')?.addEventListener('click', (e) => { e.stopPropagation(); dismissToast(toast); });
+  toast.addEventListener('click', (e) => {
+    if (e.target.closest('.toast-action, .toast-close')) return;
+    dismissToast(toast);
+  });
+  return toast;
 }
 
 /* ── Init ──────────────────────────────────────────────────────────────────*/
@@ -317,6 +366,18 @@ async function init() {
   applyShowGameTitles(false);
   applyCategoryFilter();
   requestAnimationFrame(pollGamepad);
+
+  // Verify the library only once the UI is on screen, so the app opens
+  // instantly; badges appear when the backend answers. requestIdleCallback keeps
+  // the check off the first paint, and its timeout guarantees it still runs if
+  // the window never goes idle (minimised at startup, backgrounded).
+  if (window.requestIdleCallback) {
+    window.requestIdleCallback(() => runInstallCheck({ force: true }), { timeout: 1000 });
+  } else {
+    setTimeout(() => runInstallCheck({ force: true }), 300);
+  }
+  // Coming back to the window re-checks, debounced to at most once every 30s.
+  window.addEventListener('focus', () => runInstallCheck());
 
   listen('library-corrupt-recovered', (event) => {
     showToast('error', 'Library Recovered', event.payload);
@@ -492,6 +553,9 @@ function renderGameList() {
 
     // Sidebar is logos-only: no text titles, no tooltips. Games without a logo
     // asset fall back to the first letter styled with the game's font/color.
+    // Install check: a missing game keeps its artwork, dimmed. No badge pill.
+    if (installStatus(g.id) !== 'installed') cls += ' install-missing';
+
     return `
     <div class="${cls}" data-index="${i}" aria-label="${esc(g.name)}">
       ${g.logoPath
@@ -856,7 +920,10 @@ function toggleSearch(forceOpen) {
   const next = typeof forceOpen === 'boolean' ? forceOpen : !isSearchOpen;
   isSearchOpen = next;
   panel.classList.toggle('search-mode', next);
-  requestAnimationFrame(layoutRail);   // the filter bar changes the rail's head height
+  // Measure synchronously: the sort dropdown must line up with the input in the
+  // same frame the panel appears, not one frame later.
+  layoutSearch();
+  requestAnimationFrame(() => { layoutSearch(); layoutRail(); });   // the filter bar changes the rail's head height
   toggle.innerHTML = next ? X_ICON : SEARCH_ICON;
   if (next) {
     document.getElementById('search-input').focus();
@@ -865,6 +932,22 @@ function toggleSearch(forceOpen) {
     if (inp.value) { inp.value = ''; searchQuery = ''; applyCategoryFilter(); }
     inp.blur();
   }
+}
+
+/* Align the sort dropdown with the search field: measure the real input and
+   publish its left edge and width so #filter-bar sits exactly under it at every
+   window size. CSS alone cannot know where the flex row puts the input, and a
+   guessed width is what used to clip the control at the panel edge. */
+function layoutSearch() {
+  const panel = document.getElementById('game-list-panel');
+  const input = document.getElementById('search-input');
+  if (!panel || !input) return;
+  if (!panel.classList.contains('search-mode')) return;
+  const panelBox = panel.getBoundingClientRect();
+  const box = input.getBoundingClientRect();
+  if (box.width <= 0) return;
+  panel.style.setProperty('--search-x', `${Math.round(box.left - panelBox.left)}px`);
+  panel.style.setProperty('--search-w', `${Math.round(box.width)}px`);
 }
 
 document.getElementById('btn-search-toggle')?.addEventListener('click', () => toggleSearch());
@@ -968,7 +1051,8 @@ function updateGameListSelection() {
     const dist = Math.abs(i - selectedIndex);
     el.className = 'game-item'
       + (i === selectedIndex ? ' active' : dist === 1 ? ' near' : '')
-      + (el.classList.contains('uninstalled') ? ' uninstalled' : '');
+      + (el.classList.contains('uninstalled') ? ' uninstalled' : '')
+      + (el.classList.contains('install-missing') ? ' install-missing' : '');
   });
   applyRailCarousel();
 }
@@ -983,11 +1067,27 @@ const ACCENT_FALLBACK = { r: 232, g: 232, b: 238 };   // #e8e8ee neutral
 let accentApplyTimer = 0;
 let accentLastKey = null;
 
+/* WCAG relative luminance (sRGB). */
+function relLuminance(r, g, b) {
+  const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+/* Text color to sit ON the accent. Whichever of black/white scores the higher
+   contrast wins, so labels on an accent fill always clear 4.5:1. */
+function inkForAccent(r, g, b) {
+  const L = relLuminance(r, g, b);
+  const onBlack = (L + 0.05) / 0.05;
+  const onWhite = 1.05 / (L + 0.05);
+  return onBlack >= onWhite ? '#000000' : '#ffffff';
+}
+
 function applyAccentColor(r, g, b) {
   const root = document.documentElement.style;
   root.setProperty('--accent', `rgb(${r}, ${g}, ${b})`);
   root.setProperty('--accent-strong', `rgb(${Math.round(r * 0.78)}, ${Math.round(g * 0.78)}, ${Math.round(b * 0.78)})`);
   root.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
+  root.setProperty('--accent-ink', inkForAccent(r, g, b));
 }
 
 function resetAccentColor() {
@@ -1252,6 +1352,7 @@ function renderDetails(g) {
   document.getElementById('stat-sessions').textContent = g.sessionCount || 0;
   document.getElementById('stat-last-played').textContent = fmtDate(g.lastPlayed);
   renderSavePathStatus(g);
+  applyLaunchAvailability(g);
 
   const statusSelect = document.getElementById('details-status-select');
   if (statusSelect) {
@@ -1378,7 +1479,7 @@ function renderDetails(g) {
     };
   }
 
-  setupHoldButton('btn-launch-xbox', 5000, () => doLaunch(g.id, true));
+  setupHoldButton('btn-launch', 5000, () => doLaunch(g.id));
   setupHoldButton('btn-edit-game', 5000, () => openEditModal(g));
   
 
@@ -1521,32 +1622,6 @@ function setupHoldButton(id, duration, onComplete) {
 }
 
 /* ── Launch ────────────────────────────────────────────────────────────────*/
-function openLaunchModal(gameId) {
-  pendingLaunchGameId = gameId;
-  const g = games.find(g => g.id === gameId);
-  const pWallImg = document.getElementById('launch-wallpaper-img');
-  const pLogoImg = document.getElementById('launch-logo-img');
-  const lName = document.getElementById('launch-game-name');
-
-  if (g.wallpaper) {
-    getFileSrc(g.wallpaper, pWallImg);
-    pWallImg.style.display = 'block';
-  } else {
-    pWallImg.src = '';
-    pWallImg.style.display = 'none';
-  }
-
-  if (g.logoPath) {
-    getFileSrc(g.logoPath, pLogoImg);
-    pLogoImg.style.display = 'block';
-  } else {
-    pLogoImg.src = '';
-    pLogoImg.style.display = 'none';
-  }
-  lName.textContent = g?.name || '';
-  document.getElementById('launch-overlay').classList.remove('hidden');
-}
-
 window.doDeleteBackup = async (gameId, backupName) => {
   const { ask } = window.__TAURI__.dialog;
   const yes = await ask('Are you sure you want to delete this backup?', { title: 'Delete Backup', kind: 'warning' });
@@ -1566,35 +1641,185 @@ window.doDeleteBackup = async (gameId, backupName) => {
   }
 };
 
-async function doLaunch(gameId, xboxMode) {
+/* ── Startup install check ────────────────────────────────────────────────
+   The Rust side verifies every library exe (and the resolved game binary when
+   the exe is a launcher) in parallel with a per-path timeout, so a disconnected
+   network share or unplugged external drive can never freeze startup. Results
+   land here keyed by game id. Nothing is persisted, and no game, save, backup
+   or stat is ever modified because of a check. */
+const INSTALL = {
+  RECHECK_MS: 30000,   // at most one focus-triggered rescan per 30s
+  LABEL: { missing: 'Not installed', unavailable: 'Drive offline' },
+};
+let installResults = new Map();   // gameId -> { status, checkedAt }
+let installChecking = false;
+let lastInstallCheckAt = 0;
+
+function installStatus(gameId) {
+  return installResults.get(gameId)?.status || 'installed';
+}
+
+function installBadge(gameId, compact) {
+  const status = installResults.get(gameId)?.status;
+  if (!status || status === 'installed') return '';
+  const label = INSTALL.LABEL[status];
+  return compact
+    ? `<span class="rail-badge${status === 'unavailable' ? ' offline' : ''}">${label}</span>`
+    : `<span class="install-badge ${status}">${label}</span>`;
+}
+
+/* Ask the backend to verify the whole library. Never blocks the UI: the library
+   is already on screen, and badges appear when the answer arrives. */
+async function runInstallCheck({ force = false, manual = false } = {}) {
+  if (installChecking) return null;
+  const now = Date.now();
+  if (!force && now - lastInstallCheckAt < INSTALL.RECHECK_MS) return null;
+  installChecking = true;
+  lastInstallCheckAt = now;
+  try {
+    const results = await window.__TAURI__.core.invoke('verify_library_installs');
+    return applyInstallResults(results, { manual });
+  } catch (err) {
+    // A failed check must never notify or be reported as a missing game.
+    console.warn('Install check failed', err);
+    return null;
+  } finally {
+    installChecking = false;
+  }
+}
+
+function applyInstallResults(results, { manual = false } = {}) {
+  const next = new Map();
+  for (const r of results || []) {
+    const id = r.game_id ?? r.gameId;
+    if (id == null) continue;
+    next.set(id, { status: r.status, checkedAt: Date.now() });
+  }
+  installResults = next;
+  updateInstallIndicators();
+
+  const affected = [...next.entries()].filter(([, v]) => v.status !== 'installed');
+  if (affected.length === 0) {
+    if (manual) showToast('success', 'All games installed', 'Every executable is where SILO last saw it.');
+    return 0;
+  }
+  // Silent: check runs but never notifies. Users may have removed games on purpose.
+  return affected.length;
+}
+
+function updateInstallIndicators() {
+  renderGameList();
+  const current = games[selectedIndex];
+  if (current) renderDetails(current);
+}
+
+function focusFirstAffected() {
+  const g = games.find(x => installStatus(x.id) !== 'installed');
+  if (!g) return;
+  selectGame(games.indexOf(g));
+  openDetails();
+}
+
+/* Before launching, re-verify just this game: a game can vanish between app
+   start and now, and the user must get a clear message, never a silent failure. */
+async function reverifyBeforeLaunch(gameId) {
+  try {
+    const r = await window.__TAURI__.core.invoke('verify_game_install', { gameId });
+    if (r && r.status && r.status !== 'installed') {
+      installResults.set(gameId, { status: r.status, checkedAt: Date.now() });
+      updateInstallIndicators();
+      return r.status;
+    }
+  } catch {
+    // Optimistic by design: a broken check never blocks a launch.
+  }
+  return null;
+}
+
+/* Locate…: point SILO at the executable again, then re-verify that one game. */
+async function locateGameExe(gameId) {
+  const path = await window.vault.pickExe().catch(() => null);
+  if (!path) return;
+  const updated = await window.vault.updateGame(gameId, { exePath: path }).catch(() => null);
+  if (!updated) {
+    showToast('error', 'Path not updated', 'SILO could not save the new executable path.');
+    return;
+  }
+  const idx = allGames.findIndex(g => g.id === gameId);
+  if (idx !== -1) allGames[idx] = updated;
+  applyCategoryFilter(false);
+  installResults.delete(gameId);
+  await runInstallCheck({ force: true });
+  showToast('success', 'Executable updated', updated.name || 'Game');
+}
+
+/* Main screen: a missing game cannot launch, but Edit / Backup / Restore stay
+   available — the saves can still be there.
+   Phase 2: Launch button is HIDDEN (not disabled) when not installed.
+   A STATUS stat block appears in the stat row with an amber dot + Locate link. */
+function applyLaunchAvailability(g) {
+  const btn = document.getElementById('btn-launch');
+  if (!btn) return;
+  const status = installStatus(g.id);
+  const bad = status !== 'installed';
+
+  // Hide launch entirely — never show a disabled button.
+  btn.style.display = bad ? 'none' : '';
+  btn.disabled = false;
+  btn.title = 'Launch';
+  const label = btn.querySelector('.pill-label');
+  if (label) label.textContent = 'LAUNCH';
+
+  // STATUS stat block: visible only when not installed.
+  const statusBlock = document.getElementById('stat-block-status');
+  if (statusBlock) {
+    statusBlock.style.display = bad ? '' : 'none';
+    if (bad) {
+      const valEl = statusBlock.querySelector('.stat-install-value');
+      const locateBtn = statusBlock.querySelector('.stat-locate-btn');
+      if (valEl) valEl.textContent = INSTALL.LABEL[status] || 'Not installed';
+      if (locateBtn) {
+        locateBtn.onclick = null;
+        locateBtn.addEventListener('click', () => locateGameExe(g.id), { once: true });
+      }
+    }
+  }
+
+  // Wallpaper: grayscale + dimmer for not-installed games.
+  applyInstallWallpaperFilter(bad);
+}
+
+/* Apply or remove the not-installed wallpaper filter (grayscale + dim). */
+function applyInstallWallpaperFilter(bad) {
+  const bg1 = document.getElementById('bg-wallpaper-1');
+  const bg2 = document.getElementById('bg-wallpaper-2');
+  const filter = bad ? 'grayscale(0.7) brightness(0.7)' : '';
+  if (bg1) bg1.style.filter = filter;
+  if (bg2) bg2.style.filter = filter;
+}
+
+async function doLaunch(gameId) {
   const g = games.find(g => g.id === gameId);
   if (g && g.isInstalled === false) {
     showToast('error', 'Not Installed', 'The executable for this game could not be found.');
     return;
   }
-  showToast('info', 'Launching', `${g?.name || 'Game'}${xboxMode ? ' in Xbox Mode...' : '...'}`);
+  const status = await reverifyBeforeLaunch(gameId);
+  if (status) {
+    const why = status === 'unavailable'
+      ? 'its drive is not available (an external drive may be unplugged).'
+      : 'the executable is no longer where SILO last saw it.';
+    showToast('error', 'Cannot launch', `${g?.name || 'This game'}: ${why}`);
+    return;
+  }
+  showToast('info', 'Launching', `${g?.name || 'Game'}...`);
   try {
-    await window.vault.launchGame(gameId, xboxMode);
+    await window.vault.launchGame(gameId);
     showToast('success', 'Launched', `${g?.name || 'Game'} is running`);
   } catch (err) {
     showToast('error', 'Launch Failed', err);
   }
 }
-
-document.getElementById('btn-launch-mode-normal').addEventListener('click', () => {
-  document.getElementById('launch-overlay').classList.add('hidden');
-  if (pendingLaunchGameId) doLaunch(pendingLaunchGameId, false);
-  pendingLaunchGameId = null;
-});
-document.getElementById('btn-launch-mode-xbox').addEventListener('click', () => {
-  document.getElementById('launch-overlay').classList.add('hidden');
-  if (pendingLaunchGameId) doLaunch(pendingLaunchGameId, true);
-  pendingLaunchGameId = null;
-});
-document.getElementById('btn-launch-cancel').addEventListener('click', () => {
-  document.getElementById('launch-overlay').classList.add('hidden');
-  pendingLaunchGameId = null;
-});
 
 /* ── Add / Edit modal ──────────────────────────────────────────────────────*/
 // Launch Target segmented control: 'auto' | 'launcher' | 'game'. SILO inspects
@@ -1651,7 +1876,7 @@ bindLaunchTargetButtons();
 
 function openAddModal() {
   editingGameId = null; modalWallpaperPath = null; modalLogoPath = null;
-  document.getElementById('modal-title').textContent = 'ADD GAME';
+  document.getElementById('modal-title').textContent = 'Add game';
   document.getElementById('scan-folder-container').style.display = 'flex';
   document.getElementById('import-container').style.display = 'flex';
   document.getElementById('input-name').value = '';
@@ -1678,7 +1903,7 @@ function openEditModal(g) {
   editingGameId = g.id;
   modalWallpaperPath = g.wallpaper || null;
   modalLogoPath = g.logoPath || null;
-  document.getElementById('modal-title').textContent = 'EDIT GAME';
+  document.getElementById('modal-title').textContent = 'Edit game';
   document.getElementById('scan-folder-container').style.display = 'none';
   document.getElementById('import-container').style.display = 'none';
   document.getElementById('input-name').value = g.name;
@@ -2010,7 +2235,7 @@ document.getElementById('btn-scan-folder').addEventListener('click', async () =>
         }
         
         pendingScanResults = newResults;
-        document.getElementById('scan-results-title').textContent = 'SCAN RESULTS';
+        document.getElementById('scan-results-title').textContent = 'Scan results';
 
         // Build the checklist
         const listEl = document.getElementById('scan-results-list');
@@ -2130,7 +2355,7 @@ async function runImport(source) {
   }
 
   pendingImportResults = fresh;
-  document.getElementById('scan-results-title').textContent = `${source.toUpperCase()} IMPORT`;
+  document.getElementById('scan-results-title').textContent = `${source} import`;
   const listEl = document.getElementById('scan-results-list');
   listEl.innerHTML = fresh.map((c, i) => {
     const exeLine = c.exePath
@@ -2330,10 +2555,6 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (!document.getElementById('modal-overlay').classList.contains('hidden')) return;
-  if (!document.getElementById('launch-overlay').classList.contains('hidden')) {
-    if (e.key === 'Escape') document.getElementById('btn-launch-cancel').click();
-    return;
-  }
   if (!document.getElementById('backup-manager-overlay').classList.contains('hidden')) {
     if (e.key === 'Escape') document.getElementById('btn-backup-manager-close').click();
     return;
@@ -2402,7 +2623,7 @@ document.addEventListener('keydown', e => {
       break;
     case 'Enter':      e.preventDefault();
       if (!detailsOpen && games.length) openDetails();
-      else if (detailsOpen && games[selectedIndex]) openLaunchModal(games[selectedIndex].id);
+      else if (detailsOpen && games[selectedIndex]) doLaunch(games[selectedIndex].id);
       break;
     // LEFT is "previous game" now, so the category dots keep a key of their own.
     case 'c': case 'C':
@@ -2428,7 +2649,6 @@ function pollGamepad() {
 function handlePad(pad) {
   const now = Date.now();
   const modalOpen = !document.getElementById('modal-overlay').classList.contains('hidden');
-  const launchOpen = !document.getElementById('launch-overlay').classList.contains('hidden');
   const metadataOpen = !document.getElementById('metadata-overlay').classList.contains('hidden');
   const onlineArtOpen = !document.getElementById('online-art-overlay').classList.contains('hidden');
   const backupManagerOpen = !document.getElementById('backup-manager-overlay').classList.contains('hidden');
@@ -2457,14 +2677,6 @@ function handlePad(pad) {
     savePad(pad); return;
   }
 
-  if (launchOpen) {
-    if (btnPressed(pad, 0, 'A')) document.getElementById('btn-launch-mode-normal').click();
-    if (btnPressed(pad, 1, 'B')) document.getElementById('btn-launch-cancel').click();
-    if (right && !prevAxes.right) document.getElementById('btn-launch-mode-xbox').focus();
-    if (left && !prevAxes.left) document.getElementById('btn-launch-mode-normal').focus();
-    prevAxes.right = right; prevAxes.left = left;
-    savePad(pad); return;
-  }
   if (modalOpen || metadataOpen || onlineArtOpen || backupManagerOpen || settingsOpen) { savePad(pad); return; }
 
   if (categoriesOpen) {
@@ -2503,7 +2715,6 @@ function handlePad(pad) {
 
   prevAxes.right = right; prevAxes.left = left;
 
-  const aPressed = !!pad.buttons[0]?.pressed;
   const bPressed = !!pad.buttons[1]?.pressed;
   const xPressed = !!pad.buttons[2]?.pressed;
   const yPressed = !!pad.buttons[3]?.pressed;
@@ -2520,8 +2731,7 @@ function handlePad(pad) {
       }
     };
     
-    handleGamepadHold(aPressed, 'btn-launch-normal');
-    handleGamepadHold(bPressed, 'btn-launch-xbox');
+    handleGamepadHold(bPressed, 'btn-launch');
     if (btnPressed(pad, 2, 'X')) document.getElementById('btn-delete-game').click();
     handleGamepadHold(yPressed, 'btn-edit-game');
   } else {
@@ -2653,6 +2863,16 @@ document.getElementById('btn-toggle-key-visibility')?.addEventListener('click', 
 document.getElementById('settings-advanced-toggle')?.addEventListener('click', () => {
   const adv = document.getElementById('settings-advanced');
   if (adv) adv.classList.toggle('open');
+});
+
+document.getElementById('btn-rescan-installs')?.addEventListener('click', async () => {
+  const btn = document.getElementById('btn-rescan-installs');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  await runInstallCheck({ force: true, manual: true });
+  btn.disabled = false;
+  btn.textContent = original;
 });
 
 document.getElementById('btn-save-settings').addEventListener('click', async () => {
