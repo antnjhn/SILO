@@ -6,7 +6,7 @@ use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::sync::mpsc::channel;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use notify::{Watcher, RecursiveMode, EventKind};
 use walkdir::WalkDir;
 use std::fs::File;
@@ -100,7 +100,7 @@ fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), String> {
     if let Some(parent) = data_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    
+
     let json_str = serde_json::to_string_pretty(games).map_err(|e| e.to_string())?;
     let tmp_path = data_path.with_extension("json.tmp");
     let bak_path = data_path.with_extension("json.bak");
@@ -131,7 +131,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
                 if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&data) {
                     let _ = app.emit("library-corrupt-recovered", "Primary library missing. Recovered from backup.");
                     for game in &mut games {
-                        game.is_installed = Some(game.exe_path.as_ref().map_or(false, |p| Path::new(p).exists()));
+                        game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
                     }
                     return games;
                 }
@@ -144,7 +144,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
     match serde_json::from_str::<Vec<Game>>(&data) {
         Ok(mut games) => {
             for game in &mut games {
-                game.is_installed = Some(game.exe_path.as_ref().map_or(false, |p| Path::new(p).exists()));
+                game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
             }
             games
         },
@@ -155,7 +155,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
                     if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&bak_data) {
                         let _ = app.emit("library-corrupt-recovered", format!("Primary library corrupt ({}). Recovered from backup.", e));
                         for game in &mut games {
-                            game.is_installed = Some(game.exe_path.as_ref().map_or(false, |p| Path::new(p).exists()));
+                            game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
                         }
                         return games;
                     }
@@ -402,6 +402,9 @@ pub async fn verify_game_install(app: AppHandle, game_id: String) -> Option<Inst
 }
 
 #[tauri::command]
+// The IPC contract sends one argument per field, so the count is set by the
+// command surface rather than by a design smell.
+#[allow(clippy::too_many_arguments)]
 pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>, save_path: Option<String>, launch_target: Option<String>) -> Result<Game, String> {
     let mut games = get_games(app.clone());
     let save_path = normalize_save_path(save_path.as_deref())?;
@@ -457,7 +460,7 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
         apply_optional(updates.get("fontColor"), &mut game.font_color);
         apply_optional(updates.get("status"), &mut game.status);
         apply_optional(updates.get("launchTarget"), &mut game.launch_target);
-        
+
         if let Some(save_path) = updates.get("savePath") {
             if save_path.is_null() {
                 game.save_path = None;
@@ -545,7 +548,7 @@ pub fn get_system_fonts() -> Vec<String> {
                 .args(["-NoProfile", "-Command", "Add-Type -AssemblyName PresentationCore; [System.Windows.Media.Fonts]::SystemFontFamilies | Select-Object -ExpandProperty Source"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
-            
+
             if let Ok(output) = output {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let mut fonts: Vec<String> = stdout.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -683,12 +686,1310 @@ fn save_path_names_game(save_path: &str, name_keys: &[String]) -> bool {
     name_keys.iter().any(|key| crate::saveguard::name_matches(&name, key))
 }
 
+// ── Restoring onto this machine ─────────────────────────────────────────────
+// A library backup carries absolute save paths, so importing one on a different
+// PC brings paths that describe the *old* machine: `C:\Users\Old\Documents\My
+// Games\X` usually does not exist here. `restore_save_transactionally` opens by
+// creating the destination's parent, so a restore would happily resurrect the
+// old account's folder tree and unpack the saves somewhere the game never
+// reads — while reporting success. Resolve a destination this machine can
+// justify before touching the disk.
+
+/// How a stored save path relates to the machine running right now.
+#[derive(Debug, PartialEq, Eq)]
+enum StoredSavePath {
+    /// Absolute, on a volume this machine has, and under this account's profile
+    /// (or a shared one, such as `Public`).
+    Usable,
+    /// Inside a *different* account's profile directory that does not exist
+    /// here — the signature of a backup taken on another machine.
+    ForeignProfile(String),
+    /// Recorded by the *other* operating system, whose paths cannot exist here:
+    /// `C:\...` is not absolute on Unix, `/home/...` is not absolute on Windows,
+    /// and underneath the shape the folders only ever exist on their own side.
+    ForeignOs(OsFamily),
+    /// The drive or volume the path lives on is not present.
+    RootUnavailable,
+    /// Not an absolute path, so there is nothing to anchor it to.
+    NotAbsolute,
+}
+
+/// The two families of path this application has to reason about. Used both for
+/// the machine running now and for the one a stored path was written on, so a
+/// PC move in either direction can be reasoned about — and tested — from either
+/// side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OsFamily {
+    Windows,
+    Unix,
+}
+
+impl OsFamily {
+    fn current() -> Self {
+        if cfg!(windows) {
+            OsFamily::Windows
+        } else {
+            OsFamily::Unix
+        }
+    }
+}
+
+impl std::fmt::Display for OsFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OsFamily::Windows => write!(f, "Windows"),
+            OsFamily::Unix => write!(f, "Linux or macOS"),
+        }
+    }
+}
+
+/// A Windows path, however its separators are written and whichever host is
+/// reading it: a drive letter, a UNC share, or a tree written with backslashes.
+fn is_windows_shaped(recorded: &str) -> bool {
+    let bytes = recorded.as_bytes();
+    let drive_letter = bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let unc = recorded.starts_with("\\\\");
+    // Backslashes and no forward slashes: `Documents\My Games\X`.
+    let backslash_tree = recorded.contains('\\') && !recorded.contains('/');
+    drive_letter || unc || backslash_tree
+}
+
+/// Whether a recorded path was written by the *other* operating system. Worth
+/// naming, because it changes what the user has to do: the same game keeps its
+/// saves somewhere else on this machine, so the recorded path cannot simply be
+/// repaired in place.
+fn foreign_os_shape(recorded: &str, host: OsFamily) -> Option<OsFamily> {
+    let recorded = recorded.trim();
+    match host {
+        // A drive letter or a UNC prefix on a Unix host can only have been
+        // written by Windows.
+        OsFamily::Unix if is_windows_shaped(recorded) => Some(OsFamily::Windows),
+        // On Windows, only a Unix-absolute path is unambiguously foreign. (`//`
+        // is left alone: POSIX gives it its own meaning.)
+        OsFamily::Windows if recorded.starts_with('/') && !recorded.starts_with("//") => Some(OsFamily::Unix),
+        _ => None,
+    }
+}
+
+/// Directory names that hold user profiles.
+const PROFILE_PARENTS: [&str; 3] = ["users", "home", "documents and settings"];
+
+/// Split a path at its profile directory: the prefix up to and including it
+/// (`C:\Users\Old`) and everything below it (`Documents\My Games\X`).
+fn split_at_profile(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let components: Vec<Component> = path.components().collect();
+    let parent = components.iter().position(|component| match component {
+        Component::Normal(name) => PROFILE_PARENTS
+            .iter()
+            .any(|candidate| name.to_string_lossy().eq_ignore_ascii_case(candidate)),
+        _ => false,
+    })?;
+    // The profile name itself has to be there for the split to mean anything.
+    if !matches!(components.get(parent + 1), Some(Component::Normal(_))) {
+        return None;
+    }
+
+    let mut prefix = PathBuf::new();
+    for component in &components[..=parent + 1] {
+        prefix.push(component.as_os_str());
+    }
+    let mut tail = PathBuf::new();
+    for component in &components[parent + 2..] {
+        tail.push(component.as_os_str());
+    }
+    Some((prefix, tail))
+}
+
+/// Where the current account's profile lives (`%USERPROFILE%`, `$HOME`).
+fn current_profile_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let variable = "USERPROFILE";
+    #[cfg(not(target_os = "windows"))]
+    let variable = "HOME";
+
+    std::env::var_os(variable).map(PathBuf::from).filter(|dir| dir.is_dir())
+}
+
+/// The current account's profile folder name, used to recognise a stored path
+/// as someone else's. Empty when the profile cannot be determined, which leaves
+/// only the existence check to go on.
+fn current_profile_name() -> String {
+    current_profile_dir()
+        .and_then(|dir| dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
+/// Classify a stored save path against this machine.
+fn stored_path_verdict(path: &Path, current_user: &str) -> StoredSavePath {
+    stored_path_verdict_of(path, current_user, OsFamily::current())
+}
+
+/// Classify a stored save path against a machine of a known kind.
+fn stored_path_verdict_of(path: &Path, current_user: &str, host: OsFamily) -> StoredSavePath {
+    // Ahead of the absoluteness check, because a path from the other OS is never
+    // absolute here and "this was recorded on Windows" is the useful thing to
+    // say about it.
+    if let Some(os) = foreign_os_shape(&path.to_string_lossy(), host) {
+        return StoredSavePath::ForeignOs(os);
+    }
+    if !path.is_absolute() {
+        return StoredSavePath::NotAbsolute;
+    }
+    if !drive_available(path) {
+        return StoredSavePath::RootUnavailable;
+    }
+    if let Some((profile, _)) = split_at_profile(path) {
+        let name = profile
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Another account's folder only counts as foreign when it is genuinely
+        // absent: a shared profile such as `Public`, or a second account that
+        // really does exist on this machine, is a legitimate destination.
+        if !name.is_empty() && !name.eq_ignore_ascii_case(current_user) && !profile.is_dir() {
+            return StoredSavePath::ForeignProfile(name);
+        }
+    }
+    StoredSavePath::Usable
+}
+
+/// Rewrite a path under another machine's profile so it points at this one,
+/// keeping everything below the profile directory:
+/// `C:\Users\Old\Documents\My Games\X` -> `C:\Users\New\Documents\My Games\X`.
+fn remap_onto_profile(path: &Path, profile: &Path) -> Option<PathBuf> {
+    let (_, tail) = split_at_profile(path)?;
+    if tail.as_os_str().is_empty() {
+        return None;
+    }
+    Some(profile.join(tail))
+}
+
+/// The part of a Windows path below the Windows profile, so it can be looked for
+/// inside a Proton or Wine prefix on this machine:
+/// `C:\Users\Old\Documents\My Games\X` -> `Documents\My Games\X`.
+fn windows_path_tail(recorded: &str) -> Option<PathBuf> {
+    let components: Vec<&str> = recorded
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    // A leading `C:` is the drive, not a folder.
+    let start = match components.first() {
+        Some(part) if part.ends_with(':') => 1,
+        _ => 0,
+    };
+    let mut rest = components.get(start..)?;
+    if let Some(parent) = rest
+        .iter()
+        .position(|part| PROFILE_PARENTS.iter().any(|name| part.eq_ignore_ascii_case(name)))
+    {
+        // Between the parent and the tail sits this path's own user directory,
+        // which the prefix supplies its own version of.
+        rest = rest.get(parent + 2..)?;
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.iter().collect())
+}
+
+/// One Proton or Wine prefix on this machine, and the Steam app id it belongs to
+/// when the layout says which game it is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WinePrefix {
+    drive_c: PathBuf,
+    /// Steam puts each game's prefix in `steamapps/compatdata/<appid>/`, so the
+    /// directory name *is* the game's identity. A plain Wine prefix serves every
+    /// game run through it and so names none.
+    app_id: Option<String>,
+}
+
+/// The `steamapps` directory of every Steam install on this machine: the native
+/// layout, an XDG data home, and Flatpak's own copy of Steam.
+fn steam_steamapps_dirs_in(home: &Path, data: &Path) -> Vec<PathBuf> {
+    let candidates = [
+        home.join(".steam/steam/steamapps"),
+        data.join("Steam/steamapps"),
+        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps"),
+    ];
+    // Only the ones really there, and each one once: `data` defaults to
+    // `home/.local/share`, where native Steam also lives.
+    let mut dirs = Vec::new();
+    for candidate in candidates {
+        if candidate.is_dir() && !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+    dirs
+}
+
+/// Every Proton and Wine prefix on this machine. One implementation for every
+/// host: Windows has no `$HOME` holding these, and prefixes that are not there
+/// are skipped, so it comes back empty there.
+fn wine_prefixes_in(home: &Path, data: &Path) -> Vec<WinePrefix> {
+    // One prefix per game under compatdata; a plain Wine prefix is a single one.
+    let mut prefixes = Vec::new();
+    for steamapps in steam_steamapps_dirs_in(home, data) {
+        let Ok(entries) = fs::read_dir(steamapps.join("compatdata")) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let drive_c = entry.path().join("pfx").join("drive_c");
+            if !drive_c.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let app_id = (!name.is_empty() && name.chars().all(|c| c.is_ascii_digit())).then_some(name);
+            prefixes.push(WinePrefix { drive_c, app_id });
+        }
+    }
+    let wine = home.join(".wine/drive_c");
+    if wine.is_dir() {
+        prefixes.push(WinePrefix {
+            drive_c: wine,
+            app_id: None,
+        });
+    }
+    prefixes
+}
+
+/// The app id a path names outright, when the game ran from its own prefix:
+/// `…/compatdata/<appid>/…` -> `<appid>`.
+fn steam_app_id_in(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split(['\\', '/']).filter(|part| !part.is_empty()).collect();
+    let id = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case("compatdata"))
+        .and_then(|at| parts.get(at + 1))?;
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then(|| (*id).to_string())
+}
+
+/// The install directory a path names, when those are a Steam game's own files:
+/// `…/steamapps/common/<dir>/…` -> `<dir>`. Steam uses the same directory name on
+/// Windows and on Linux, which is what makes it the bridge between the two.
+fn steam_install_dir_in(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split(['\\', '/']).filter(|part| !part.is_empty()).collect();
+    let at = parts.iter().position(|part| part.eq_ignore_ascii_case("steamapps"))?;
+    match parts.get(at + 1) {
+        Some(next) if next.eq_ignore_ascii_case("common") => parts.get(at + 2).map(|dir| dir.to_string()),
+        _ => None,
+    }
+}
+
+/// The app id and install directory an `appmanifest_<appid>.acf` names. The file
+/// is Valve's key-value text, and both values sit on their own quoted lines.
+fn read_app_manifest(path: &Path) -> Option<(String, String)> {
+    let data = fs::read_to_string(path).ok()?;
+    let mut app_id = None;
+    let mut install_dir = None;
+    for line in data.lines() {
+        let fields: Vec<&str> = line
+            .split('"')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .collect();
+        if fields.len() != 2 {
+            continue;
+        }
+        match fields[0] {
+            "appid" => app_id = Some(fields[1].to_string()),
+            "installdir" => install_dir = Some(fields[1].to_string()),
+            _ => {}
+        }
+    }
+    Some((app_id?, install_dir?))
+}
+
+/// The app id of the Steam game installed in `install_dir`, from the manifests in
+/// this machine's Steam libraries. Steam keeps the install directory the same on
+/// every platform, so this is what turns a path the old machine recorded into the
+/// app id that owns a prefix here.
+fn app_id_for_install_dir(steamapps_dirs: &[PathBuf], install_dir: &str) -> Option<String> {
+    for steamapps in steamapps_dirs {
+        let Ok(entries) = fs::read_dir(steamapps) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
+                continue;
+            }
+            let Some((app_id, dir)) = read_app_manifest(&entry.path()) else {
+                continue;
+            };
+            if dir.eq_ignore_ascii_case(install_dir) {
+                return Some(app_id);
+            }
+        }
+    }
+    None
+}
+
+/// A game's Steam identity on this machine, read from the paths the library
+/// records for it. Its own prefix names the app id outright; otherwise the
+/// install directory in the recorded path is matched against this machine's
+/// manifests, which is what carries a library recorded on Windows across to
+/// Linux, where the same game's files sit in `steamapps/common/<installdir>`.
+fn steam_app_id_of(game: &Game, recorded: &str, steamapps_dirs: &[PathBuf]) -> Option<String> {
+    let paths = [Some(recorded), game.exe_path.as_deref()];
+    if let Some(app_id) = paths.iter().flatten().find_map(|path| steam_app_id_in(path)) {
+        return Some(app_id);
+    }
+    let install_dir = paths.iter().flatten().find_map(|path| steam_install_dir_in(path))?;
+    app_id_for_install_dir(steamapps_dirs, &install_dir)
+}
+
+/// What the restore and the migration survey need to read about this machine: its
+/// prefixes, the Steam libraries whose manifests identify them, and the
+/// directories searched by folder name as a last resort.
+struct MachinePaths {
+    prefixes: Vec<WinePrefix>,
+    steamapps: Vec<PathBuf>,
+    search_dirs: Vec<PathBuf>,
+}
+
+/// This machine's own prefixes, Steam libraries and search directories.
+fn machine_paths() -> MachinePaths {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        // No home directory to hold prefixes; the search directories still work,
+        // which is what a Windows host has.
+        return MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: get_watch_directories(),
+        };
+    };
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+    machine_paths_in(&home, &data, get_watch_directories())
+}
+
+/// The same, for a home directory, a data directory and a set of search
+/// directories named explicitly.
+fn machine_paths_in(home: &Path, data: &Path, search_dirs: Vec<PathBuf>) -> MachinePaths {
+    MachinePaths {
+        prefixes: wine_prefixes_in(home, data),
+        steamapps: steam_steamapps_dirs_in(home, data),
+        search_dirs,
+    }
+}
+
+/// Where a Windows-recorded save folder lives inside this machine's Proton or
+/// Wine prefixes, and how far that can be trusted. A prefix Steam named after the
+/// game's own app id is the game's own prefix, so the folder being there is
+/// evidence; anywhere else it is only an existence check over prefixes that may
+/// well belong to other games.
+fn find_in_wine_prefixes(
+    prefixes: &[WinePrefix],
+    recorded: &str,
+    own_app_id: Option<&str>,
+) -> Option<(PathBuf, MatchConfidence)> {
+    let tail = windows_path_tail(recorded)?;
+    if let Some(app_id) = own_app_id {
+        let own = prefixes.iter().find(|prefix| prefix.app_id.as_deref() == Some(app_id));
+        if let Some(found) = own.and_then(|prefix| folder_in_prefix(&prefix.drive_c, &tail)) {
+            return Some((found, MatchConfidence::Confirmed));
+        }
+    }
+    prefixes
+        .iter()
+        .find_map(|prefix| folder_in_prefix(&prefix.drive_c, &tail).map(|found| (found, MatchConfidence::Likely)))
+}
+
+/// The recorded path's tail inside one prefix, looked for under the prefix's own
+/// user directories first — that is the layout the recording machine used.
+fn folder_in_prefix(drive_c: &Path, tail: &Path) -> Option<PathBuf> {
+    if let Ok(entries) = fs::read_dir(drive_c.join("users")) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join(tail);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    // Then the drive itself, for a path that was never under a profile.
+    let candidate = drive_c.join(tail);
+    candidate.is_dir().then_some(candidate)
+}
+
+/// Name keys a re-detection may match against this machine. When the recorded
+/// install is not here it describes the *old* machine's layout, and its folder
+/// name is often something generic — a game sitting in `…\Games\Cyberpunk2077.exe`
+/// would key on "games", which matches unrelated folders on this machine such as
+/// the launcher data directories under AppData. Then only the game's own name is
+/// trusted, because that is what the user recognises and what its save folder is
+/// named after.
+fn redetect_name_keys(game: &Game) -> Vec<String> {
+    if recorded_install_present(game) {
+        restore_name_keys(game)
+    } else {
+        vec![game.name.clone()]
+    }
+}
+
+/// Name keys a restore detects with — the same set SaveGuard uses, falling back
+/// to the game's name when no executable is recorded.
+fn restore_name_keys(game: &Game) -> Vec<String> {
+    save_name_keys(&game.name, Path::new(game.exe_path.as_deref().unwrap_or("")))
+}
+
+/// How strongly a save folder on this machine was matched to a game, ordered
+/// from the weakest evidence to the strongest. Matching is categorical rather
+/// than a fuzzy percentage: the recorded path either translated onto something
+/// real or it did not, and the genuinely unsure cases are distinct levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchConfidence {
+    /// Nothing but the folder's name ties it to this game. A restore may still
+    /// use it, because the user named the game it is for and can see where the
+    /// saves landed, but the migration assistant never rewrites a save path on
+    /// this alone: the folder may well hold another game's saves.
+    Guess,
+    /// The folder is really inside a Proton or Wine prefix on this machine, but
+    /// nothing ties that prefix to this game, so the match is an existence check
+    /// over prefixes that may belong to other games. Reported, not applied.
+    Likely,
+    /// The recorded layout translated onto this account, or found inside the
+    /// prefix that belongs to this game: Steam names a game's prefix after its
+    /// app id, and the app id is read from this machine's own app manifests.
+    Confirmed,
+    /// The recorded path itself, which works here unchanged.
+    Exact,
+}
+
+/// The least evidence that lets SILO rewrite a game's save path without being
+/// asked. Below it sit the two matches that are only hints — a folder sharing the
+/// game's name, and a folder in a prefix that is not this game's — and both are
+/// reported for the user to confirm in Edit instead of being applied.
+const MIN_RELINK_CONFIDENCE: MatchConfidence = MatchConfidence::Confirmed;
+
+impl MatchConfidence {
+    /// An ordinal evidence score for explaining a proposal to the user.
+    /// Scores are intentionally not the safety policy; see is_enough_for_a_relink.
+    fn score(self) -> u8 {
+        match self {
+            MatchConfidence::Guess => 25,
+            MatchConfidence::Likely => 55,
+            MatchConfidence::Confirmed => 90,
+            MatchConfidence::Exact => 100,
+        }
+    }
+
+    /// Whether this is enough to point a game at a folder on SILO's own say-so.
+    fn is_enough_for_a_relink(self) -> bool {
+        self >= MIN_RELINK_CONFIDENCE
+    }
+}
+
+/// Where a restore should write, how that folder was matched, and whether the
+/// match differs from what the library recorded.
+#[derive(Debug)]
+struct RestoreTarget {
+    path: PathBuf,
+    rediscovered: bool,
+    confidence: MatchConfidence,
+}
+
+/// Decide where a restore should land on this machine, preferring evidence: the
+/// recorded path when it is usable here, the same layout under this account's
+/// profile when it already exists, the game's own Proton prefix when its Steam
+/// identity can be established, and otherwise any folder on this machine that
+/// names the game. Returns an actionable error rather than guessing, and never
+/// creates anything.
+fn resolve_restore_target(game: &Game, stored: &str) -> Result<RestoreTarget, String> {
+    resolve_restore_target_with(game, stored, &machine_paths())
+}
+
+/// The same decision, with this machine's prefixes and Steam libraries named
+/// explicitly, so every branch of it can be exercised on a host that has none of
+/// its own.
+fn resolve_restore_target_with(game: &Game, stored: &str, machine: &MachinePaths) -> Result<RestoreTarget, String> {
+    let stored_path = Path::new(stored);
+    let verdict = stored_path_verdict(stored_path, &current_profile_name());
+
+    if verdict == StoredSavePath::Usable {
+        return Ok(RestoreTarget {
+            path: stored_path.to_path_buf(),
+            rediscovered: false,
+            confidence: MatchConfidence::Exact,
+        });
+    }
+
+    // The same layout under this account, accepted only when the folder is
+    // actually there — so the rewrite is evidence rather than a guess.
+    if let Some(profile) = current_profile_dir() {
+        if let Some(remapped) = remap_onto_profile(stored_path, &profile) {
+            if remapped.is_dir() {
+                return Ok(RestoreTarget {
+                    path: remapped,
+                    rediscovered: true,
+                    confidence: MatchConfidence::Confirmed,
+                });
+            }
+        }
+    }
+
+    // A path written by Windows reaches Linux and macOS through Proton or Wine,
+    // which keeps the same tree inside the game's own prefix. Steam names that
+    // prefix after the game's app id, so whenever this machine's own manifests
+    // name the game, the prefix to look in is known before anything is searched
+    // for — which is what makes this evidence rather than a hunt through whatever
+    // prefix happens to hold a folder with the same name.
+    let own_app_id = steam_app_id_of(game, stored, &machine.steamapps);
+    if let Some((found, confidence)) = find_in_wine_prefixes(&machine.prefixes, stored, own_app_id.as_deref()) {
+        return Ok(RestoreTarget {
+            path: found,
+            rediscovered: true,
+            confidence,
+        });
+    }
+
+    // Otherwise take the folder this machine already has for the game. Recency is
+    // deliberately irrelevant here (`now`), so this is a pure name match over
+    // folders that exist — and a name is not evidence, which is what the lowest
+    // confidence level on the way out records.
+    let install_dir = game.exe_path.as_deref().map(Path::new).and_then(Path::parent);
+    if let Some(found) = crate::saveguard::find_save_root_by_scan(
+        &machine.search_dirs,
+        &redetect_name_keys(game),
+        std::time::SystemTime::now(),
+        install_dir,
+    ) {
+        return Ok(RestoreTarget {
+            path: found,
+            rediscovered: true,
+            confidence: MatchConfidence::Guess,
+        });
+    }
+
+    Err(format!(
+        "Cannot restore yet: {}{}",
+        unusable_save_path_reason(stored, &verdict),
+        save_recovery_hint(&verdict, recorded_install_present(game))
+    ))
+}
+
+/// What is wrong with a stored save folder this machine cannot use.
+fn unusable_save_path_reason(stored: &str, verdict: &StoredSavePath) -> String {
+    match verdict {
+        StoredSavePath::ForeignProfile(user) => format!(
+            "{stored} sits under {user}'s profile, which does not exist on this machine — it was recorded on a different PC."
+        ),
+        StoredSavePath::ForeignOs(os) => format!(
+            "{stored} was recorded on a {os} machine, so that path cannot exist on this one."
+        ),
+        StoredSavePath::RootUnavailable => {
+            format!("{stored} is on a drive that is not available on this machine.")
+        }
+        _ => format!("{stored} does not exist on this machine."),
+    }
+}
+
+/// What to do about a save folder that comes back on its own once the game is
+/// launched — the usual case, where only the path moved.
+const SAVE_FOLDER_RECOVERY_HINT: &str =
+    " Launch the game once so SaveGuard re-finds the folder, or set it in Edit, then try again.";
+
+/// What to do about one whose game is not on this machine either. Launching it
+/// cannot re-find anything, so the saves themselves have to come across.
+const SAVE_FOLDER_FROM_OLD_PC_HINT: &str = " SILO cannot see this game's files on this machine \
+     either, so its saves are still on the other PC: copy them across (or restore a SILO backup of \
+     this game), then check again.";
+
+/// What to do about one on a drive that is not mounted right now. The saves are
+/// on that drive, not on another PC, so bringing them across is the wrong fix.
+const SAVE_FOLDER_UNPLUGGED_HINT: &str =
+    " Reconnect the drive that holds it, or set the folder in Edit, then try again.";
+
+/// What to do about a Windows folder seen on Linux or macOS. Most Windows games
+/// run through Proton or Wine there, which keeps the game's own Windows tree
+/// inside its prefix — so a launch finds the saves without anything being copied.
+const SAVE_FOLDER_PROTON_HINT: &str = " Install and launch the game here: through Proton or \
+     Wine its saves live inside the game's own prefix and SaveGuard will find them. Otherwise copy \
+     the saves across and set the folder in Edit.";
+
+/// What to do about a Linux or macOS folder seen on Windows. There is no prefix
+/// to look inside, so the folder has to be re-created here.
+const SAVE_FOLDER_FROM_OTHER_OS_HINT: &str = " Install the game here and launch it once so \
+     SaveGuard re-finds the folder, or copy the saves across and set the folder in Edit.";
+
+/// Whether the recorded executable is actually on this machine. Tells "the game
+/// is here and only its save folder moved" apart from "this game came from the
+/// old PC too", which need different advice.
+fn recorded_install_present(game: &Game) -> bool {
+    game.exe_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|exe| !exe.is_empty())
+        .is_some_and(|exe| Path::new(exe).is_file())
+}
+
+/// What the user can do about a save folder this machine cannot use. The advice
+/// depends on why it does not work: a drive that went away, a game that came
+/// from the old PC and is not here, or a folder the game itself can re-find.
+fn save_recovery_hint(verdict: &StoredSavePath, install_present: bool) -> &'static str {
+    match verdict {
+        // The saves are on a drive that is not mounted right now.
+        StoredSavePath::RootUnavailable => SAVE_FOLDER_UNPLUGGED_HINT,
+        // Recorded by the other operating system, in the direction that has a
+        // compatibility layer to look inside.
+        StoredSavePath::ForeignOs(OsFamily::Windows) => SAVE_FOLDER_PROTON_HINT,
+        StoredSavePath::ForeignOs(OsFamily::Unix) => SAVE_FOLDER_FROM_OTHER_OS_HINT,
+        // Left behind by another account, and the game is not here either, so
+        // the saved files themselves have to come across.
+        StoredSavePath::ForeignProfile(_) if !install_present => SAVE_FOLDER_FROM_OLD_PC_HINT,
+        _ => SAVE_FOLDER_RECOVERY_HINT,
+    }
+}
+
+/// Message for a manual backup whose recorded save folder is not on this
+/// machine — usually the same "the library came from another PC" situation.
+fn save_folder_missing_message(install_present: bool, stored: &str) -> String {
+    let verdict = stored_path_verdict(Path::new(stored), &current_profile_name());
+    format!(
+        "Cannot back up: {}{}",
+        unusable_save_path_reason(stored, &verdict),
+        save_recovery_hint(&verdict, install_present)
+    )
+}
+
+/// What this machine can do about one game's recorded save folder.
+#[derive(Debug, PartialEq, Eq)]
+enum SaveFolderOutcome {
+    /// The library records no save folder yet, so there is nothing to relink.
+    NoneRecorded,
+    /// The recorded folder is the right one on this machine already.
+    Usable,
+    /// A folder on this machine for a game whose recorded one does not work here,
+    /// and how strongly it was matched.
+    Relink {
+        found: PathBuf,
+        reason: String,
+        confidence: MatchConfidence,
+    },
+    /// Nothing on this machine matches; the user has to point SILO at it.
+    Unresolved { reason: String },
+}
+
+/// One game a migration survey wants to tell the user about.
+#[derive(Debug, Clone, Serialize)]
+pub struct SaveFolderIssue {
+    #[serde(rename = "gameId")]
+    pub game_id: String,
+    #[serde(rename = "gameName")]
+    pub game_name: String,
+    /// The save folder the library records, exactly as recorded.
+    #[serde(rename = "recordedPath")]
+    pub recorded_path: String,
+    /// Where the saves belong on this machine, when SILO found the folder.
+    #[serde(rename = "foundPath", skip_serializing_if = "Option::is_none")]
+    pub found_path: Option<String>,
+    /// Categorical evidence used to enforce the safe automatic-relink threshold.
+    /// Absent when nothing matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<MatchConfidence>,
+    /// Human-readable confidence score from 0 to 100. This is an explanation for
+    /// the UI, not the relink policy: automatic relinking uses the categorical
+    /// evidence threshold above, so a numeric score cannot make a weak match safe.
+    #[serde(rename = "confidenceScore", skip_serializing_if = "Option::is_none")]
+    pub confidence_score: Option<u8>,
+    /// Whether the game's recorded executable is on this machine. When it is
+    /// not, the game came from the old PC too and its saves can only arrive by
+    /// being copied over or restored from a backup.
+    #[serde(rename = "installPresent")]
+    pub install_present: bool,
+    /// Why the recorded folder does not work here, in plain language.
+    pub reason: String,
+}
+
+/// What every game's save folder looks like on this machine. Produced without
+/// changing anything, so it can be shown before the user commits to a relink.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SaveFolderSurvey {
+    /// Games that have a save folder recorded at all.
+    #[serde(rename = "gamesWithSaveFolder")]
+    pub games_with_save_folder: usize,
+    /// Recorded folders that already work here, so there is nothing to do.
+    pub usable: usize,
+    /// Games a relink can point at the right folder with no further input.
+    pub relinkable: Vec<SaveFolderIssue>,
+    /// Games nothing on this machine could be matched to.
+    pub unresolved: Vec<SaveFolderIssue>,
+}
+/// Classify one game's recorded save folder against this machine. Reads the
+/// filesystem but never writes to it, so it is safe to run over a whole library.
+fn survey_save_folder_with(game: &Game, machine: &MachinePaths) -> SaveFolderOutcome {
+    let Some(recorded) = game.save_path.as_deref().map(str::trim).filter(|path| !path.is_empty()) else {
+        return SaveFolderOutcome::NoneRecorded;
+    };
+    let verdict = stored_path_verdict(Path::new(recorded), &current_profile_name());
+    if verdict == StoredSavePath::Usable {
+        return SaveFolderOutcome::Usable;
+    }
+    let reason = unusable_save_path_reason(recorded, &verdict);
+    match resolve_restore_target_with(game, recorded, machine) {
+        // Only a *different* folder that already exists counts as a found
+        // replacement; re-detection never invents one.
+        Ok(target) if target.path != Path::new(recorded) => SaveFolderOutcome::Relink {
+            found: target.path,
+            reason,
+            confidence: target.confidence,
+        },
+        Ok(_) => SaveFolderOutcome::Unresolved { reason },
+        Err(error) => SaveFolderOutcome::Unresolved { reason: error },
+    }
+}
+
+/// Why a folder matched with less than the relink's evidence was reported
+/// instead of applied. A relink rewrites save paths in bulk without asking, so
+/// anything weaker than "this game's own folder" has to be the user's decision.
+fn refused_match_reason(found: &Path, confidence: MatchConfidence, cause: &str) -> String {
+    match confidence {
+        MatchConfidence::Guess => format!(
+            "{cause} SILO did find {}, but it matches the game's name alone and may hold another game's \
+             saves, so this game was left for you to set in Edit.",
+            found.display()
+        ),
+        // A prefix match, but not one Steam names after this game's app id: the
+        // folder may be another game's, and the identity is what would have
+        // settled it.
+        _ => format!(
+            "{cause} SILO did find {} inside a Proton or Wine prefix on this machine, but not one it can \
+             tie to this game, so this game was left for you to set in Edit.",
+            found.display()
+        ),
+    }
+}
+
+/// A save folder's identity for "does another game already save here?" — case
+/// and separators folded, because Windows paths are case-insensitive and a
+/// library may record either slash. Folding errs towards treating two folders as
+/// one, which is the safe direction: the relink is then reported for the user
+/// instead of applied.
+fn folder_identity(path: &Path) -> String {
+    path.to_string_lossy()
+        .to_lowercase()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Survey a whole library against this machine. Pure with respect to the
+/// library: it reports what a relink would do without touching a single game.
+fn survey_save_folders_of(games: &[Game]) -> SaveFolderSurvey {
+    survey_save_folders_with(games, &machine_paths())
+}
+
+/// The same survey, with this machine's prefixes, Steam libraries and search
+/// directories named explicitly. Every game is classified against one set of
+/// them, so the prefixes are discovered once rather than once per game.
+fn survey_save_folders_with(games: &[Game], machine: &MachinePaths) -> SaveFolderSurvey {
+    let classified: Vec<SaveFolderOutcome> = games
+        .iter()
+        .map(|game| survey_save_folder_with(game, machine))
+        .collect();
+
+    // The save folders this library already uses here. A game that is not
+    // installed on this machine can only be matched by folder name, so this is
+    // what keeps that name match from claiming another game's saves.
+    let mut occupied: Vec<(String, String)> = games
+        .iter()
+        .zip(&classified)
+        .filter(|(_, outcome)| **outcome == SaveFolderOutcome::Usable)
+        .filter_map(|(game, _)| {
+            let recorded = game.save_path.as_deref()?;
+            Some((folder_identity(Path::new(recorded)), game.name.clone()))
+        })
+        .collect();
+
+    let mut survey = SaveFolderSurvey::default();
+    for (game, outcome) in games.iter().zip(&classified) {
+        let (found_path, confidence, reason) = match outcome {
+            SaveFolderOutcome::NoneRecorded => continue,
+            SaveFolderOutcome::Usable => {
+                survey.games_with_save_folder += 1;
+                survey.usable += 1;
+                continue;
+            }
+            SaveFolderOutcome::Relink {
+                found,
+                reason,
+                confidence,
+            } => {
+                // A match with nothing but a name behind it is reported rather
+                // than applied: the folder may well hold another game's saves,
+                // and the user is the only one who can tell.
+                if !confidence.is_enough_for_a_relink() {
+                    (
+                        None,
+                        Some(*confidence),
+                        refused_match_reason(found, *confidence, reason),
+                    )
+                } else {
+                    let identity = folder_identity(found);
+                    match occupied.iter().find(|(key, _)| *key == identity) {
+                        // Two games never get pointed at one folder: whichever game
+                        // already saves there keeps it, and this one is left alone.
+                        Some((_, other)) => (
+                            None,
+                            Some(*confidence),
+                            format!(
+                                "{reason} {} is already {other}'s save folder here, so this game was left for you to set in Edit.",
+                                found.display()
+                            ),
+                        ),
+                        None => {
+                            occupied.push((identity, game.name.clone()));
+                            (Some(found.to_string_lossy().into_owned()), Some(*confidence), reason.clone())
+                        }
+                    }
+                }
+            }
+            SaveFolderOutcome::Unresolved { reason } => (None, None, reason.clone()),
+        };
+
+        survey.games_with_save_folder += 1;
+        let issue = SaveFolderIssue {
+            game_id: game.id.clone(),
+            game_name: game.name.clone(),
+            recorded_path: game.save_path.clone().unwrap_or_default(),
+            found_path,
+            confidence,
+            confidence_score: confidence.map(MatchConfidence::score),
+            install_present: recorded_install_present(game),
+            reason,
+        };
+        if issue.found_path.is_some() {
+            survey.relinkable.push(issue);
+        } else {
+            survey.unresolved.push(issue);
+        }
+    }
+    survey
+}
+
+/// Check every game's save folder against this machine. Read-only: the library
+/// is left exactly as it was found, so the result can be shown before anything
+/// is written.
+#[tauri::command]
+pub fn survey_save_folders(app: AppHandle) -> SaveFolderSurvey {
+    survey_save_folders_of(&get_games(app))
+}
+
+/// One game's recorded save folder, and the folder SILO found for it on this
+/// machine — the per-game counterpart to the whole-library survey.
+///
+/// The bulk relink refuses a match with nothing but a name or a prefix behind
+/// it, because it rewrites save paths without asking. Here the user is asking
+/// about one game and will see the path before saving, so the candidate is
+/// returned even then; `confidence` says how much evidence backs it. `None`
+/// means there is nothing to propose: no save folder is recorded, or the one
+/// recorded already works on this machine.
+#[tauri::command]
+pub fn propose_save_folder(app: AppHandle, game_id: String) -> Option<SaveFolderIssue> {
+    let games = get_games(app);
+    let game = games.iter().find(|game| game.id == game_id)?;
+    save_folder_proposal(game, &machine_paths())
+}
+
+/// Resolve one game's save folder for the Edit dialog. Read-only, and never
+/// creates anything — the caller decides whether to accept the candidate.
+fn save_folder_proposal(game: &Game, machine: &MachinePaths) -> Option<SaveFolderIssue> {
+    let recorded = game
+        .save_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    // A folder that already works here is not something to change.
+    if stored_path_verdict(Path::new(recorded), &current_profile_name()) == StoredSavePath::Usable {
+        return None;
+    }
+
+    let (found_path, confidence, reason) = match survey_save_folder_with(game, machine) {
+        SaveFolderOutcome::Relink {
+            found,
+            reason,
+            confidence,
+        } => (
+            Some(found.to_string_lossy().into_owned()),
+            Some(confidence),
+            reason,
+        ),
+        SaveFolderOutcome::Unresolved { reason } => (None, None, reason),
+        // Guarded by the check above, and a game with no recorded folder already
+        // returned; nothing else can reach here.
+        SaveFolderOutcome::Usable | SaveFolderOutcome::NoneRecorded => return None,
+    };
+
+    Some(SaveFolderIssue {
+        game_id: game.id.clone(),
+        game_name: game.name.clone(),
+        recorded_path: recorded.to_string(),
+        found_path,
+        confidence,
+        confidence_score: confidence.map(MatchConfidence::score),
+        install_present: recorded_install_present(game),
+        reason,
+    })
+}
+
+/// Point every game whose save folder came from another machine at the matching
+/// folder on this one. Games that already work here, games SILO cannot place at
+/// all, and games it could only match by name are left alone.
+#[tauri::command]
+pub async fn relink_save_folders(app: AppHandle) -> Result<SaveFolderSurvey, String> {
+    let mut games = get_games(app.clone());
+    let survey = survey_save_folders_of(&games);
+    if survey.relinkable.is_empty() {
+        return Ok(survey);
+    }
+
+    let relinked = apply_relink_proposals(&mut games, &survey.relinkable);
+
+    // One atomic write for the whole library: either every relink lands or none
+    // does, so the survey that was shown and the library cannot disagree.
+    save_games_atomic(&app, &games)?;
+    log::info!("Relinked {} save folder(s) recorded on another machine", relinked.len());
+    let _ = app.emit(
+        "savefolders-relinked",
+        serde_json::json!({ "count": relinked.len(), "games": relinked }),
+    );
+    Ok(survey)
+}
+
+/// Apply a survey's proposals to a library held in memory: point every game SILO
+/// has evidence for at the folder on this machine, and hand back the payload the
+/// UI needs. Kept out of the command so the rule that refuses a match with no
+/// evidence behind it is enforced — and tested — exactly where a save path would
+/// otherwise be rewritten.
+fn apply_relink_proposals(games: &mut [Game], proposals: &[SaveFolderIssue]) -> Vec<serde_json::Value> {
+    let mut relinked = Vec::new();
+    for issue in proposals {
+        let Some(found) = issue.found_path.as_deref() else {
+            continue;
+        };
+        // The survey only ever proposes matches with evidence behind them; this is
+        // the same bar applied where the library is actually written, so a
+        // name-only guess can never reach a game's save path.
+        if !issue.confidence.is_some_and(MatchConfidence::is_enough_for_a_relink) {
+            continue;
+        }
+        if let Some(game) = games.iter_mut().find(|game| game.id == issue.game_id) {
+            game.save_path = Some(found.to_string());
+            game.save_path_source = Some("auto".to_string());
+            relinked.push(serde_json::json!({ "gameId": issue.game_id, "savePath": found, "savePathSource": "auto" }));
+        }
+    }
+    relinked
+}
+
+/// Where saves belong on this machine for a game whose recorded folder cannot be
+/// used here. Only the recorded path translated onto this account is trusted:
+/// the game wrote that layout itself, so the same tree under this account is
+/// where it looks again once it is installed. A path that does not translate —
+/// another operating system, or another drive with no profile in it — has no
+/// destination, because guessing one would hand the game a folder it never
+/// reads.
+fn import_destination(recorded: &str, profile: Option<&Path>) -> Option<PathBuf> {
+    // A path from the other operating system has no counterpart here, and this is
+    // the one place the answer decides whether a folder gets *created*: on Linux a
+    // Windows path such as `C:\Users\Old\Documents\X` parses as a plain relative
+    // tree, so translating it would build a mirror of the other machine's home
+    // layout inside this account that the game never reads.
+    if foreign_os_shape(recorded, OsFamily::current()).is_some() {
+        return None;
+    }
+    remap_onto_profile(Path::new(recorded), profile?)
+}
+
+/// Whether a folder already holds anything. One that does is left alone: the
+/// saves in it can be newer than the ones being brought across.
+fn folder_has_content(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// Saves to bring across for one game: where they come from, and where they go.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SaveImportItem {
+    #[serde(rename = "gameId")]
+    pub game_id: String,
+    #[serde(rename = "gameName")]
+    pub game_name: String,
+    /// `folder` for the folder the user picked, `backup` for this game's own
+    /// SILO backup.
+    pub source: String,
+    #[serde(rename = "sourcePath")]
+    pub source_path: String,
+    #[serde(rename = "targetPath")]
+    pub target_path: String,
+    /// The folder the library still records, so the report can show what was
+    /// wrong with it.
+    #[serde(rename = "recordedPath")]
+    pub recorded_path: String,
+}
+
+/// What bringing the missing saves across would do — worked out without changing
+/// anything, so it can be shown before the user commits.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SaveImportPlan {
+    /// Games whose saves can be brought across, with where from and where to.
+    pub ready: Vec<SaveImportItem>,
+    /// Games nothing could be brought for, and why.
+    #[serde(rename = "stillMissing")]
+    pub still_missing: Vec<SaveFolderIssue>,
+}
+
+/// Plan bringing a library's missing save folders across. `source_dir` is the
+/// folder the user pointed at — the old PC's drive, or a copy of its saves — and
+/// `newest_backup` names a game's newest SILO backup when it has one. Read-only:
+/// nothing is copied and nothing is changed. Each game costs one walk of the
+/// source folder, which is the same shape of work the relink survey does.
+fn save_import_plan(
+    games: &[Game],
+    profile: Option<&Path>,
+    source_dir: Option<&Path>,
+    newest_backup: &HashMap<String, PathBuf>,
+) -> SaveImportPlan {
+    let mut plan = SaveImportPlan::default();
+    // Classified against one machine for the whole plan, exactly as the relink
+    // survey does, so the two agree game for game.
+    let machine = machine_paths();
+    for game in games {
+        let Some(recorded) = game.save_path.as_deref().map(str::trim).filter(|path| !path.is_empty()) else {
+            // Nothing recorded to work from; the relink check reports these too.
+            continue;
+        };
+        // Only the games with nowhere at all to point. A folder that exists here
+        // is the relink's business, and a usable one needs nothing.
+        if !matches!(
+            survey_save_folder_with(game, &machine),
+            SaveFolderOutcome::Unresolved { .. }
+        ) {
+            continue;
+        }
+
+        let verdict = stored_path_verdict(Path::new(recorded), &current_profile_name());
+        let cause = unusable_save_path_reason(recorded, &verdict);
+        let issue = |reason: String| SaveFolderIssue {
+            game_id: game.id.clone(),
+            game_name: game.name.clone(),
+            recorded_path: recorded.to_string(),
+            found_path: None,
+            // Nothing on this machine was matched at all, which is why this plan
+            // offers to make the target folder itself rather than relink to it.
+            confidence: None,
+            confidence_score: None,
+            install_present: recorded_install_present(game),
+            reason,
+        };
+
+        let Some(destination) = import_destination(recorded, profile) else {
+            // The cause above already says what to do about the recorded folder;
+            // this only has to explain why nothing could be brought across.
+            plan.still_missing.push(issue(format!(
+                "{cause} SILO has nowhere on this machine to put its saves, so there is nothing to copy \
+                 them into."
+            )));
+            continue;
+        };
+        if folder_has_content(&destination) {
+            plan.still_missing.push(issue(format!(
+                "{} already holds saves, so it was left alone — restore this game's own backup to \
+                 replace them.",
+                destination.display()
+            )));
+            continue;
+        }
+
+        // The folder the user picked first: it is the live copy. Otherwise this
+        // game's own SILO backup, which came across with the library.
+        let from_folder = source_dir.and_then(|dir| {
+            crate::saveguard::find_save_root_by_scan(
+                std::slice::from_ref(&dir.to_path_buf()),
+                &redetect_name_keys(game),
+                std::time::SystemTime::now(),
+                game.exe_path.as_deref().map(Path::new).and_then(Path::parent),
+            )
+        });
+        // The destination itself is not a source: an empty folder there is not
+        // saves, and naming the game after it does not make it one.
+        let from_folder = from_folder.filter(|found| *found != destination);
+        let (source, from) = match (from_folder, newest_backup.get(&game.id)) {
+            (Some(found), _) => ("folder", found),
+            (None, Some(archive)) => ("backup", archive.clone()),
+            (None, None) => {
+                plan.still_missing.push(issue(format!(
+                    "{cause} No saves for it were found in the folder you picked, and it has no SILO \
+                     backup."
+                )));
+                continue;
+            }
+        };
+
+        plan.ready.push(SaveImportItem {
+            game_id: game.id.clone(),
+            game_name: game.name.clone(),
+            source: source.to_string(),
+            source_path: from.to_string_lossy().into_owned(),
+            target_path: destination.to_string_lossy().into_owned(),
+            recorded_path: recorded.to_string(),
+        });
+    }
+    plan
+}
+
+/// The timestamp a backup's name carries when it has one; its file time is the
+/// fallback. A name with no usable time never outranks a dated one — the Backup
+/// Manager's plain string sort does exactly that, which is the opposite of what
+/// "newest" means to the user here.
+const BACKUP_TIMESTAMP_UNKNOWN: &str = "Unknown Time";
+
+fn backup_recency_key(name: &str, modified: Option<std::time::SystemTime>) -> (u8, String) {
+    let file_time = modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| format!("{:020}", age.as_millis()))
+        .unwrap_or_default();
+    match parse_backup_snapshot(name) {
+        Some(snapshot) if snapshot.timestamp != BACKUP_TIMESTAMP_UNKNOWN => (1, snapshot.timestamp),
+        _ => (0, file_time),
+    }
+}
+
+/// This game's newest SILO backup, when it has one. Files the Backup Manager
+/// would not list are not considered here either.
+fn newest_backup_for(app: &AppHandle, game_id: &str) -> Option<PathBuf> {
+    let dir = get_backups_dir(app, game_id);
+    let mut archives: Vec<((u8, String), PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("zip") {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if parse_backup_snapshot(&name).is_none() {
+            continue;
+        }
+        let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+        archives.push((backup_recency_key(&name, modified), path));
+    }
+    archives.sort_by(|a, b| b.0.cmp(&a.0));
+    archives.into_iter().next().map(|(_, path)| path)
+}
+
+/// The newest SILO backup of every game that has one.
+fn newest_backups(app: &AppHandle, games: &[Game]) -> HashMap<String, PathBuf> {
+    games
+        .iter()
+        .filter_map(|game| newest_backup_for(app, &game.id).map(|path| (game.id.clone(), path)))
+        .collect()
+}
+
+/// What bringing the missing saves across would do, before anything is touched.
+#[tauri::command]
+pub fn plan_save_import(app: AppHandle, source_dir: Option<String>) -> SaveImportPlan {
+    let games = get_games(app.clone());
+    let backups = newest_backups(&app, &games);
+    save_import_plan(
+        &games,
+        current_profile_dir().as_deref(),
+        source_dir.as_deref().map(Path::new),
+        &backups,
+    )
+}
+
+/// Bring the saves across for the games this machine has nowhere to point: from
+/// the folder the user picked when a game has a folder there, and from the game's
+/// own SILO backup otherwise. Nothing is deleted — a destination already holding
+/// saves is left alone, and the previous contents of one that is replaced are
+/// snapshotted into that game's backups first.
+#[tauri::command]
+pub async fn bring_saves_across(app: AppHandle, source_dir: Option<String>) -> Result<SaveImportPlan, String> {
+    let mut games = get_games(app.clone());
+    let plan = save_import_plan(
+        &games,
+        current_profile_dir().as_deref(),
+        source_dir.as_deref().map(Path::new),
+        &newest_backups(&app, &games),
+    );
+
+    let mut applied = SaveImportPlan::default();
+    let mut changed = Vec::new();
+    for item in plan.ready {
+        let from = PathBuf::from(&item.source_path);
+        let destination = PathBuf::from(&item.target_path);
+        let backups_dir = get_backups_dir(&app, &item.game_id);
+        let install_present = games
+            .iter()
+            .find(|game| game.id == item.game_id)
+            .is_some_and(recorded_install_present);
+        let missed = |reason: String| SaveFolderIssue {
+            game_id: item.game_id.clone(),
+            game_name: item.game_name.clone(),
+            recorded_path: item.recorded_path.clone(),
+            found_path: None,
+            // Matched nothing on this machine when it was planned, and still does
+            // not: the offer was to create the folder, not to relink to one.
+            confidence: None,
+            confidence_score: None,
+            install_present,
+            reason,
+        };
+        // The plan was shown to the user, so the disk is re-checked before every
+        // write rather than trusted as it was.
+        if folder_has_content(&destination) {
+            applied.still_missing.push(missed(format!(
+                "{} now holds saves, so it was left alone.",
+                destination.display()
+            )));
+            continue;
+        }
+
+        let brought = if item.source == "folder" {
+            stage_and_swap(&destination, &backups_dir, "import", |staging| {
+                copy_tree(&from, staging)
+            })
+        } else {
+            stage_and_swap(&destination, &backups_dir, "import", |staging| {
+                unzip_file(&from, staging).map_err(|error| format!("Backup could not be extracted safely: {}", error))
+            })
+        };
+
+        match brought {
+            Ok(()) => {
+                if let Some(game) = games.iter_mut().find(|game| game.id == item.game_id) {
+                    game.save_path = Some(item.target_path.clone());
+                    game.save_path_source = Some("imported".to_string());
+                }
+                changed.push(serde_json::json!({
+                    "gameId": item.game_id,
+                    "savePath": item.target_path,
+                    "savePathSource": "imported",
+                }));
+                applied.ready.push(item);
+            }
+            Err(error) => applied.still_missing.push(missed(error)),
+        }
+    }
+
+    if !changed.is_empty() {
+        // One atomic write for the whole import, and the same event a relink
+        // sends: several games' save folders changed in one pass.
+        save_games_atomic(&app, &games)?;
+        log::info!("Brought saves across for {} game(s)", changed.len());
+        let _ = app.emit(
+            "savefolders-relinked",
+            serde_json::json!({ "count": changed.len(), "games": changed }),
+        );
+    }
+    Ok(applied)
+}
+
 /// Determines how to launch a game on Linux based on the executable path.
 /// Returns (command_name, args, working_dir_override)
 #[cfg(not(target_os = "windows"))]
 fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<PathBuf>) {
     let path = Path::new(exe_path);
-    
+
     // If it's a steam:// URL, use steam-run or xdg-open
     if exe_path.starts_with("steam://") {
         if Command::new("steam-run").arg("--version").output().is_ok() {
@@ -697,7 +1998,7 @@ fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<Path
         // Fallback to xdg-open for steam:// URLs
         return ("xdg-open".to_string(), vec![exe_path.to_string()], None);
     }
-    
+
     // Check if it's an AppImage
     if exe_path.ends_with(".AppImage") || exe_path.ends_with(".appimage") {
         let args = vec![exe_path.to_string()];
@@ -709,12 +2010,16 @@ fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<Path
         });
         return (exe_path.to_string(), args, path.parent().map(|p| p.to_path_buf()));
     }
-    
+
     // Check if it's a shell script
     if exe_path.ends_with(".sh") {
-        return ("bash".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+        return (
+            "bash".to_string(),
+            vec![exe_path.to_string()],
+            path.parent().map(|p| p.to_path_buf()),
+        );
     }
-    
+
     // Check if it's a Windows executable (.exe) - likely Wine/Proton
     if exe_path.ends_with(".exe") || exe_path.ends_with(".EXE") {
         // Check if it's in a Steam compatdata directory (Proton)
@@ -730,21 +2035,37 @@ fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<Path
             }
             // Fallback: try steam-run
             if Command::new("steam-run").arg("--version").output().is_ok() {
-                return ("steam-run".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+                return (
+                    "steam-run".to_string(),
+                    vec![exe_path.to_string()],
+                    path.parent().map(|p| p.to_path_buf()),
+                );
             }
             // Last resort: wine
-            return ("wine".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+            return (
+                "wine".to_string(),
+                vec![exe_path.to_string()],
+                path.parent().map(|p| p.to_path_buf()),
+            );
         }
-        
+
         // Check if it's in a Wine prefix
         if path_str.contains(".wine") || path_str.contains("drive_c") {
-            return ("wine".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+            return (
+                "wine".to_string(),
+                vec![exe_path.to_string()],
+                path.parent().map(|p| p.to_path_buf()),
+            );
         }
-        
+
         // Generic .exe - try wine
-        return ("wine".to_string(), vec![exe_path.to_string()], path.parent().map(|p| p.to_path_buf()));
+        return (
+            "wine".to_string(),
+            vec![exe_path.to_string()],
+            path.parent().map(|p| p.to_path_buf()),
+        );
     }
-    
+
     // For native Linux binaries, check if it's actually an ELF binary
     if let Ok(metadata) = fs::metadata(path) {
         if metadata.is_file() {
@@ -768,7 +2089,7 @@ fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<Path
             }
         }
     }
-    
+
     // Default: try to execute directly
     (exe_path.to_string(), vec![], path.parent().map(|p| p.to_path_buf()))
 }
@@ -845,8 +2166,15 @@ fn collect_subtree_pids(system: &sysinfo::System, root_pid: u32) -> HashSet<u32>
 }
 
 const LAUNCHER_NAME_HINTS: &[&str] = &[
-    "launcher", "redprelauncher", "prelauncher", "bootstrap", "starter",
-    "splash", "epicgameslauncher", "galaxyclient", "steam",
+    "launcher",
+    "redprelauncher",
+    "prelauncher",
+    "bootstrap",
+    "starter",
+    "splash",
+    "epicgameslauncher",
+    "galaxyclient",
+    "steam",
 ];
 
 /// True when an exe name smells like a launcher rather than a game binary.
@@ -857,9 +2185,20 @@ fn is_launcher_like(name_lower: &str) -> bool {
 /// Folders inside a game install that never hold the game binary. Pruning them
 /// keeps the search quick and stops redistributables from out-ranking the game.
 const INSTALL_NOISE_DIRS: &[&str] = &[
-    "redist", "redistributables", "_commonredist", "support", "docs",
-    "documentation", "installers", "mods", "cache", "tools", "crashreporter",
-    "dxsetup", "directx", "dotnet",
+    "redist",
+    "redistributables",
+    "_commonredist",
+    "support",
+    "docs",
+    "documentation",
+    "installers",
+    "mods",
+    "cache",
+    "tools",
+    "crashreporter",
+    "dxsetup",
+    "directx",
+    "dotnet",
 ];
 
 /// How far below the configured exe the real game binary may sit. One level
@@ -884,11 +2223,7 @@ fn game_exe_name_bonus(stem: &str, install_dir: &str) -> i32 {
 }
 
 fn is_exe(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("exe"))
-            .unwrap_or(false)
+    path.is_file() && path.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false)
 }
 
 /// Return the exe that most likely is the real game when the configured exe is
@@ -918,17 +2253,10 @@ fn find_real_game_exe(configured: &Path) -> Option<PathBuf> {
             return;
         }
         let name_lower = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-        if name_lower == configured_lower
-            || is_blacklisted_exe(&name_lower)
-            || is_launcher_like(&name_lower)
-        {
+        if name_lower == configured_lower || is_blacklisted_exe(&name_lower) || is_launcher_like(&name_lower) {
             return;
         }
-        let stem = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
         let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let bonus = game_exe_name_bonus(&stem, &dir_name);
         if bonus > 0 {
@@ -937,10 +2265,8 @@ fn find_real_game_exe(configured: &Path) -> Option<PathBuf> {
                 named = Some((score, path.to_path_buf()));
             }
         }
-        if depth <= 2 && size >= 20 * 1024 * 1024 {
-            if biggest.as_ref().map_or(true, |(s, _)| size > *s) {
-                biggest = Some((size, path.to_path_buf()));
-            }
+        if depth <= 2 && size >= 20 * 1024 * 1024 && biggest.as_ref().map_or(true, |(s, _)| size > *s) {
+            biggest = Some((size, path.to_path_buf()));
         }
     };
 
@@ -963,9 +2289,7 @@ fn find_real_game_exe(configured: &Path) -> Option<PathBuf> {
         consider(entry.path(), entry.depth());
     }
 
-    named
-        .map(|(_, path)| path)
-        .or_else(|| biggest.map(|(_, path)| path))
+    named.map(|(_, path)| path).or_else(|| biggest.map(|(_, path)| path))
 }
 
 /// True when the found binary's name lines up with the install folder — i.e.
@@ -1042,16 +2366,18 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
     // Every name this game's save folder might carry, so the saves are found
     // whichever exe we ended up starting (and through publisher nesting).
     let name_keys = save_name_keys(&game.name, Path::new(&exe_path));
-    
+
     let game_id_clone = game_id.clone();
     let save_path_clone = game.save_path.clone();
     let backup_count_clone = game.backup_count.unwrap_or(5);
-    
+
     tauri::async_runtime::spawn(async move {
         let window = app.get_webview_window("main");
-        
-        let working_dir = std::path::Path::new(&exe_path).parent().unwrap_or(std::path::Path::new(""));
-        
+
+        let working_dir = std::path::Path::new(&exe_path)
+            .parent()
+            .unwrap_or(std::path::Path::new(""));
+
         #[cfg(target_os = "windows")]
         let mut cmd = {
             let mut c = Command::new("cmd");
@@ -1060,7 +2386,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
             c.raw_arg(format!("/C start \"\" /HIGH /WAIT \"{}\"", exe_path));
             c
         };
-        
+
         #[cfg(not(target_os = "windows"))]
         let mut cmd = {
             let (cmd_name, args, work_dir_override) = build_linux_game_command(&exe_path);
@@ -1102,7 +2428,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
             let mut detected_path: Option<PathBuf> = None;
             let mut watcher_opt = None;
             let mut rx_opt = None;
-            
+
             if watch_for_saves {
                 let (tx, rx) = channel();
                 let watcher_res = notify::recommended_watcher(move |res| {
@@ -1110,7 +2436,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                         let _ = tx.send(event);
                     }
                 });
-                
+
                 if let Ok(mut watcher) = watcher_res {
                     for path in get_watch_directories() {
                         let _ = watcher.watch(&path, RecursiveMode::Recursive);
@@ -1119,7 +2445,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                     rx_opt = Some(rx);
                 }
             }
-            
+
             let spawned_child_pid = child.id();
             let mut system = sysinfo::System::new();
             let mut game_pid: Option<u32> = None;
@@ -1221,7 +2547,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                         // subtree set, so drop the rest of the table to keep session RAM low.
                         system = sysinfo::System::new();
                     }
-                } else {
+                } else if let Some(game_pid) = game_pid {
                     // Keep the whole subtree refreshed: launcher-to-game handoffs happen
                     // AFTER the initial pin, so new children (the real game process) must
                     // keep entering known_pids or save attribution would silently miss them.
@@ -1235,12 +2561,12 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                         // Spawned root is gone (launcher exited after handing off). Refresh
                         // only the pinned PID so we know when the game itself ends.
                         system.refresh_processes(
-                            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid.unwrap())]),
+                            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid)]),
                             true,
                         );
                     }
                 }
-                
+
                 // Drop the save watcher the moment a root is found (nothing left to watch);
                 // otherwise keep it alive for the whole session so late autosaves are caught.
                 if detected_path.is_some() {
@@ -1251,10 +2577,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                 }
                 if let Some(rx) = rx_opt.as_ref() {
                     while let Ok(event) = rx.try_recv() {
-                        let is_write = match event.kind {
-                            EventKind::Modify(_) | EventKind::Create(_) => true,
-                            _ => false,
-                        };
+                        let is_write = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
 
                         // Accumulate changed paths and skip ones under an already-detected
                         // save root so Restart Manager isn't queried on every Modify event.
@@ -1293,9 +2616,13 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                                     // the launcher that spawned it has already exited, because
                                     // the subtree kept every PID the chain passed through.
                                     if crate::saveguard::pid_chain_reaches(&system, locking_pid, &known_pids)
-                                        || game_pid.map_or(false, |target| crate::saveguard::pid_is_descendant_of(&mut system, locking_pid, target))
+                                        || game_pid.is_some_and(|target| {
+                                            crate::saveguard::pid_is_descendant_of(&mut system, locking_pid, target)
+                                        })
                                     {
-                                        if let Some(root) = crate::saveguard::get_save_root_for(&path, &watch_dirs, &name_keys) {
+                                        if let Some(root) =
+                                            crate::saveguard::get_save_root_for(&path, &watch_dirs, &name_keys)
+                                        {
                                             log::info!("SaveGuard detected save root: {:?}", root);
                                             detected_path = Some(root.clone());
                                             detected_roots.insert(root);
@@ -1311,7 +2638,9 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                                 // because a wrong folder here is visible and overridable,
                                 // missing the saves entirely is the worse failure.
                                 if detected_path.is_none() {
-                                    if let Some(root) = crate::saveguard::save_root_by_name(&path, &watch_dirs, &name_keys) {
+                                    if let Some(root) =
+                                        crate::saveguard::save_root_by_name(&path, &watch_dirs, &name_keys)
+                                    {
                                         log::info!("SaveGuard detected save root by name: {:?}", root);
                                         detected_path = Some(root.clone());
                                         detected_roots.insert(root);
@@ -1324,14 +2653,11 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                         }
                     }
                 }
-                
+
                 std::thread::sleep(std::time::Duration::from_millis(2500));
-                
-                let child_exited = match child.try_wait() {
-                    Ok(Some(_)) => true,
-                    _ => false,
-                };
-                
+
+                let child_exited = matches!(child.try_wait(), Ok(Some(_)));
+
                 if child_exited {
                     // Only keep the loop alive if the pinned PID is still running. Name-only
                     // fallback pins can grab an unrelated already-running instance of the
@@ -1344,18 +2670,14 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                     if running_in_system {
                         found_process = true;
                     } else {
-                        if !found_process && check_start.elapsed().as_secs() < 12 {
-                            is_running = true;
-                        } else {
-                            is_running = false;
-                        }
+                        is_running = !found_process && check_start.elapsed().as_secs() < 12;
                     }
                 } else {
                     found_process = true;
                     is_running = true;
                 }
             }
-            
+
             if let Some(watcher) = watcher_opt {
                 drop(watcher);
             }
@@ -1378,12 +2700,9 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
             if watch_for_saves && detected_path.is_none() && game_pid.is_some() {
                 let since = game_started_sys.unwrap_or_else(std::time::SystemTime::now);
                 let install_dir = Path::new(&exe_path).parent();
-                if let Some(root) = crate::saveguard::find_save_root_by_scan(
-                    &watch_dirs,
-                    &name_keys,
-                    since,
-                    install_dir,
-                ) {
+                if let Some(root) =
+                    crate::saveguard::find_save_root_by_scan(&watch_dirs, &name_keys, since, install_dir)
+                {
                     log::info!("SaveGuard found save root by scan: {:?}", root);
                     detected_roots.insert(root.clone());
                     detected_path = Some(root);
@@ -1391,7 +2710,7 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
             }
 
             let mut final_save_path = save_path_clone;
-            
+
             if let Some(path) = detected_path {
                 let path_str = path.to_string_lossy().into_owned();
                 let mut games = get_games(app.clone());
@@ -1399,15 +2718,18 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                     g.save_path = Some(path_str.clone());
                     g.save_path_source = Some("auto".to_string());
                     let _ = save_games_atomic(&app, &games);
-                    
-                    let _ = app.emit("saveguard-path-detected", serde_json::json!({
-                        "gameId": game_id_clone,
-                        "savePath": path_str
-                    }));
+
+                    let _ = app.emit(
+                        "saveguard-path-detected",
+                        serde_json::json!({
+                            "gameId": game_id_clone,
+                            "savePath": path_str
+                        }),
+                    );
                 }
                 final_save_path = Some(path_str);
             }
-            
+
             // Auto-backup after a session — and surface every outcome instead of failing
             // silently. When a known folder has gone missing, the next launch re-runs
             // detection (save_detection_needed) to re-find it.
@@ -1423,34 +2745,50 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                                 match zip_dir(save_path, &backup_file) {
                                     Ok(()) => {
                                         let _ = prune_backups(&backups_dir, backup_count_clone as usize);
-                                        let _ = app.emit("saveguard-backup-complete", serde_json::json!({
-                                            "gameId": game_id_clone,
-                                            "timestamp": timestamp
-                                        }));
+                                        let _ = app.emit(
+                                            "saveguard-backup-complete",
+                                            serde_json::json!({
+                                                "gameId": game_id_clone,
+                                                "timestamp": timestamp
+                                            }),
+                                        );
                                     }
                                     Err(e) => {
                                         log::warn!("SaveGuard auto-backup failed for {}: {}", game_id_clone, e);
-                                        let _ = app.emit("saveguard-backup-failed", serde_json::json!({
-                                            "gameId": game_id_clone,
-                                            "reason": e
-                                        }));
+                                        let _ = app.emit(
+                                            "saveguard-backup-failed",
+                                            serde_json::json!({
+                                                "gameId": game_id_clone,
+                                                "reason": e
+                                            }),
+                                        );
                                     }
                                 }
                             }
                             Err(e) => {
                                 log::warn!("SaveGuard could not create backups dir for {}: {}", game_id_clone, e);
-                                let _ = app.emit("saveguard-backup-failed", serde_json::json!({
-                                    "gameId": game_id_clone,
-                                    "reason": e.to_string()
-                                }));
+                                let _ = app.emit(
+                                    "saveguard-backup-failed",
+                                    serde_json::json!({
+                                        "gameId": game_id_clone,
+                                        "reason": e.to_string()
+                                    }),
+                                );
                             }
                         }
                     } else {
-                        log::warn!("SaveGuard known save folder missing at exit for {}: {:?}", game_id_clone, save_path);
-                        let _ = app.emit("saveguard-path-missing", serde_json::json!({
-                            "gameId": game_id_clone,
-                            "savePath": path_str
-                        }));
+                        log::warn!(
+                            "SaveGuard known save folder missing at exit for {}: {:?}",
+                            game_id_clone,
+                            save_path
+                        );
+                        let _ = app.emit(
+                            "saveguard-path-missing",
+                            serde_json::json!({
+                                "gameId": game_id_clone,
+                                "savePath": path_str
+                            }),
+                        );
                     }
                 }
                 None => {
@@ -1458,16 +2796,19 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
                     // attribute one — surface it so the user is never left wondering.
                     if run_detection {
                         log::info!("SaveGuard found no save folder for {} this session", game_id_clone);
-                        let _ = app.emit("saveguard-not-found", serde_json::json!({
-                            "gameId": game_id_clone
-                        }));
+                        let _ = app.emit(
+                            "saveguard-not-found",
+                            serde_json::json!({
+                                "gameId": game_id_clone
+                            }),
+                        );
                     }
                 }
             }
-            
+
             // Playtime is measured from when the game process was first detected, not from spawn.
             let elapsed_secs = game_started_at.map_or(0, |started| started.elapsed().as_secs());
-            let elapsed_minutes = if elapsed_secs > 0 { (elapsed_secs + 59) / 60 } else { 0 };
+            let elapsed_minutes = if elapsed_secs > 0 { elapsed_secs.div_ceil(60) } else { 0 };
 
             let mut games = get_games(app.clone());
             if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
@@ -1501,7 +2842,11 @@ pub fn window_minimize(window: tauri::Window) {
 #[tauri::command]
 pub fn window_maximize(window: tauri::Window) {
     if let Ok(is_max) = window.is_maximized() {
-        if is_max { window.unmaximize().ok(); } else { window.maximize().ok(); }
+        if is_max {
+            window.unmaximize().ok();
+        } else {
+            window.maximize().ok();
+        }
     }
 }
 
@@ -1517,12 +2862,33 @@ pub fn window_start_dragging(window: tauri::Window) {
 
 // Expanded blacklist of non-game executables, shared by scan_folder and library import.
 pub const EXE_BLACKLIST: &[&str] = &[
-    "unins", "setup", "crash", "redist", "dxwebsetup", "vcredist",
-    "cef", "bootstrap", "dotnet", "directx", "dxsetup",
-    "installer", "updater", "reporter", "helper", "service",
-    "vc_redist", "oalinst", "physx", "easyanticheat",
-    "battleye", "beclient", "beservice", "eac_launcher",
-    "ue4prereqsetup", "unrealcefsubprocess", "steamwebhelper",
+    "unins",
+    "setup",
+    "crash",
+    "redist",
+    "dxwebsetup",
+    "vcredist",
+    "cef",
+    "bootstrap",
+    "dotnet",
+    "directx",
+    "dxsetup",
+    "installer",
+    "updater",
+    "reporter",
+    "helper",
+    "service",
+    "vc_redist",
+    "oalinst",
+    "physx",
+    "easyanticheat",
+    "battleye",
+    "beclient",
+    "beservice",
+    "eac_launcher",
+    "ue4prereqsetup",
+    "unrealcefsubprocess",
+    "steamwebhelper",
 ];
 
 pub fn is_blacklisted_exe(lowercase_file_name: &str) -> bool {
@@ -1542,8 +2908,19 @@ pub fn score_exe_candidate(stem: &str, game_dir: &str, depth: usize, size_bytes:
     score -= (depth as i32) * 5;
 
     // Deprioritize variant suffixes
-    let deprioritize = ["_be", "_dx12", "_dx11", "_vulkan", "_debug", "_server",
-                        "_shipping", "_launcher", "-win64", "-shipping", "dedicated"];
+    let deprioritize = [
+        "_be",
+        "_dx12",
+        "_dx11",
+        "_vulkan",
+        "_debug",
+        "_server",
+        "_shipping",
+        "_launcher",
+        "-win64",
+        "-shipping",
+        "dedicated",
+    ];
     for suffix in &deprioritize {
         if stem.contains(suffix) {
             score -= 30;
@@ -1566,9 +2943,9 @@ pub struct ScannedGame {
 pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String> {
     use walkdir::WalkDir;
     use std::collections::HashMap;
-    
+
     let folder = std::path::Path::new(&folder_path);
-    
+
     if !folder.exists() || !folder.is_dir() {
         return Err("Invalid folder path".into());
     }
@@ -1577,21 +2954,29 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
     struct ExeCandidate {
         path: PathBuf,
         depth: usize,
-        game_dir: String,      // top-level subfolder name (the "game folder")
-        display_name: String,  // cleaned up name for display
+        game_dir: String,     // top-level subfolder name (the "game folder")
+        display_name: String, // cleaned up name for display
     }
 
     let mut candidates: Vec<ExeCandidate> = Vec::new();
 
-    for entry in WalkDir::new(&folder_path).max_depth(5).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&folder_path)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
-        if !path.is_file() { continue; }
-        
+        if !path.is_file() {
+            continue;
+        }
+
         let ext = match path.extension() {
             Some(e) => e.to_string_lossy().to_lowercase(),
             None => continue,
         };
-        if ext != "exe" { continue; }
+        if ext != "exe" {
+            continue;
+        }
 
         let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
         let file_stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
@@ -1614,7 +2999,9 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
             Err(_) => continue,
         };
         let components: Vec<_> = relative.components().collect();
-        if components.is_empty() { continue; }
+        if components.is_empty() {
+            continue;
+        }
 
         // If the exe is directly in the scanned folder (no subfolder), use exe stem as game dir
         let game_dir = if components.len() == 1 {
@@ -1626,14 +3013,19 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
         let depth = entry.depth();
 
         // Build display name from the game directory, cleaning up common folder patterns
-        let parent_name = path.parent()
+        let parent_name = path
+            .parent()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| game_dir.clone());
 
         let display_name = {
             let p_lower = parent_name.to_lowercase();
-            if ["bin", "win64", "win32", "binaries", "system32", "x64", "x86", "game", "shipping"].contains(&p_lower.as_str()) {
+            if [
+                "bin", "win64", "win32", "binaries", "system32", "x64", "x86", "game", "shipping",
+            ]
+            .contains(&p_lower.as_str())
+            {
                 // Walk up to find a better name
                 path.parent()
                     .and_then(|p| p.parent())
@@ -1696,14 +3088,18 @@ pub struct SteamMetadata {
 
 #[tauri::command]
 pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>, String> {
-    let url = format!("https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US", urlencoding::encode(&name));
-    
+    let url = format!(
+        "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
+        urlencoding::encode(&name)
+    );
+
     let client = match reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        .build() {
-            Ok(c) => c,
-            Err(e) => return Err(e.to_string()),
-        };
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(e.to_string()),
+    };
 
     match client.get(&url).send().await {
         Ok(response) => {
@@ -1713,9 +3109,12 @@ pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>,
                         if let (Some(id), Some(game_name)) = (first_item.get("id"), first_item.get("name")) {
                             let id_str = id.as_i64().unwrap_or(0).to_string();
                             let game_name_str = game_name.as_str().unwrap_or(&name).to_string();
-                            
+
                             let logo_candidates = [
-                                format!("https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/logo.png", id_str),
+                                format!(
+                                    "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{}/logo.png",
+                                    id_str
+                                ),
                                 format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/logo.png", id_str),
                             ];
                             let mut logo = String::new();
@@ -1742,7 +3141,7 @@ pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>,
                                     }
                                 }
                             }
-                            
+
                             return Ok(Some(SteamMetadata {
                                 name: game_name_str,
                                 app_id: id_str,
@@ -1754,7 +3153,7 @@ pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>,
                 }
             }
             Ok(None)
-        },
+        }
         Err(e) => Err(format!("Failed to fetch: {}", e)),
     }
 }
@@ -1905,7 +3304,11 @@ fn windows_documents_dir() -> Option<PathBuf> {
     let personal: String = shell.get_value("Personal").ok()?;
     let expanded = expand_env_vars(&personal);
     let path = PathBuf::from(expanded);
-    if path.is_dir() { Some(path) } else { None }
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 // Expands the %VAR% tokens used by "User Shell Folders" values (e.g. %USERPROFILE%).
@@ -1962,8 +3365,7 @@ where
 {
     let file = File::create(dest_zip).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::FileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     let walkdir = WalkDir::new(src_dir);
     let mut files_added: u32 = 0;
@@ -2008,7 +3410,9 @@ where
     }
     log::info!("Zip completed: {} files added, {} skipped", files_added, skipped);
     if files_added == 0 {
-        return Err("No files could be read from the save directory - it may be empty or all files are locked".to_string());
+        return Err(
+            "No files could be read from the save directory - it may be empty or all files are locked".to_string(),
+        );
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(())
@@ -2066,7 +3470,10 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
         if archive_path.as_os_str().is_empty()
             || archive_path.is_absolute()
             || archive_path.components().any(|component| {
-                matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
             })
         {
             return Err(format!("Backup contains an unsafe path: {}", file.name()));
@@ -2104,39 +3511,61 @@ fn unzip_file(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
 
 fn temporary_sibling(path: &Path, purpose: &str) -> Result<PathBuf, String> {
     let parent = path.parent().ok_or("Save folder has no parent directory")?;
-    let name = path.file_name().and_then(|name| name.to_str()).ok_or("Save folder name is invalid")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Save folder name is invalid")?;
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
     Ok(parent.join(format!(".{}_silo_{}_{}", name, purpose, timestamp)))
 }
 
 fn restore_save_transactionally(backup_file: &Path, save_path: &Path, backups_dir: &Path) -> Result<(), String> {
+    stage_and_swap(save_path, backups_dir, "restore", |staging_dir| {
+        unzip_file(backup_file, staging_dir).map_err(|error| format!("Backup could not be extracted safely: {}", error))
+    })
+}
+
+/// Build the folder a save path will hold in a staging directory beside it, then
+/// swap it into place: the previous contents are snapshotted into `backups_dir`
+/// first, and nothing replaces the live folder until the staged one is complete.
+/// `populate` fills the empty staging folder — unzipping a backup, or copying a
+/// folder in from another machine.
+fn stage_and_swap(
+    save_path: &Path,
+    backups_dir: &Path,
+    purpose: &str,
+    populate: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
     let parent = save_path.parent().ok_or("Save folder has no parent directory")?;
     fs::create_dir_all(parent).map_err(|e| format!("Could not prepare save folder: {}", e))?;
 
-    let staging_dir = temporary_sibling(save_path, "restore_staging")?;
-    fs::create_dir(&staging_dir).map_err(|e| format!("Could not create restore staging folder: {}", e))?;
+    let staging_dir = temporary_sibling(save_path, &format!("{}_staging", purpose))?;
+    fs::create_dir(&staging_dir).map_err(|e| format!("Could not create {} staging folder: {}", purpose, e))?;
 
-    if let Err(error) = unzip_file(backup_file, &staging_dir) {
+    if let Err(error) = populate(&staging_dir) {
         let _ = fs::remove_dir_all(&staging_dir);
-        return Err(format!("Backup could not be extracted safely: {}", error));
+        return Err(error);
     }
 
     if save_path.exists() {
         fs::create_dir_all(backups_dir).map_err(|e| format!("Could not prepare backup folder: {}", e))?;
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let safety_snapshot = backups_dir.join(format!("manual_{}_Before%20restore.zip", timestamp));
+        let safety_snapshot = backups_dir.join(format!("manual_{}_Before%20{}.zip", timestamp, purpose));
         if let Err(error) = zip_dir(save_path, &safety_snapshot) {
             let _ = fs::remove_dir_all(&staging_dir);
-            return Err(format!("Could not create the pre-restore safety backup: {}", error));
+            return Err(format!("Could not create the pre-{} safety backup: {}", purpose, error));
         }
     }
 
-    let previous_dir = temporary_sibling(save_path, "restore_previous")?;
+    let previous_dir = temporary_sibling(save_path, &format!("{}_previous", purpose))?;
     let had_existing_save = save_path.exists();
     if had_existing_save {
         if let Err(error) = fs::rename(save_path, &previous_dir) {
             let _ = fs::remove_dir_all(&staging_dir);
-            return Err(format!("Could not prepare current save for restore. Is the game still running? {}", error));
+            return Err(format!(
+                "Could not prepare current save for {}. Is the game still running? {}",
+                purpose, error
+            ));
         }
     }
 
@@ -2145,15 +3574,50 @@ fn restore_save_transactionally(backup_file: &Path, save_path: &Path, backups_di
             let _ = fs::rename(&previous_dir, save_path);
         }
         let _ = fs::remove_dir_all(&staging_dir);
-        return Err(format!("Could not apply restored save: {}", error));
+        return Err(format!("Could not apply {}d save: {}", purpose, error));
     }
 
     if had_existing_save {
         if let Err(error) = fs::remove_dir_all(&previous_dir) {
-            log::warn!("Restored save successfully but could not remove temporary previous save at {:?}: {}", previous_dir, error);
+            log::warn!(
+                "{}d save successfully but could not remove the temporary previous save at {:?}: {}",
+                purpose,
+                previous_dir,
+                error
+            );
         }
     }
 
+    Ok(())
+}
+
+/// Copy a save folder's contents into the empty folder prepared for it. Only
+/// files and folders come across: a save folder is data, not a filesystem graph,
+/// so links are left behind rather than followed somewhere unexpected.
+fn copy_tree(from: &Path, into: &Path) -> Result<(), String> {
+    let mut copied = 0usize;
+    for entry in walkdir::WalkDir::new(from).min_depth(1) {
+        let entry = entry.map_err(|e| format!("Could not read {}: {}", from.display(), e))?;
+        let relative = entry
+            .path()
+            .strip_prefix(from)
+            .map_err(|e| format!("Could not place {}: {}", entry.path().display(), e))?;
+        let target = into.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target).map_err(|e| format!("Could not create {}: {}", target.display(), e))?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("Could not create {}: {}", parent.display(), e))?;
+            }
+            fs::copy(entry.path(), &target).map_err(|e| format!("Could not copy {}: {}", entry.path().display(), e))?;
+            copied += 1;
+        }
+    }
+    if copied == 0 {
+        // An empty folder is not saves: better to say so than to leave a game
+        // pointed at a folder that holds nothing.
+        return Err(format!("{} holds no files to bring across", from.display()));
+    }
     Ok(())
 }
 
@@ -2176,13 +3640,13 @@ fn prune_backups(backups_dir: &Path, max_backups: usize) -> Result<(), String> {
             }
         }
     }
-    
+
     entries.sort_by_key(|e| e.1);
-    
+
     if entries.len() > max_backups {
         let remove_count = entries.len() - max_backups;
-        for i in 0..remove_count {
-            let _ = fs::remove_file(&entries[i].0);
+        for entry in entries.iter().take(remove_count) {
+            let _ = fs::remove_file(&entry.0);
         }
     }
     Ok(())
@@ -2278,19 +3742,21 @@ fn validate_backup_name(app: &AppHandle, game_id: &str, backup_name: &str) -> Re
         return Err("Backups directory does not exist".to_string());
     }
 
-    let canonical_backups = backups_dir.canonicalize().map_err(|e| format!("Invalid backups directory: {}", e))?;
-    
+    let canonical_backups = backups_dir
+        .canonicalize()
+        .map_err(|e| format!("Invalid backups directory: {}", e))?;
+
     if target_path.exists() {
-        let canonical_target = target_path.canonicalize().map_err(|e| format!("Invalid backup file: {}", e))?;
+        let canonical_target = target_path
+            .canonicalize()
+            .map_err(|e| format!("Invalid backup file: {}", e))?;
         if !canonical_target.starts_with(&canonical_backups) {
             return Err("Invalid backup name: path outside backup directory".to_string());
         }
-    } else {
-        if let Some(parent) = target_path.parent() {
-            if let Ok(canonical_parent) = parent.canonicalize() {
-                if !canonical_parent.starts_with(&canonical_backups) {
-                    return Err("Invalid backup name: path outside backup directory".to_string());
-                }
+    } else if let Some(parent) = target_path.parent() {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            if !canonical_parent.starts_with(&canonical_backups) {
+                return Err("Invalid backup name: path outside backup directory".to_string());
             }
         }
     }
@@ -2302,16 +3768,43 @@ fn validate_backup_name(app: &AppHandle, game_id: &str, backup_name: &str) -> Re
 pub async fn restore_backup(app: AppHandle, game_id: String, backup_name: String) -> Result<(), String> {
     let games = get_games(app.clone());
     let game = games.into_iter().find(|g| g.id == game_id).ok_or("Game not found")?;
-    let save_path_str = game.save_path.ok_or("No save path configured for this game")?;
-    let save_path = Path::new(&save_path_str);
-    
+    let save_path_str = game.save_path.clone().ok_or("No save path configured for this game")?;
+
     let backup_file = validate_backup_name(&app, &game_id, &backup_name)?;
     if !backup_file.exists() {
         return Err("Backup file does not exist".to_string());
     }
-    
+
+    // Resolve the destination before touching disk: a folder left behind by another
+    // machine must never be resurrected just because the library still remembers it,
+    // or the saves land where the game will never look.
+    let target = resolve_restore_target(&game, &save_path_str)?;
+
     let backups_dir = get_backups_dir(&app, &game_id);
-    restore_save_transactionally(&backup_file, save_path, &backups_dir)?;
+    restore_save_transactionally(&backup_file, &target.path, &backups_dir)?;
+
+    if target.rediscovered {
+        // Remember where the saves actually went, so the next backup and restore of
+        // this game agree with each other.
+        let path_str = target.path.to_string_lossy().into_owned();
+        let mut games = get_games(app.clone());
+        if let Some(g) = games.iter_mut().find(|g| g.id == game_id) {
+            g.save_path = Some(path_str.clone());
+            g.save_path_source = Some("auto".to_string());
+            if let Err(e) = save_games_atomic(&app, &games) {
+                log::warn!(
+                    "Restored {} but could not persist the re-detected save folder: {}",
+                    game_id,
+                    e
+                );
+            }
+        }
+        let _ = app.emit(
+            "saveguard-path-detected",
+            serde_json::json!({ "gameId": game_id, "savePath": path_str }),
+        );
+    }
+
     Ok(())
 }
 
@@ -2354,7 +3847,11 @@ pub fn get_all_backups(app: AppHandle) -> Result<Vec<BackupSummary>, String> {
                 continue;
             }
             let game_id = entry.file_name().to_string_lossy().to_string();
-            let game_name = games.iter().find(|g| g.id == game_id).map(|g| g.name.clone()).unwrap_or_else(|| game_id.clone());
+            let game_name = games
+                .iter()
+                .find(|g| g.id == game_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| game_id.clone());
             if let Ok(snapshots) = get_game_backups(app.clone(), game_id.clone()) {
                 for snapshot in snapshots {
                     summaries.push(BackupSummary {
@@ -2391,18 +3888,19 @@ pub fn delete_game_backups(app: AppHandle, game_id: String) -> Result<(), String
 pub async fn backup_game_now(app: AppHandle, game_id: String, custom_name: Option<String>) -> Result<(), String> {
     let games = get_games(app.clone());
     let game = games.into_iter().find(|g| g.id == game_id).ok_or("Game not found")?;
+    let install_present = recorded_install_present(&game);
     let save_path_str = game.save_path.ok_or("No save path configured for this game")?;
     let save_path = Path::new(&save_path_str);
-    
+
     if !save_path.exists() {
-        return Err("Save directory does not exist".to_string());
+        return Err(save_folder_missing_message(install_present, &save_path_str));
     }
-    
+
     let backups_dir = get_backups_dir(&app, &game_id);
     fs::create_dir_all(&backups_dir).map_err(|e| e.to_string())?;
-    
+
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    
+
     let filename = if let Some(name) = custom_name {
         if name.trim().is_empty() {
             format!("manual_{}.zip", timestamp)
@@ -2413,14 +3911,14 @@ pub async fn backup_game_now(app: AppHandle, game_id: String, custom_name: Optio
     } else {
         format!("manual_{}.zip", timestamp)
     };
-    
+
     let backup_file = backups_dir.join(filename);
-    
+
     zip_dir(save_path, &backup_file)?;
-    
+
     let max_backups = game.backup_count.unwrap_or(5) as usize;
     let _ = prune_backups(&backups_dir, max_backups);
-    
+
     Ok(())
 }
 
@@ -2434,21 +3932,29 @@ pub fn check_uninstaller(app: AppHandle, game_id: String) -> Result<Option<Strin
         #[cfg(target_os = "windows")]
         {
             let unins = parent.join("unins000.exe");
-            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+            if unins.exists() {
+                return Ok(Some(unins.to_string_lossy().to_string()));
+            }
             let unins = parent.join("uninstall.exe");
-            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+            if unins.exists() {
+                return Ok(Some(unins.to_string_lossy().to_string()));
+            }
         }
-        
+
         #[cfg(not(target_os = "windows"))]
         {
             let exe_path_str = exe_path_str.to_lowercase();
-            
+
             // Check for Wine/Proton uninstallers
             let unins = parent.join("unins000.exe");
-            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
+            if unins.exists() {
+                return Ok(Some(unins.to_string_lossy().to_string()));
+            }
             let unins = parent.join("uninstall.exe");
-            if unins.exists() { return Ok(Some(unins.to_string_lossy().to_string())); }
-            
+            if unins.exists() {
+                return Ok(Some(unins.to_string_lossy().to_string()));
+            }
+
             // Check for Steam game (in compatdata or steamapps)
             if exe_path_str.contains("steamapps") || exe_path_str.contains("compatdata") {
                 // Try to find the appmanifest to get app ID
@@ -2483,7 +3989,7 @@ pub fn check_uninstaller(app: AppHandle, game_id: String) -> Result<Option<Strin
                 // Fallback: just return a generic steam uninstall hint
                 return Ok(Some("steam://open/minigameslist".to_string()));
             }
-            
+
             // Check for Flatpak
             if exe_path_str.contains(".var/app/") {
                 // Extract flatpak app ID from path
@@ -2496,7 +4002,7 @@ pub fn check_uninstaller(app: AppHandle, game_id: String) -> Result<Option<Strin
                     }
                 }
             }
-            
+
             // Check for native Linux uninstall scripts
             let uninstall_scripts = ["uninstall.sh", "uninstall", "uninstall.bin"];
             for script in uninstall_scripts {
@@ -2548,8 +4054,10 @@ fn is_protected_dir(path: &Path) -> bool {
     #[cfg(not(target_os = "windows"))]
     {
         // Always protect Linux system directories
-        for sys_dir in ["/", "/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/lib64",
-                        "/boot", "/proc", "/sys", "/dev", "/run", "/tmp"] {
+        for sys_dir in [
+            "/", "/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/proc", "/sys", "/dev", "/run",
+            "/tmp",
+        ] {
             protected.push(PathBuf::from(sys_dir));
         }
         if let Ok(home) = std::env::var("HOME") {
@@ -2603,7 +4111,10 @@ pub fn run_uninstaller(uninstaller_path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
-    let logs_dir = app.path().app_log_dir().unwrap_or_else(|_| app.path().app_data_dir().unwrap().join("logs"));
+    let logs_dir = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| app.path().app_data_dir().unwrap().join("logs"));
     if let Err(e) = fs::create_dir_all(&logs_dir) {
         return Err(format!("Failed to create logs folder: {}", e));
     }
@@ -2626,10 +4137,22 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn backup_library(app: AppHandle) -> Result<String, String> {
-    let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).set_file_name("silo_backup.zip").blocking_save_file();
+    let file_path = app
+        .dialog()
+        .file()
+        .add_filter("Zip Archive", &["zip"])
+        .set_file_name("silo_backup.zip")
+        .blocking_save_file();
     if let Some(dest_path) = file_path {
-        let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
-        log::info!("Starting library backup: app_data_dir={:?}, dest={:?}", app_data_dir, dest_path);
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "Failed to get AppData directory")?;
+        log::info!(
+            "Starting library backup: app_data_dir={:?}, dest={:?}",
+            app_data_dir,
+            dest_path
+        );
         let result = zip_dir_filtered(
             &app_data_dir,
             std::path::Path::new(&dest_path.to_string()),
@@ -2647,9 +4170,16 @@ pub async fn backup_library(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn restore_library(app: AppHandle) -> Result<String, String> {
-    let file_path = app.dialog().file().add_filter("Zip Archive", &["zip"]).blocking_pick_file();
+    let file_path = app
+        .dialog()
+        .file()
+        .add_filter("Zip Archive", &["zip"])
+        .blocking_pick_file();
     if let Some(src_path) = file_path {
-        let app_data_dir = app.path().app_data_dir().map_err(|_| "Failed to get AppData directory")?;
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "Failed to get AppData directory")?;
         log::info!("Starting library restore: src={:?}, dest={:?}", src_path, app_data_dir);
         let result = unzip_file(std::path::Path::new(&src_path.to_string()), &app_data_dir);
         match &result {
@@ -2895,9 +4425,7 @@ mod tests {
     fn write_zip_with_entry(zip_path: &Path, name: &str, content: &[u8]) {
         let file = File::create(zip_path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
-        writer
-            .start_file(name, zip::write::FileOptions::default())
-            .unwrap();
+        writer.start_file(name, zip::write::FileOptions::default()).unwrap();
         writer.write_all(content).unwrap();
         writer.finish().unwrap();
     }
@@ -2909,12 +4437,9 @@ mod tests {
         let zip_path = zip_dir.path().join("evil.zip");
         write_zip_with_entry(&zip_path, "../../evil.txt", b"pwned");
 
-        let err = unzip_file(&zip_path, &dst.path()).unwrap_err();
+        let err = unzip_file(&zip_path, dst.path()).unwrap_err();
         assert!(err.contains("unsafe path"), "unexpected error: {}", err);
-        assert!(
-            relative_paths(&dst.path()).is_empty(),
-            "dest should be untouched"
-        );
+        assert!(relative_paths(dst.path()).is_empty(), "dest should be untouched");
     }
 
     #[test]
@@ -2924,8 +4449,8 @@ mod tests {
         let zip_path = zip_dir.path().join("evil2.zip");
         write_zip_with_entry(&zip_path, "..\\evil.txt", b"pwned");
 
-        assert!(unzip_file(&zip_path, &dst.path()).is_err());
-        assert!(relative_paths(&dst.path()).is_empty());
+        assert!(unzip_file(&zip_path, dst.path()).is_err());
+        assert!(relative_paths(dst.path()).is_empty());
     }
 
     #[test]
@@ -3019,11 +4544,22 @@ mod tests {
         fs::create_dir_all(src.path().join("backups").join("game-1")).unwrap();
         fs::create_dir_all(src.path().join("saves").join("game-1")).unwrap();
         fs::create_dir_all(src.path().join("wallpapers")).unwrap();
-        fs::write(src.path().join("games.json"), br#"[{"id":"game-1","name":"Cyberpunk 2077"}]"#).unwrap();
+        fs::write(
+            src.path().join("games.json"),
+            br#"[{"id":"game-1","name":"Cyberpunk 2077"}]"#,
+        )
+        .unwrap();
         fs::write(src.path().join("settings.json"), br#"{"showGameTitles":true}"#).unwrap();
         fs::write(src.path().join("sessions.json"), br#"[{"gameId":"game-1"}]"#).unwrap();
         fs::write(src.path().join("wallpapers").join("game-1.png"), b"png").unwrap();
-        fs::write(src.path().join("backups").join("game-1").join("auto_20240101_120000.zip"), b"snapshot").unwrap();
+        fs::write(
+            src.path()
+                .join("backups")
+                .join("game-1")
+                .join("auto_20240101_120000.zip"),
+            b"snapshot",
+        )
+        .unwrap();
         fs::write(src.path().join("saves").join("game-1").join("notes.txt"), b"keep me").unwrap();
 
         let zip_path = TempDir::new("lib_export_zip");
@@ -3052,7 +4588,12 @@ mod tests {
             "keep me"
         );
         // Save snapshots are deliberately left out of the library bundle.
-        assert!(!restored.path().join("backups").join("game-1").join("auto_20240101_120000.zip").exists());
+        assert!(!restored
+            .path()
+            .join("backups")
+            .join("game-1")
+            .join("auto_20240101_120000.zip")
+            .exists());
         assert!(is_nested_archive(Path::new("backups/game-1/auto_20240101_120000.zip")));
         assert!(is_nested_archive(Path::new("saves/game-1/auto_20240101_120000.ZIP")));
         assert!(!is_nested_archive(Path::new("games.json")));
@@ -3063,14 +4604,16 @@ mod tests {
     fn empty_library_export_fails_loudly_instead_of_writing_an_empty_zip() {
         let src = TempDir::new("lib_export_empty");
         let archive = TempDir::new("lib_export_empty_zip");
-        let err = zip_dir_filtered(src.path(), &archive.path().join("empty.zip"), is_nested_archive)
-            .unwrap_err();
+        let err = zip_dir_filtered(src.path(), &archive.path().join("empty.zip"), is_nested_archive).unwrap_err();
         assert!(err.contains("No files could be read"), "unexpected error: {err}");
     }
 
     #[test]
     fn save_path_names_game_spots_broad_or_unrelated_folders() {
-        let keys = save_name_keys("Cyberpunk 2077", Path::new("C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"));
+        let keys = save_name_keys(
+            "Cyberpunk 2077",
+            Path::new("C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"),
+        );
         // The game's own folder, and a publisher folder that happens to be the
         // same depth — only the first is the game's.
         assert!(save_path_names_game(
@@ -3087,14 +4630,22 @@ mod tests {
 
     #[test]
     fn save_name_keys_cover_name_exe_stem_and_install_folder() {
-        let keys = save_name_keys("Cyberpunk 2077", Path::new("C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"));
+        let keys = save_name_keys(
+            "Cyberpunk 2077",
+            Path::new("C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"),
+        );
         assert!(keys.iter().any(|k| crate::saveguard::name_matches("Cyberpunk 2077", k)));
         assert!(crate::saveguard::name_matches("Cyberpunk2077", &keys[1]));
         // The install folder is picked up too, so a game launched through its
         // launcher (whose own name is noise) still matches by folder.
-        assert!(keys.iter().any(|k| crate::saveguard::normalize_key(k) == "cyberpunk2077"));
+        assert!(keys
+            .iter()
+            .any(|k| crate::saveguard::normalize_key(k) == "cyberpunk2077"));
         // A launcher's own name never becomes a key.
-        let launcher_keys = save_name_keys("Cyberpunk 2077", Path::new("C:\\Games\\Cyberpunk 2077\\REDprelauncher.exe"));
+        let launcher_keys = save_name_keys(
+            "Cyberpunk 2077",
+            Path::new("C:\\Games\\Cyberpunk 2077\\REDprelauncher.exe"),
+        );
         assert!(!launcher_keys.iter().any(|k| k.to_lowercase().contains("prelauncher")));
     }
 
@@ -3110,7 +4661,10 @@ mod tests {
         write_exe(&game, 30 * 1024 * 1024);
         // Decoys that must never win: a bigger crash handler and a bigger
         // redistributable, both deeper than the game.
-        write_exe(&install.join("bin").join("x64").join("CrashReporter.exe"), 40 * 1024 * 1024);
+        write_exe(
+            &install.join("bin").join("x64").join("CrashReporter.exe"),
+            40 * 1024 * 1024,
+        );
         write_exe(&install.join("redist").join("vc_redist.x64.exe"), 45 * 1024 * 1024);
 
         assert_eq!(find_real_game_exe(&prelauncher), Some(game));
@@ -3164,4 +4718,1766 @@ mod tests {
 
         assert_eq!(find_real_game_exe(&launcher), None);
     }
+
+    // ----- install_status_for (install-status classification) -----
+
+    fn install_job_for(exe: Option<PathBuf>, launch_target: &str) -> InstallJob {
+        InstallJob {
+            game_id: "g1".to_string(),
+            exe,
+            launch_target: launch_target.to_string(),
+        }
+    }
+
+    #[test]
+    fn install_status_without_a_stored_path_is_installed() {
+        // Nothing to verify, so SILO must never nag about it.
+        assert_eq!(install_status_for(&install_job_for(None, "auto")), INSTALL_INSTALLED);
+    }
+
+    #[test]
+    fn install_status_existing_exe_is_installed() {
+        let tmp = TempDir::new("install_present");
+        let exe = tmp.path().join("Game.exe");
+        write_exe(&exe, 1024);
+        assert_eq!(
+            install_status_for(&install_job_for(Some(exe), "auto")),
+            INSTALL_INSTALLED
+        );
+    }
+
+    #[test]
+    fn install_status_missing_exe_on_a_live_drive_is_missing() {
+        // A path that does not exist while its drive/root is still reachable.
+        let tmp = TempDir::new("install_missing");
+        let exe = tmp.path().join("Gone").join("gone.exe");
+        assert_eq!(install_status_for(&install_job_for(Some(exe), "auto")), INSTALL_MISSING);
+    }
+
+    #[test]
+    fn install_status_absent_exe_on_a_dead_drive_is_unavailable() {
+        // Windows: a rooted path with no drive prefix makes drive_available()
+        // probe the path itself, which never exists. Unix: a path under an
+        // automount root whose volume is not mounted.
+        #[cfg(target_os = "windows")]
+        let exe = PathBuf::from(r"\SiloNoSuchVolume\gone.exe");
+        #[cfg(not(target_os = "windows"))]
+        let exe = PathBuf::from("/mnt/__silo_no_such_volume__/gone.exe");
+        assert_eq!(
+            install_status_for(&install_job_for(Some(exe), "auto")),
+            INSTALL_UNAVAILABLE
+        );
+    }
+
+    // ----- restoring onto this machine -----
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn split_at_profile_keeps_the_profile_and_what_is_below_it() {
+        let (prefix, tail) = split_at_profile(Path::new(r"C:\Users\Old\Documents\My Games\Foo")).unwrap();
+        assert_eq!(prefix, PathBuf::from(r"C:\Users\Old"));
+        assert_eq!(tail, PathBuf::from(r"Documents\My Games\Foo"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn split_at_profile_keeps_the_profile_and_what_is_below_it() {
+        let (prefix, tail) = split_at_profile(Path::new("/home/old/Documents/My Games/Foo")).unwrap();
+        assert_eq!(prefix, PathBuf::from("/home/old"));
+        assert_eq!(tail, PathBuf::from("Documents/My Games/Foo"));
+    }
+
+    #[test]
+    fn split_at_profile_ignores_paths_without_a_profile() {
+        #[cfg(target_os = "windows")]
+        let path = Path::new(r"D:\Games\Saves\Foo");
+        #[cfg(not(target_os = "windows"))]
+        let path = Path::new("/srv/saves/Foo");
+        assert!(split_at_profile(path).is_none());
+    }
+
+    #[test]
+    fn remap_moves_a_path_onto_this_accounts_profile() {
+        #[cfg(target_os = "windows")]
+        let (stored, profile, expected) = (
+            Path::new(r"C:\Users\Old\Documents\My Games\Foo"),
+            Path::new(r"C:\Users\New"),
+            PathBuf::from(r"C:\Users\New\Documents\My Games\Foo"),
+        );
+        #[cfg(not(target_os = "windows"))]
+        let (stored, profile, expected) = (
+            Path::new("/home/old/Documents/My Games/Foo"),
+            Path::new("/home/new"),
+            PathBuf::from("/home/new/Documents/My Games/Foo"),
+        );
+        assert_eq!(remap_onto_profile(stored, profile), Some(expected));
+    }
+
+    #[test]
+    fn verdict_accepts_this_accounts_profile_before_it_exists() {
+        // Same account name on a fresh machine: the standard location is still
+        // the right place to put the saves back.
+        let Some(profile) = current_profile_dir() else {
+            return;
+        };
+        let path = profile.join("Documents").join("__silo_missing_folder__");
+        assert_eq!(
+            stored_path_verdict(&path, &current_profile_name()),
+            StoredSavePath::Usable
+        );
+    }
+
+    #[test]
+    fn verdict_flags_another_account_whose_folder_is_absent() {
+        let Some(profile) = current_profile_dir() else {
+            return;
+        };
+        let Some(parent) = profile.parent() else {
+            return;
+        };
+        let path = parent.join("__silo_no_such_account__").join("Documents").join("Saves");
+        if split_at_profile(&path).is_none() {
+            return; // e.g. HOME=/root: no profile-shaped parent to test against
+        }
+        assert_eq!(
+            stored_path_verdict(&path, &current_profile_name()),
+            StoredSavePath::ForeignProfile("__silo_no_such_account__".to_string())
+        );
+    }
+
+    #[test]
+    fn verdict_accepts_another_account_whose_folder_really_exists() {
+        // A shared profile, or a second account that really is on this machine,
+        // stays usable: only an *absent* profile folder marks a path as having
+        // come from somewhere else.
+        let Some(profile) = current_profile_dir() else {
+            return;
+        };
+        let path = profile.join("Documents").join("__silo_probe__");
+        assert_eq!(stored_path_verdict(&path, "some_other_account"), StoredSavePath::Usable);
+    }
+
+    #[test]
+    fn verdict_rejects_a_relative_path() {
+        assert_eq!(
+            stored_path_verdict(Path::new("Saves/Foo"), "me"),
+            StoredSavePath::NotAbsolute
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn verdict_reports_a_drive_this_machine_does_not_have() {
+        // Pick a letter that is genuinely absent so the assertion means something.
+        let Some(root) = ('D'..='Z')
+            .map(|letter| format!("{letter}:\\"))
+            .find(|root| !Path::new(root).exists())
+        else {
+            return;
+        };
+        let path = PathBuf::from(root).join("Games").join("Saves");
+        assert_eq!(stored_path_verdict(&path, "me"), StoredSavePath::RootUnavailable);
+    }
+
+    /// A minimal `Game`, built through serde so it cannot drift from the struct.
+    fn restore_test_game(name: &str) -> Game {
+        serde_json::from_value(serde_json::json!({ "id": "g1", "name": name }))
+            .expect("a minimal Game should deserialize")
+    }
+
+    /// The current profile and its parent (`C:\Users` or `/home`), when the
+    /// machine reports them.
+    fn profile_and_parent() -> Option<(PathBuf, PathBuf)> {
+        let profile = current_profile_dir()?;
+        let parent = profile.parent()?.to_path_buf();
+        Some((profile, parent))
+    }
+
+    #[test]
+    fn resolve_restore_target_refuses_a_folder_from_another_machine() {
+        // The reported bug: a library imported on a new PC still remembers the old
+        // account's save folder, and a restore used to create that folder and unpack
+        // the saves into a place the game will never read.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_no_such_game__");
+        let game = restore_test_game("__silo_no_such_game__");
+
+        let error = resolve_restore_target(&game, foreign.to_str().unwrap()).unwrap_err();
+        assert!(error.starts_with("Cannot restore yet"), "unexpected error: {error}");
+        assert!(
+            error.contains("__silo_no_such_account__"),
+            "the error should name the foreign account: {error}"
+        );
+        // The whole point: it must not resurrect the other machine's folder tree.
+        assert!(!foreign.exists(), "the foreign save folder must never be created");
+    }
+
+    #[test]
+    fn resolve_restore_target_keeps_a_folder_this_account_owns() {
+        let Some((profile, _parent)) = profile_and_parent() else {
+            return;
+        };
+        let stored = profile.join("Documents").join("__silo_probe__");
+        let game = restore_test_game("__silo_no_such_game__");
+
+        let target = resolve_restore_target(&game, stored.to_str().unwrap())
+            .expect("a folder under this account's profile is usable as-is");
+        assert_eq!(target.path, stored);
+        assert!(!target.rediscovered);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn resolve_restore_target_remaps_onto_this_account_when_the_folder_is_there() {
+        // A path from another account is accepted only when the same layout already
+        // exists here, so the rewrite is evidence rather than a guess. The rewritten
+        // location is this account's Temp folder: the only directory created by this
+        // test lives inside it, and the guard removes it even if an assertion fails.
+        let Some((profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let leaf = format!("silo_remap_probe_{}", std::process::id());
+        let tail = PathBuf::from("AppData").join("Local").join("Temp").join(&leaf);
+        let remapped = profile.join(&tail);
+        let _guard = TempDir(remapped.clone());
+        fs::create_dir_all(&remapped).unwrap();
+
+        let foreign = parent.join("__silo_no_such_account__").join(&tail);
+        let game = restore_test_game("__silo_no_such_game__");
+        let target = resolve_restore_target(&game, foreign.to_str().unwrap()).unwrap();
+
+        assert_eq!(target.path, remapped);
+        assert!(target.rediscovered);
+        assert!(!foreign.exists(), "the foreign save folder must never be created");
+    }
+
+    // ----- relinking a library that came from another PC -----
+
+    /// A `Game` carrying just what the survey reads.
+    fn survey_game(id: &str, name: &str, save_path: Option<&str>) -> Game {
+        let mut value = serde_json::json!({ "id": id, "name": name });
+        if let Some(path) = save_path {
+            value["savePath"] = serde_json::json!(path);
+        }
+        serde_json::from_value(value).expect("a minimal Game should deserialize")
+    }
+
+    /// A path on a volume this machine really does not have mounted, so the
+    /// verdict has to name the drive rather than the folder.
+    fn path_on_a_missing_drive() -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            (b'D'..=b'Z')
+                .map(|letter| format!("{}:\\", letter as char))
+                .find(|root| !Path::new(root).exists())
+                .map(|root| format!("{root}__silo_no_such_drive__\\Saves\\__silo_no_such_game__"))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some("/mnt/__silo_no_such_volume__/Saves/__silo_no_such_game__".to_string())
+        }
+    }
+
+    /// A rooted path on a volume this machine does not have.
+    fn path_on_a_missing_volume() -> &'static str {
+        #[cfg(target_os = "windows")]
+        let path = r"\SiloNoSuchVolume\Saves\__silo_no_such_game__";
+        #[cfg(not(target_os = "windows"))]
+        let path = "/mnt/__silo_no_such_volume__/Saves/__silo_no_such_game__";
+        path
+    }
+
+    #[test]
+    fn survey_has_nothing_to_do_for_a_library_recorded_here() {
+        let Some((profile, _parent)) = profile_and_parent() else {
+            return;
+        };
+        let stored = profile.join("Documents").join("__silo_probe__");
+        let games = vec![
+            survey_game("g1", "Own Folder", Some(stored.to_str().unwrap())),
+            survey_game("g2", "Never Launched", None),
+        ];
+
+        let survey = survey_save_folders_of(&games);
+        assert_eq!(survey.games_with_save_folder, 1, "only g1 records a save folder");
+        assert_eq!(survey.usable, 1);
+        assert!(survey.relinkable.is_empty());
+        assert!(survey.unresolved.is_empty());
+    }
+
+    #[test]
+    fn survey_never_calls_another_accounts_folder_usable() {
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_no_such_game__");
+        let games = vec![survey_game(
+            "g1",
+            "__silo_no_such_game__",
+            Some(foreign.to_str().unwrap()),
+        )];
+
+        let survey = survey_save_folders_of(&games);
+        assert_eq!(
+            survey.usable, 0,
+            "a folder left by another PC must never count as usable"
+        );
+        assert_eq!(survey.games_with_save_folder, 1);
+        let issue = survey
+            .relinkable
+            .first()
+            .or_else(|| survey.unresolved.first())
+            .expect("the game has to be reported one way or the other");
+        assert_eq!(issue.game_id, "g1");
+        assert_eq!(issue.recorded_path, foreign.to_str().unwrap());
+        assert!(!issue.reason.is_empty(), "an issue has to explain itself");
+        assert!(
+            !foreign.exists(),
+            "surveying must never create the other machine's folder"
+        );
+    }
+
+    #[test]
+    fn survey_places_each_game_in_exactly_one_bucket() {
+        let Some((profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let mine = profile.join("Documents").join("__silo_probe__");
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_no_such_game__");
+        let dead = path_on_a_missing_volume();
+        let games = vec![
+            survey_game("g1", "Own Folder", Some(mine.to_str().unwrap())),
+            survey_game("g2", "__silo_no_such_game__", Some(foreign.to_str().unwrap())),
+            survey_game("g3", "__silo_no_such_game__", Some(dead)),
+            survey_game("g4", "Never Launched", None),
+        ];
+
+        let survey = survey_save_folders_of(&games);
+        assert_eq!(survey.games_with_save_folder, 3, "g4 records no save folder at all");
+        assert_eq!(survey.usable, 1, "only the folder under this account works here");
+        assert_eq!(survey.relinkable.len() + survey.unresolved.len(), 2);
+        // A game the survey cannot place has to say so rather than be dropped, and
+        // nothing may be invented for a game that records no folder.
+        assert!(survey
+            .relinkable
+            .iter()
+            .chain(survey.unresolved.iter())
+            .all(|issue| !issue.reason.is_empty()));
+        assert!(survey.relinkable.iter().all(|issue| issue.found_path.is_some()));
+        assert!(survey.unresolved.iter().all(|issue| issue.found_path.is_none()));
+        assert!(!survey.unresolved.iter().any(|issue| issue.game_id == "g4"));
+        assert!(!survey.relinkable.iter().any(|issue| issue.game_id == "g4"));
+        let unplugged = survey
+            .unresolved
+            .iter()
+            .find(|issue| issue.game_id == "g3")
+            .expect("the volume that is not here cannot be resolved");
+        assert_eq!(unplugged.recorded_path, dead);
+    }
+
+    #[test]
+    fn survey_gives_the_same_answer_twice() {
+        let Some((profile, _parent)) = profile_and_parent() else {
+            return;
+        };
+        let mine = profile.join("Documents").join("__silo_probe__");
+        let games = vec![
+            survey_game("g1", "Own Folder", Some(mine.to_str().unwrap())),
+            survey_game("g2", "__silo_no_such_game__", Some(path_on_a_missing_volume())),
+            survey_game("g3", "Never Launched", None),
+        ];
+
+        let first = survey_save_folders_of(&games);
+        let second = survey_save_folders_of(&games);
+        assert_eq!(first.usable, second.usable);
+        assert_eq!(first.games_with_save_folder, second.games_with_save_folder);
+        assert_eq!(first.relinkable.len(), second.relinkable.len());
+        assert_eq!(first.unresolved.len(), second.unresolved.len());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn survey_relinks_onto_this_account_and_then_has_nothing_left_to_do() {
+        let Some((profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let leaf = format!("__silo_survey_probe_{}__", std::process::id());
+        let tail = PathBuf::from("Documents").join(&leaf);
+        let mirrored = profile.join(&tail);
+        let _guard = TempDir(mirrored.clone());
+        fs::create_dir_all(&mirrored).unwrap();
+
+        let foreign = parent.join("__silo_no_such_account__").join(&tail);
+        let mut games = vec![survey_game(
+            "g1",
+            "__silo_no_such_game__",
+            Some(foreign.to_str().unwrap()),
+        )];
+
+        let survey = survey_save_folders_of(&games);
+        assert_eq!(survey.usable, 0);
+        assert_eq!(survey.relinkable.len(), 1, "the mirrored layout only exists here");
+        assert_eq!(survey.relinkable[0].found_path.as_deref(), mirrored.to_str());
+        assert!(survey.unresolved.is_empty());
+        assert!(!foreign.exists(), "the other machine's folder must never be created");
+
+        // Applying the proposal is a fixed point: re-surveying finds nothing left.
+        games[0].save_path = survey.relinkable[0].found_path.clone();
+        let after = survey_save_folders_of(&games);
+        assert_eq!(after.usable, 1);
+        assert!(
+            after.relinkable.is_empty(),
+            "a second survey must have nothing left to do"
+        );
+        assert!(after.unresolved.is_empty());
+    }
+
+    #[test]
+    fn survey_sends_a_game_that_is_not_here_to_the_old_pc_for_its_saves() {
+        // The library came from another PC and this game was never reinstalled:
+        // neither its files nor its saves exist here, so there is nothing to
+        // relink to and the user has to bring the saves across.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let old_pc = parent.join("__silo_no_such_account__");
+        let foreign = old_pc.join("Documents").join("__silo_no_such_game__");
+        let mut game = survey_game("g1", "__silo_no_such_game__", Some(foreign.to_str().unwrap()));
+        game.exe_path = Some(
+            old_pc
+                .join("Games")
+                .join("__silo_no_such_game__.exe")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let survey = survey_save_folders_of(&[game]);
+        assert_eq!(survey.usable, 0);
+        assert_eq!(survey.relinkable.len() + survey.unresolved.len(), 1);
+        let issue = survey
+            .unresolved
+            .first()
+            .or_else(|| survey.relinkable.first())
+            .expect("the game has to be reported");
+        assert!(!issue.install_present, "its executable is not on this machine");
+        assert!(
+            !issue.reason.contains("Launch the game once"),
+            "a game that is not installed here cannot be launched to re-find anything: {}",
+            issue.reason
+        );
+        assert!(
+            issue.reason.contains("other PC"),
+            "the reason has to say where the saves actually are: {}",
+            issue.reason
+        );
+        assert!(!foreign.exists(), "surveying must never create the other PC's folder");
+    }
+
+    #[test]
+    fn survey_tells_a_game_that_is_here_to_launch_itself_once() {
+        // The game is installed here and only its save folder moved, so letting
+        // SaveGuard re-detect it really is the fastest route.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_no_such_game__");
+        let mut game = survey_game("g1", "__silo_no_such_game__", Some(foreign.to_str().unwrap()));
+        game.exe_path = std::env::current_exe()
+            .ok()
+            .map(|exe| exe.to_string_lossy().into_owned());
+
+        let survey = survey_save_folders_of(&[game]);
+        assert_eq!(survey.relinkable.len() + survey.unresolved.len(), 1);
+        let issue = survey
+            .relinkable
+            .first()
+            .or_else(|| survey.unresolved.first())
+            .expect("the game has to be reported");
+        assert!(issue.install_present, "the executable exists on this machine");
+        assert!(
+            issue.reason.contains("Launch the game once"),
+            "the game is here, so launching it is the advice that applies: {}",
+            issue.reason
+        );
+        assert!(
+            !issue.reason.contains("other PC"),
+            "only the folder moved, so the saves are not on another PC: {}",
+            issue.reason
+        );
+    }
+
+    #[test]
+    fn survey_tells_a_game_on_an_unplugged_drive_to_reconnect_it() {
+        // Same "this path does not work here", different cause: the saves are on
+        // a drive that is not mounted, so bringing them from another PC is wrong.
+        let Some((_profile, _parent)) = profile_and_parent() else {
+            return;
+        };
+        let Some(dead) = path_on_a_missing_drive() else {
+            return;
+        };
+        let game = survey_game("g1", "Unplugged", Some(dead.as_str()));
+
+        let survey = survey_save_folders_of(&[game]);
+        let issue = survey
+            .relinkable
+            .first()
+            .or_else(|| survey.unresolved.first())
+            .expect("the game has to be reported");
+        assert!(!issue.install_present, "its executable is on the missing drive");
+        assert!(
+            issue.reason.contains("Reconnect the drive"),
+            "the advice has to match the cause: {}",
+            issue.reason
+        );
+        assert!(
+            !issue.reason.contains("other PC"),
+            "the saves are on that drive, not another PC: {}",
+            issue.reason
+        );
+    }
+
+    #[test]
+    fn redetection_never_keys_on_the_old_machines_install_folder() {
+        // Found on this machine while building this: the old PC's install folder
+        // was `…\Games\`, so the key "games" matched unrelated folders here —
+        // Epic Games, Rockstar Games, AppData\Roaming\game-save-manager — and a
+        // game that is not on this machine at all was about to be relinked onto
+        // one of them.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let mut gone = survey_game("g1", "Cyberpunk 2077", None);
+        gone.exe_path = Some(
+            parent
+                .join("__silo_no_such_account__")
+                .join("Games")
+                .join("Cyberpunk2077.exe")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let keys = redetect_name_keys(&gone);
+        assert_eq!(keys, vec!["Cyberpunk 2077".to_string()]);
+        assert!(
+            !keys.iter().any(|key| crate::saveguard::normalize_key(key) == "games"),
+            "the old machine's folder name must never be matched here: {keys:?}"
+        );
+
+        // Once the executable is on this machine, its own folder is evidence too.
+        let dir = TempDir::new("redetect");
+        let exe = dir.path().join("Cyberpunk2077.exe");
+        fs::write(&exe, b"").unwrap();
+        let mut here = survey_game("g1", "Cyberpunk 2077", None);
+        here.exe_path = Some(exe.to_string_lossy().into_owned());
+        let keys = redetect_name_keys(&here);
+        assert!(keys.iter().any(|key| key == "cyberpunk2077"), "{keys:?}");
+        assert!(keys.len() > 2, "this machine's own layout is usable evidence: {keys:?}");
+    }
+
+    #[test]
+    fn survey_serializes_the_field_names_the_renderer_reads() {
+        // The modal reads camelCase keys straight off the IPC payload, and a
+        // rename would quietly make every game look "not installed here".
+        let survey = SaveFolderSurvey {
+            games_with_save_folder: 1,
+            usable: 0,
+            relinkable: Vec::new(),
+            unresolved: vec![SaveFolderIssue {
+                game_id: "g1".to_string(),
+                game_name: "Game".to_string(),
+                recorded_path: "C:/old/saves".to_string(),
+                found_path: None,
+                confidence: Some(MatchConfidence::Guess),
+                confidence_score: Some(MatchConfidence::Guess.score()),
+                install_present: false,
+                reason: "because".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(&survey).expect("the survey must serialize");
+        assert_eq!(json["gamesWithSaveFolder"], 1);
+        let issue = &json["unresolved"][0];
+        assert_eq!(issue["gameId"], "g1");
+        assert_eq!(issue["gameName"], "Game");
+        assert_eq!(issue["recordedPath"], "C:/old/saves");
+        assert_eq!(issue["installPresent"], false);
+        assert!(
+            issue.get("foundPath").is_none(),
+            "a game with nowhere to point must not carry a found path"
+        );
+        // The category is used for safety policy; the numeric score is for UI
+        // explanation only.
+        assert_eq!(issue["confidence"], "guess");
+        assert_eq!(issue["confidenceScore"], 25);
+    }
+
+    #[test]
+    fn a_confirmed_match_serializes_its_confidence() {
+        let survey = SaveFolderSurvey {
+            games_with_save_folder: 1,
+            usable: 0,
+            relinkable: vec![SaveFolderIssue {
+                game_id: "g1".to_string(),
+                game_name: "Game".to_string(),
+                recorded_path: "C:/old/saves".to_string(),
+                found_path: Some("C:/new/saves".to_string()),
+                confidence: Some(MatchConfidence::Confirmed),
+                confidence_score: Some(MatchConfidence::Confirmed.score()),
+                install_present: true,
+                reason: "because".to_string(),
+            }],
+            unresolved: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&survey).expect("the survey must serialize");
+        assert_eq!(json["relinkable"][0]["confidence"], "confirmed");
+        assert_eq!(json["relinkable"][0]["confidenceScore"], 90);
+    }
+
+    /// A recorded path and this machine's profile, in the flavour of the host.
+    fn recorded_and_profile(leaf: &str) -> (String, &'static str) {
+        #[cfg(target_os = "windows")]
+        let (recorded, profile) = (format!(r"C:\Users\Old\Documents\My Games\{leaf}"), r"C:\Users\New");
+        #[cfg(not(target_os = "windows"))]
+        let (recorded, profile) = (format!("/home/old/Documents/My Games/{leaf}"), "/home/new");
+        (recorded, profile)
+    }
+
+    /// The same recorded path written by the other operating system.
+    fn recorded_on_the_other_os(leaf: &str) -> String {
+        #[cfg(target_os = "windows")]
+        let recorded = format!("/home/old/Documents/My Games/{leaf}");
+        #[cfg(not(target_os = "windows"))]
+        let recorded = format!(r"C:\Users\Old\Documents\My Games\{leaf}");
+        recorded
+    }
+
+    #[test]
+    fn import_destination_translates_this_machines_own_layout_only() {
+        let (recorded, profile) = recorded_and_profile("X");
+        let translated = import_destination(&recorded, Some(Path::new(profile)));
+        assert_eq!(
+            translated.as_deref(),
+            remap_onto_profile(Path::new(&recorded), Path::new(profile)).as_deref(),
+            "the destination is the recorded path on this account"
+        );
+
+        // A path from the other OS only *looks* like a profile path to this
+        // parser; translating it would invent somewhere the game never looks.
+        assert_eq!(
+            import_destination(&recorded_on_the_other_os("X"), Some(Path::new(profile))),
+            None
+        );
+        // Nothing to map a path without a profile in it onto, and no profile at
+        // all means no destination either.
+        #[cfg(target_os = "windows")]
+        let no_profile = r"E:\Saves\X";
+        #[cfg(not(target_os = "windows"))]
+        let no_profile = "/mnt/old/Saves/X";
+        assert_eq!(import_destination(no_profile, Some(Path::new(profile))), None);
+        assert_eq!(import_destination(&recorded, None), None);
+    }
+
+    #[test]
+    fn save_import_plan_takes_the_folder_the_user_picked() {
+        let profile = TempDir::new("import_profile");
+        let source = TempDir::new("import_source");
+        let (recorded, _) = recorded_and_profile("__silo_no_such_game__");
+        let found = source.path().join("__silo_no_such_game__");
+        fs::create_dir_all(&found).unwrap();
+        fs::write(found.join("save.dat"), b"progress").unwrap();
+        let games = vec![survey_game("g1", "__silo_no_such_game__", Some(&recorded))];
+
+        let plan = save_import_plan(&games, Some(profile.path()), Some(source.path()), &HashMap::new());
+
+        assert_eq!(plan.ready.len(), 1, "still missing: {:?}", plan.still_missing);
+        assert!(plan.still_missing.is_empty());
+        let item = &plan.ready[0];
+        assert_eq!(item.source, "folder");
+        assert_eq!(Path::new(&item.source_path), found);
+        assert_eq!(item.recorded_path, recorded);
+        let target = profile
+            .path()
+            .join("Documents")
+            .join("My Games")
+            .join("__silo_no_such_game__");
+        assert_eq!(Path::new(&item.target_path), target);
+        assert!(!target.exists(), "planning must not create the folder it proposes");
+    }
+
+    #[test]
+    fn save_import_plan_falls_back_to_the_games_own_backup() {
+        let profile = TempDir::new("import_profile");
+        let source = TempDir::new("import_source");
+        let backups = TempDir::new("import_archives");
+        let archive = backups.path().join("manual_20240101_120000.zip");
+        fs::write(&archive, b"not a real zip, only the plan looks at it").unwrap();
+        let (recorded, _) = recorded_and_profile("__silo_no_such_game__");
+        let games = vec![survey_game("g1", "__silo_no_such_game__", Some(&recorded))];
+        let mut newest_backup = HashMap::new();
+        newest_backup.insert("g1".to_string(), archive.clone());
+
+        // A picked folder that holds nothing for this game: the library's own
+        // backup is what is left.
+        let plan = save_import_plan(&games, Some(profile.path()), Some(source.path()), &newest_backup);
+        assert_eq!(plan.ready.len(), 1, "still missing: {:?}", plan.still_missing);
+        assert_eq!(plan.ready[0].source, "backup");
+        assert_eq!(Path::new(&plan.ready[0].source_path), archive);
+
+        // With neither a folder nor a backup there is nothing to bring across,
+        // and the reason has to say so.
+        let bare = save_import_plan(&games, Some(profile.path()), Some(source.path()), &HashMap::new());
+        assert!(bare.ready.is_empty());
+        assert_eq!(bare.still_missing.len(), 1);
+        assert!(
+            bare.still_missing[0]
+                .reason
+                .contains("No saves for it were found in the folder you picked"),
+            "{}",
+            bare.still_missing[0].reason
+        );
+
+        // Once the picked folder does hold this game, it is the live copy and
+        // the older archive is not what gets restored over it.
+        fs::create_dir_all(source.path().join("__silo_no_such_game__")).unwrap();
+        fs::write(source.path().join("__silo_no_such_game__/save.dat"), b"now").unwrap();
+        let live = save_import_plan(&games, Some(profile.path()), Some(source.path()), &newest_backup);
+        assert_eq!(live.ready.len(), 1, "still missing: {:?}", live.still_missing);
+        assert_eq!(live.ready[0].source, "folder");
+        assert_eq!(
+            Path::new(&live.ready[0].source_path),
+            source.path().join("__silo_no_such_game__")
+        );
+    }
+
+    #[test]
+    fn save_import_plan_leaves_a_folder_that_already_holds_saves() {
+        let profile = TempDir::new("import_profile");
+        let (recorded, _) = recorded_and_profile("__silo_no_such_game__");
+        let games = vec![survey_game("g1", "__silo_no_such_game__", Some(&recorded))];
+        // The destination is already there with saves in it, which may well be
+        // newer than anything being brought across.
+        let target = profile
+            .path()
+            .join("Documents")
+            .join("My Games")
+            .join("__silo_no_such_game__");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("newer.dat"), b"played here since").unwrap();
+
+        let plan = save_import_plan(&games, Some(profile.path()), None, &HashMap::new());
+        assert!(plan.ready.is_empty(), "nothing may be planned over it");
+        assert_eq!(plan.still_missing.len(), 1);
+        assert!(
+            plan.still_missing[0].reason.contains("already holds saves"),
+            "{}",
+            plan.still_missing[0].reason
+        );
+    }
+
+    #[test]
+    fn save_import_plan_says_when_it_has_no_destination() {
+        let profile = TempDir::new("import_profile");
+        let source = TempDir::new("import_source");
+        let leaf = "__silo_no_such_game__";
+        let cross_os = recorded_on_the_other_os(leaf);
+        // The saves are right there in the picked folder, but there is nowhere on
+        // this machine that a path from the other OS translates to.
+        let found = source.path().join(leaf);
+        fs::create_dir_all(&found).unwrap();
+        fs::write(found.join("save.dat"), b"progress").unwrap();
+        let games = vec![survey_game("g1", leaf, Some(&cross_os))];
+
+        let plan = save_import_plan(&games, Some(profile.path()), Some(source.path()), &HashMap::new());
+        assert!(plan.ready.is_empty());
+        assert_eq!(plan.still_missing.len(), 1);
+        assert!(
+            plan.still_missing[0]
+                .reason
+                .contains("has nowhere on this machine to put its saves"),
+            "{}",
+            plan.still_missing[0].reason
+        );
+        assert_eq!(plan.still_missing[0].game_id, "g1");
+    }
+
+    #[test]
+    fn save_import_plan_skips_the_games_this_machine_already_handles() {
+        let profile = TempDir::new("import_profile");
+        let source = TempDir::new("import_source");
+        let (recorded, _) = recorded_and_profile("__silo_missing__");
+        // A folder under this account, so this game is already handled here.
+        let mine = profile.path().join("__silo_usable__");
+        fs::create_dir_all(&mine).unwrap();
+        fs::write(mine.join("save.dat"), b"played here").unwrap();
+        let games = vec![
+            survey_game("g1", "__silo_usable__", Some(mine.to_str().unwrap())),
+            // Nothing recorded to work from: the relink check's business, and it
+            // would find the same folder this plan can only guess at.
+            survey_game("g2", "__silo_never_launched__", None),
+            survey_game("g3", "__silo_missing__", Some(&recorded)),
+        ];
+
+        let plan = save_import_plan(&games, Some(profile.path()), Some(source.path()), &HashMap::new());
+
+        assert!(plan.ready.is_empty(), "nothing can be brought across");
+        let missing: Vec<&str> = plan.still_missing.iter().map(|issue| issue.game_id.as_str()).collect();
+        assert_eq!(
+            missing,
+            vec!["g3"],
+            "only the game with nowhere to point is part of the import"
+        );
+    }
+
+    #[test]
+    fn bringing_a_folder_across_lands_it_in_place_and_leaves_nothing_behind() {
+        let parent = TempDir::new("import_parent");
+        let backups = TempDir::new("import_backups");
+        let from = TempDir::new("import_from");
+        fs::create_dir_all(from.path().join("nested")).unwrap();
+        fs::write(from.path().join("save.dat"), b"progress").unwrap();
+        fs::write(from.path().join("nested").join("slot2.dat"), b"more").unwrap();
+        let destination = parent.path().join("Saves");
+
+        stage_and_swap(&destination, backups.path(), "import", |staging| {
+            copy_tree(from.path(), staging)
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(destination.join("save.dat")).unwrap(), b"progress");
+        assert_eq!(fs::read(destination.join("nested").join("slot2.dat")).unwrap(), b"more");
+        let leftovers: Vec<String> = fs::read_dir(parent.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("_silo_import"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging was left behind: {leftovers:?}");
+
+        // A folder with nothing in it is not saves, and saying so beats pointing
+        // the game at an empty folder.
+        let empty = TempDir::new("import_empty");
+        let error = copy_tree(empty.path(), &parent.path().join("Nowhere")).unwrap_err();
+        assert!(error.contains("holds no files"), "{error}");
+    }
+
+    #[test]
+    fn replacing_a_save_folder_keeps_what_was_there() {
+        let parent = TempDir::new("swap_parent");
+        let backups = TempDir::new("swap_backups");
+        let fresh = TempDir::new("swap_fresh");
+        fs::write(fresh.path().join("new.dat"), b"newer progress").unwrap();
+        let destination = parent.path().join("Saves");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("old.dat"), b"older progress").unwrap();
+
+        stage_and_swap(&destination, backups.path(), "import", |staging| {
+            copy_tree(fresh.path(), staging)
+        })
+        .unwrap();
+
+        assert!(destination.join("new.dat").exists());
+        assert!(!destination.join("old.dat").exists());
+        let snapshots: Vec<String> = fs::read_dir(backups.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(snapshots.len(), 1, "the replaced saves are kept: {snapshots:?}");
+        assert!(snapshots[0].contains("Before%20import"), "{snapshots:?}");
+        let extracted = TempDir::new("swap_extract");
+        unzip_file(&backups.path().join(&snapshots[0]), extracted.path()).unwrap();
+        assert_eq!(fs::read(extracted.path().join("old.dat")).unwrap(), b"older progress");
+    }
+
+    #[test]
+    fn a_backup_named_with_a_time_outranks_one_without() {
+        let dated = backup_recency_key("manual_20240101_120000_Slot%201.zip", None);
+        let later = backup_recency_key("auto_20240301_090000.zip", None);
+        let undated = backup_recency_key(
+            "random_thing.zip",
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(9_999)),
+        );
+        // A name carrying a time is keyed by it; one carrying nothing usable is
+        // keyed by the file's own time, in a form that still compares in order.
+        assert_eq!(dated, (1, "2024-01-01 12:00:00".to_string()));
+        assert_eq!(undated, (0, "00000000000009999000".to_string()));
+
+        assert!(later > dated, "the later time in the name wins");
+        assert!(dated > undated, "a name with no usable time never outranks a dated one");
+        // Not even when the file itself was written long after the dated backup
+        // was made: that is exactly what the Backup Manager's plain string sort
+        // gets wrong.
+        let written_lately = backup_recency_key(
+            "random_thing.zip",
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000)),
+        );
+        assert!(dated > written_lately, "the dated name is still the newer one");
+        let older = backup_recency_key("random_thing.zip", Some(std::time::UNIX_EPOCH));
+        assert!(undated > older, "two undated names still compare by file time");
+    }
+
+    #[test]
+    fn import_plan_serializes_the_field_names_the_renderer_reads() {
+        let plan = SaveImportPlan {
+            ready: vec![SaveImportItem {
+                game_id: "g1".to_string(),
+                game_name: "Game".to_string(),
+                source: "folder".to_string(),
+                source_path: "E:/Old/Game".to_string(),
+                target_path: "C:/Users/New/Documents/My Games/Game".to_string(),
+                recorded_path: "C:/Users/Old/Documents/My Games/Game".to_string(),
+            }],
+            still_missing: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&plan).expect("the plan must serialize");
+        let item = &json["ready"][0];
+        assert_eq!(item["gameId"], "g1");
+        assert_eq!(item["gameName"], "Game");
+        assert_eq!(item["source"], "folder");
+        assert_eq!(item["sourcePath"], "E:/Old/Game");
+        assert_eq!(item["targetPath"], "C:/Users/New/Documents/My Games/Game");
+        assert_eq!(item["recordedPath"], "C:/Users/Old/Documents/My Games/Game");
+        assert!(json["stillMissing"].is_array(), "{json}");
+    }
+
+    #[test]
+    fn a_path_from_the_other_operating_system_is_named_as_such() {
+        // One machine cannot run the other's path code, so the host is named
+        // explicitly here and both directions are checked from either side.
+        assert_eq!(
+            foreign_os_shape(r"C:\Users\Old\Documents\My Games\X", OsFamily::Unix),
+            Some(OsFamily::Windows)
+        );
+        assert_eq!(
+            foreign_os_shape(r"\\OLDPC\Saves\X", OsFamily::Unix),
+            Some(OsFamily::Windows)
+        );
+        assert_eq!(
+            foreign_os_shape(r"Documents\My Games\X", OsFamily::Unix),
+            Some(OsFamily::Windows)
+        );
+        assert_eq!(
+            foreign_os_shape("C:/Users/Old/Documents/My Games/X", OsFamily::Unix),
+            Some(OsFamily::Windows),
+            "a Windows path written with forward slashes is still Windows"
+        );
+        assert_eq!(
+            foreign_os_shape("/home/old/.local/share/X", OsFamily::Unix),
+            None,
+            "a path this OS could have written itself is not foreign"
+        );
+        assert_eq!(
+            foreign_os_shape("/home/old/.local/share/X", OsFamily::Windows),
+            Some(OsFamily::Unix)
+        );
+        assert_eq!(foreign_os_shape(r"C:\Users\Old\Documents\X", OsFamily::Windows), None);
+        assert_eq!(
+            foreign_os_shape(r"\SiloNoSuchVolume\Saves\X", OsFamily::Windows),
+            None,
+            "rooted without a drive is this machine's own bad path, not another OS"
+        );
+        assert_eq!(
+            foreign_os_shape("//server/share/X", OsFamily::Windows),
+            None,
+            "a POSIX path that starts with two slashes is still POSIX"
+        );
+    }
+
+    #[test]
+    fn verdict_names_the_other_os_before_it_calls_a_path_relative() {
+        // Without the OS check both of these land in `NotAbsolute`, which says
+        // nothing about why they can never work here.
+        assert_eq!(
+            stored_path_verdict_of(Path::new(r"C:\Users\Old\Documents\My Games\X"), "me", OsFamily::Unix),
+            StoredSavePath::ForeignOs(OsFamily::Windows)
+        );
+        assert_eq!(
+            stored_path_verdict_of(Path::new("/home/old/.local/share/X"), "me", OsFamily::Windows),
+            StoredSavePath::ForeignOs(OsFamily::Unix)
+        );
+        // A genuinely relative path stays relative, whichever host reads it.
+        assert_eq!(
+            stored_path_verdict_of(Path::new("Saves/Foo"), "me", OsFamily::Unix),
+            StoredSavePath::NotAbsolute
+        );
+    }
+
+    #[test]
+    fn windows_tails_drop_the_drive_and_the_old_user() {
+        assert_eq!(
+            windows_path_tail(r"C:\Users\Old\Documents\My Games\X"),
+            Some(PathBuf::from("Documents").join("My Games").join("X"))
+        );
+        assert_eq!(
+            windows_path_tail(r"C:\Games\Saves\X"),
+            Some(PathBuf::from("Games").join("Saves").join("X"))
+        );
+        assert_eq!(
+            windows_path_tail(r"C:\Users\Old"),
+            None,
+            "the profile directory itself is not a save folder"
+        );
+        assert_eq!(windows_path_tail(r"C:\"), None);
+    }
+
+    #[test]
+    fn wine_prefix_lookup_maps_a_windows_tree_onto_a_prefix() {
+        // A Windows move onto Linux: the same tree, one level inside the prefix.
+        let drive_c = TempDir::new("wine_drive_c");
+        let saves = drive_c
+            .path()
+            .join("users")
+            .join("steamuser")
+            .join("Documents")
+            .join("My Games")
+            .join("Cyberpunk 2077");
+        fs::create_dir_all(&saves).unwrap();
+        let prefixes = [WinePrefix {
+            drive_c: drive_c.path().to_path_buf(),
+            app_id: Some("1091500".to_string()),
+        }];
+        let recorded = r"C:\Users\Old\Documents\My Games\Cyberpunk 2077";
+
+        // The prefix in question is the one Steam names after the app id in the
+        // recorded path, so the folder being there settles it.
+        assert_eq!(
+            find_in_wine_prefixes(&prefixes, recorded, Some("1091500")),
+            Some((saves.clone(), MatchConfidence::Confirmed)),
+            "the game's own prefix copy of the same tree is the folder to relink to"
+        );
+        // Asked without the identity, the very same folder is only an existence
+        // match: any other game's prefix could have held it just as well, which is
+        // why the relink refuses to act on it.
+        assert_eq!(
+            find_in_wine_prefixes(&prefixes, recorded, None),
+            Some((saves.clone(), MatchConfidence::Likely))
+        );
+        assert_eq!(
+            find_in_wine_prefixes(&prefixes, recorded, Some("292030")),
+            Some((saves.clone(), MatchConfidence::Likely)),
+            "the folder is there, but not in the prefix that belongs to this game"
+        );
+        assert_eq!(
+            find_in_wine_prefixes(
+                &prefixes,
+                r"C:\Users\Old\Documents\My Games\Other Game",
+                Some("1091500")
+            ),
+            None,
+            "a folder the prefix does not have must not be invented"
+        );
+        assert_eq!(
+            find_in_wine_prefixes(&[], recorded, Some("1091500")),
+            None,
+            "with no prefix on the machine there is nothing to map onto"
+        );
+    }
+
+    #[test]
+    fn restore_resolves_a_windows_folder_inside_a_prefix_on_this_machine() {
+        // Windows → Linux: the saves are already here, one level inside the
+        // game's prefix, so a restore has to use them rather than the recorded
+        // path or a guess by name.
+        let drive_c = TempDir::new("wine_restore");
+        let saves = drive_c
+            .path()
+            .join("users")
+            .join("steamuser")
+            .join("Documents")
+            .join("My Games")
+            .join("__silo_no_such_game__");
+        fs::create_dir_all(&saves).unwrap();
+        // A prefix with no Steam identity: the game's own prefix this may well be,
+        // but nothing here says so.
+        let machine = MachinePaths {
+            prefixes: vec![WinePrefix {
+                drive_c: drive_c.path().to_path_buf(),
+                app_id: None,
+            }],
+            steamapps: Vec::new(),
+            search_dirs: Vec::new(),
+        };
+        let stored = r"C:\Users\Old\Documents\My Games\__silo_no_such_game__";
+        let game = restore_test_game("__silo_no_such_game__");
+
+        let target = resolve_restore_target_with(&game, stored, &machine)
+            .expect("the prefix holds the folder, so the restore can resolve");
+        assert_eq!(target.path, saves);
+        assert!(target.rediscovered, "the recorded path is not the one in use");
+        assert_eq!(
+            target.confidence,
+            MatchConfidence::Likely,
+            "the folder is really here, but nothing ties the prefix to this game"
+        );
+        assert!(
+            !target.confidence.is_enough_for_a_relink(),
+            "an existence check is not evidence enough to rewrite a save path"
+        );
+
+        // With no prefix at all there is nothing on this machine to use, and the
+        // refusal has to say so rather than pick a folder at random.
+        let bare = MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: Vec::new(),
+        };
+        let missed = resolve_restore_target_with(&game, stored, &bare)
+            .expect_err("nothing here matches, so the restore must refuse");
+        assert!(missed.starts_with("Cannot restore yet"), "{missed}");
+    }
+
+    #[test]
+    fn proton_prefixes_are_found_where_steam_and_wine_put_them() {
+        // Only prefixes that are really on the machine count, so the known
+        // layouts are listed and everything missing is skipped.
+        let home = TempDir::new("wine_home");
+        let data = home.path().join(".local/share");
+        let steam_drive_c = data
+            .join("Steam/steamapps/compatdata")
+            .join("1091500")
+            .join("pfx/drive_c");
+        fs::create_dir_all(&steam_drive_c).unwrap();
+        let flatpak_drive_c = home
+            .path()
+            .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata")
+            .join("292030")
+            .join("pfx/drive_c");
+        fs::create_dir_all(&flatpak_drive_c).unwrap();
+        let wine_drive_c = home.path().join(".wine/drive_c");
+        fs::create_dir_all(&wine_drive_c).unwrap();
+        // A compatdata directory Steam made but Proton has not used yet.
+        fs::create_dir_all(data.join("Steam/steamapps/compatdata/292030")).unwrap();
+
+        let prefixes = wine_prefixes_in(home.path(), &data);
+        let steam = WinePrefix {
+            drive_c: steam_drive_c.clone(),
+            app_id: Some("1091500".to_string()),
+        };
+        let flatpak = WinePrefix {
+            drive_c: flatpak_drive_c.clone(),
+            app_id: Some("292030".to_string()),
+        };
+        assert!(prefixes.contains(&steam), "the Steam prefix: {prefixes:?}");
+        assert!(prefixes.contains(&flatpak), "the Flatpak one: {prefixes:?}");
+        assert!(
+            prefixes.contains(&WinePrefix {
+                drive_c: wine_drive_c.clone(),
+                app_id: None
+            }),
+            "and the plain Wine prefix, which belongs to no single game: {prefixes:?}"
+        );
+        assert_eq!(
+            prefixes.len(),
+            3,
+            "a compatdata directory without a prefix is not one: {prefixes:?}"
+        );
+
+        // Discovery feeds the relink: the prefix the app id names is where a
+        // Windows save folder recorded under Documents turns up on this machine,
+        // and that identity is what makes the match evidence.
+        let saves = steam_drive_c
+            .join("users")
+            .join("steamuser")
+            .join("Documents")
+            .join("My Games")
+            .join("Cyberpunk 2077");
+        fs::create_dir_all(&saves).unwrap();
+        assert_eq!(
+            find_in_wine_prefixes(
+                &prefixes,
+                r"C:\Users\Old\Documents\My Games\Cyberpunk 2077",
+                Some("1091500")
+            ),
+            Some((saves, MatchConfidence::Confirmed))
+        );
+
+        // A compatdata directory whose name is not an app id still holds a prefix
+        // worth looking in, but it names no game, so it can never be one's own.
+        let odd = data
+            .join("Steam")
+            .join("steamapps")
+            .join("compatdata")
+            .join("not-an-app-id")
+            .join("pfx")
+            .join("drive_c");
+        fs::create_dir_all(&odd).unwrap();
+        let with_odd = wine_prefixes_in(home.path(), &data);
+        assert!(
+            with_odd.contains(&WinePrefix {
+                drive_c: odd,
+                app_id: None
+            }),
+            "the prefix is still found: {with_odd:?}"
+        );
+
+        // Nothing to find means nothing to look in.
+        let empty = TempDir::new("wine_home_empty");
+        assert!(wine_prefixes_in(empty.path(), &empty.path().join("data")).is_empty());
+    }
+
+    #[test]
+    fn survey_explains_a_save_folder_recorded_on_the_other_operating_system() {
+        // A PC move between Windows and Linux/macOS: the shape of the path gives
+        // the cause away, and the advice has to match the direction it came from.
+        let Some((_profile, _parent)) = profile_and_parent() else {
+            return;
+        };
+        // Each direction gets its own advice: a Windows folder on Linux may well
+        // be sitting in a prefix already, while a Unix folder on Windows is not
+        // here at all.
+        #[cfg(target_os = "windows")]
+        let (recorded, other_os, advice) = (
+            "/home/old/.local/share/__silo_no_such_game__",
+            "a Linux or macOS machine",
+            "Install the game here and launch it once",
+        );
+        #[cfg(not(target_os = "windows"))]
+        let (recorded, other_os, advice) = (
+            r"C:\Users\Old\Documents\My Games\__silo_no_such_game__",
+            "a Windows machine",
+            "through Proton or Wine its saves live inside",
+        );
+
+        let game = survey_game("g1", "__silo_no_such_game__", Some(recorded));
+        let survey = survey_save_folders_of(&[game]);
+        assert_eq!(survey.usable, 0, "the other system's path is never usable here");
+        assert_eq!(survey.relinkable.len() + survey.unresolved.len(), 1);
+        let issue = survey
+            .relinkable
+            .first()
+            .or_else(|| survey.unresolved.first())
+            .expect("the game has to be reported");
+        assert!(
+            issue.reason.contains(other_os),
+            "the reason has to name the system it was recorded on: {}",
+            issue.reason
+        );
+        assert!(
+            !issue.reason.contains("does not exist on this machine"),
+            "the cause is the other OS, not a missing folder: {}",
+            issue.reason
+        );
+        assert!(
+            issue.reason.contains(advice),
+            "the advice has to fit the direction it came from: {}",
+            issue.reason
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn survey_never_relinks_a_game_onto_another_games_save_folder() {
+        let Some((profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let leaf = format!("__silo_shared_probe_{}__", std::process::id());
+        let tail = PathBuf::from("Documents").join(&leaf);
+
+        // One game saves here for real, in a folder that exists.
+        let mine = profile.join(&tail);
+        let _guard = TempDir(mine.clone());
+        fs::create_dir_all(&mine).unwrap();
+        let owner = survey_game("g1", "__silo_shared_probe__", Some(mine.to_str().unwrap()));
+
+        // A second game arrived from another PC under the same name, and matching
+        // by name alone lands on exactly that folder.
+        let foreign = parent.join("__silo_no_such_account__").join(&tail);
+        let mut guest = survey_game("g2", "__silo_shared_probe__", Some(foreign.to_str().unwrap()));
+        guest.exe_path = Some(
+            parent
+                .join("__silo_no_such_account__")
+                .join("Games")
+                .join("guest.exe")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let survey = survey_save_folders_of(&[owner, guest]);
+        assert_eq!(survey.usable, 1, "only the game that owns the folder is usable here");
+        assert!(
+            survey.relinkable.is_empty(),
+            "the guest must not be pointed at the owner's saves: {:?}",
+            survey.relinkable
+        );
+        let issue = survey
+            .unresolved
+            .first()
+            .expect("the guest has to be reported instead of silently dropped");
+        assert_eq!(issue.game_id, "g2");
+        assert!(
+            issue.reason.contains("__silo_shared_probe__"),
+            "the reason has to name the game that owns the folder: {}",
+            issue.reason
+        );
+        assert!(!issue.install_present);
+    }
+
+    // ----- how strongly a save folder was matched -----
+
+    #[test]
+    fn a_folder_matched_only_by_name_is_the_weakest_confidence() {
+        // The game was never reinstalled here and its recorded folder is gone, so
+        // the only thing on this machine that looks like its save folder shares its
+        // name. That is a guess rather than evidence, and it has to be labelled as
+        // one, because the relink decides what to do from the label.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let search = TempDir::new("name_only_search");
+        let candidate = search.path().join("__silo_name_only_game__");
+        fs::create_dir_all(&candidate).unwrap();
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_name_only_game__");
+        let game = restore_test_game("__silo_name_only_game__");
+
+        let machine = MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: vec![search.path().to_path_buf()],
+        };
+        let target = resolve_restore_target_with(&game, foreign.to_str().unwrap(), &machine)
+            .expect("a folder named after the game is still a candidate");
+
+        assert_eq!(target.path, candidate);
+        assert!(target.rediscovered, "the recorded path is not the one in use");
+        assert_eq!(
+            target.confidence,
+            MatchConfidence::Guess,
+            "nothing but the folder's name ties it to this game"
+        );
+        assert!(
+            !target.confidence.is_enough_for_a_relink(),
+            "the relink must not act on a name"
+        );
+        // The bar itself: a layout that translated onto a folder that exists, or a
+        // prefix that really holds it, is enough; a name is not.
+        assert!(MatchConfidence::Confirmed.is_enough_for_a_relink());
+        assert!(MatchConfidence::Exact.is_enough_for_a_relink());
+    }
+
+    #[test]
+    fn the_survey_reports_a_name_only_match_instead_of_proposing_it() {
+        // The same thing end to end: the game gets one issue, in the bucket the
+        // user has to act on, naming the folder SILO refused to claim.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let search = TempDir::new("name_only_survey");
+        let candidate = search.path().join("__silo_name_only_game__");
+        fs::create_dir_all(&candidate).unwrap();
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_name_only_game__");
+        let games = vec![survey_game(
+            "g1",
+            "__silo_name_only_game__",
+            Some(foreign.to_str().unwrap()),
+        )];
+
+        let machine = MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: vec![search.path().to_path_buf()],
+        };
+        let survey = survey_save_folders_with(&games, &machine);
+
+        assert_eq!(survey.games_with_save_folder, 1);
+        assert_eq!(survey.usable, 0);
+        assert!(
+            survey.relinkable.is_empty(),
+            "a name-only match must never be proposed for the relink: {:?}",
+            survey.relinkable
+        );
+        let issue = survey
+            .unresolved
+            .first()
+            .expect("the game still has to be reported rather than dropped");
+        assert_eq!(issue.confidence, Some(MatchConfidence::Guess));
+        assert!(issue.found_path.is_none(), "and must not claim the folder");
+        assert!(
+            issue.reason.contains("__silo_name_only_game__"),
+            "the reason has to name the folder that only matched by name: {}",
+            issue.reason
+        );
+        assert!(
+            issue.reason.contains("set in Edit"),
+            "and say what the user can do about it: {}",
+            issue.reason
+        );
+        assert!(
+            !foreign.exists(),
+            "surveying must never create the other machine's folder"
+        );
+    }
+
+    #[test]
+    fn a_proposed_relink_without_evidence_is_never_written() {
+        // The survey never proposes one of these, but the rule is enforced where
+        // the library is actually written, so even a proposal that somehow carried
+        // a name-only match could not reach a game's save path.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_name_only_game__");
+        let mut games = vec![survey_game(
+            "g1",
+            "__silo_name_only_game__",
+            Some(foreign.to_str().unwrap()),
+        )];
+        let proposal = |found: Option<&str>, confidence: Option<MatchConfidence>| SaveFolderIssue {
+            game_id: "g1".to_string(),
+            game_name: "__silo_name_only_game__".to_string(),
+            recorded_path: foreign.to_string_lossy().into_owned(),
+            found_path: found.map(str::to_string),
+            confidence,
+            confidence_score: confidence.map(MatchConfidence::score),
+            install_present: false,
+            reason: String::new(),
+        };
+
+        let guessed = proposal(
+            Some("C:/somewhere/__silo_name_only_game__"),
+            Some(MatchConfidence::Guess),
+        );
+        assert!(
+            apply_relink_proposals(&mut games, &[guessed]).is_empty(),
+            "a name-only match must not be applied"
+        );
+        assert_eq!(games[0].save_path.as_deref(), Some(foreign.to_str().unwrap()));
+        assert_eq!(games[0].save_path_source, None);
+
+        // One that says nothing about how it matched is refused the same way, and a
+        // proposal for a game this library does not have changes nothing either.
+        let blind = proposal(Some("C:/somewhere/__silo_name_only_game__"), None);
+        let unknown = proposal(
+            Some("C:/here/__silo_name_only_game__"),
+            Some(MatchConfidence::Confirmed),
+        );
+        assert!(apply_relink_proposals(&mut games, &[blind]).is_empty());
+        assert_eq!(games[0].save_path_source, None);
+
+        // The evidence-backed proposal still lands, and reports itself as auto.
+        let confirmed = proposal(
+            Some("C:/here/__silo_name_only_game__"),
+            Some(MatchConfidence::Confirmed),
+        );
+        let payload = apply_relink_proposals(&mut games, &[confirmed]);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0]["savePath"], "C:/here/__silo_name_only_game__");
+        assert_eq!(payload[0]["savePathSource"], "auto");
+        assert_eq!(games[0].save_path.as_deref(), Some("C:/here/__silo_name_only_game__"));
+        assert_eq!(games[0].save_path_source.as_deref(), Some("auto"));
+
+        let mut other_library: Vec<Game> = Vec::new();
+        assert!(
+            apply_relink_proposals(&mut other_library, &[unknown]).is_empty(),
+            "a proposal for a game that is not in the library changes nothing"
+        );
+    }
+
+    // ----- which prefix belongs to which game -----
+
+    #[test]
+    fn steam_identity_comes_from_the_paths_steam_writes() {
+        // The two shapes that name a game's Steam identity: its own prefix, and the
+        // install directory Steam keeps the same on every platform.
+        assert_eq!(
+            steam_app_id_in("/home/me/.steam/steam/steamapps/compatdata/1091500/pfx/drive_c"),
+            Some("1091500".to_string())
+        );
+        assert_eq!(
+            steam_app_id_in(r"C:\Program Files (x86)\Steam\steamapps\compatdata\1091500\pfx\drive_c"),
+            Some("1091500".to_string())
+        );
+        assert_eq!(
+            steam_app_id_in("/home/me/.steam/steam/steamapps/compatdata/not-an-app-id/pfx/drive_c"),
+            None,
+            "only a directory Steam names after an app id is an identity"
+        );
+        assert_eq!(steam_app_id_in("/home/me/Documents/Saves"), None);
+
+        assert_eq!(
+            steam_install_dir_in(r"C:\Program Files (x86)\Steam\steamapps\common\Cyberpunk 2077\bin\x64\game.exe"),
+            Some("Cyberpunk 2077".to_string())
+        );
+        assert_eq!(
+            steam_install_dir_in("/home/me/.steam/steam/steamapps/common/Cyberpunk 2077/bin/game"),
+            Some("Cyberpunk 2077".to_string()),
+            "the install directory keeps its name on Linux, which is the whole point"
+        );
+        assert_eq!(
+            steam_install_dir_in(r"C:\Games\Cyberpunk2077\bin\game.exe"),
+            None,
+            "a layout that is not Steam's must not name an app id"
+        );
+        assert_eq!(steam_install_dir_in(r"C:\Program Files (x86)\Steam\steamapps"), None);
+    }
+
+    /// The Valve key-value text an `appmanifest_<appid>.acf` holds, with the two
+    /// values SILO reads out of it and one it ignores.
+    fn app_manifest(app_id: &str, install_dir: &str) -> String {
+        format!(
+            "\"AppState\"\n{{\n\t\"appid\"\t\t\"{app_id}\"\n\t\"installdir\"\t\t\"{install_dir}\"\n\t\"StateFlags\"\t\t\"4\"\n}}\n"
+        )
+    }
+
+    /// The `drive_c` of the prefix Steam keeps for one app id, as the discovery
+    /// code spells it: joined one component at a time, so the test's expectations
+    /// are the same string the survey reports on every platform.
+    fn compatdata_prefix(steamapps: &Path, app_id: &str) -> PathBuf {
+        steamapps.join("compatdata").join(app_id).join("pfx").join("drive_c")
+    }
+
+    /// A Steam install under `home` with two Proton prefixes whose user trees hold
+    /// a folder of the same name: the one belonging to app id 1091500, whose
+    /// manifest names `leaf` as its install directory, and a decoy under another
+    /// game's app id that an existence check alone could not tell apart.
+    fn steam_home_with_two_prefixes(home: &Path, leaf: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let steamapps = home.join(".steam/steam/steamapps");
+        let tail = ["users", "steamuser", "Documents", "My Games", leaf];
+        let own = tail
+            .iter()
+            .fold(compatdata_prefix(&steamapps, "1091500"), |path, part| path.join(part));
+        let decoy = tail
+            .iter()
+            .fold(compatdata_prefix(&steamapps, "292030"), |path, part| path.join(part));
+        fs::create_dir_all(&own).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        fs::write(steamapps.join("appmanifest_1091500.acf"), app_manifest("1091500", leaf)).unwrap();
+        fs::write(
+            steamapps.join("appmanifest_292030.acf"),
+            app_manifest("292030", "The Witcher 3"),
+        )
+        .unwrap();
+        (steamapps, own, decoy)
+    }
+
+    #[test]
+    fn the_games_own_proton_prefix_is_named_by_its_steam_app_id() {
+        // Windows → Linux with the game really installed here. Steam keeps both the
+        // install directory name and the app id, so the path the library recorded on
+        // the old machine says which prefix belongs to this game — which turns the
+        // lookup into evidence instead of a search of every prefix that happens to
+        // hold a folder with that name.
+        let home = TempDir::new("steam_app_id");
+        let (steamapps, own, decoy) = steam_home_with_two_prefixes(home.path(), "__silo_prefix_probe__");
+        let machine = machine_paths_in(home.path(), &home.path().join(".local/share"), Vec::new());
+        let stored = r"C:\Users\Old\Documents\My Games\__silo_prefix_probe__";
+        let mut game = restore_test_game("__silo_prefix_probe__");
+        game.exe_path =
+            Some(r"C:\Program Files (x86)\Steam\steamapps\common\__silo_prefix_probe__\game.exe".to_string());
+
+        assert_eq!(
+            steam_app_id_of(&game, stored, &machine.steamapps),
+            Some("1091500".to_string()),
+            "the install directory in the recorded path names the app id"
+        );
+        let target =
+            resolve_restore_target_with(&game, stored, &machine).expect("the game's own prefix holds the folder");
+        assert_eq!(
+            target.path, own,
+            "the game's own prefix, not the other one that also has such a folder"
+        );
+        assert_eq!(target.confidence, MatchConfidence::Confirmed);
+        assert!(target.confidence.is_enough_for_a_relink());
+        assert!(decoy.is_dir(), "the prefix that is not this game's was left alone");
+        assert!(steamapps.join("appmanifest_1091500.acf").is_file());
+    }
+
+    #[test]
+    fn the_survey_relinks_into_the_prefix_steams_app_id_names() {
+        // The same decision as the relink sees it: a library from another PC, the
+        // game installed here, and two prefixes holding a folder of the same name.
+        // The app id is what tells them apart, so the game is offered the right one
+        // rather than merely reported.
+        let home = TempDir::new("steam_survey");
+        let (_steamapps, own, decoy) = steam_home_with_two_prefixes(home.path(), "__silo_prefix_probe__");
+        let machine = machine_paths_in(home.path(), &home.path().join(".local/share"), Vec::new());
+        let mut game = survey_game(
+            "g1",
+            "__silo_prefix_probe__",
+            Some(r"C:\Users\OldPC\Documents\My Games\__silo_prefix_probe__"),
+        );
+        game.exe_path =
+            Some(r"C:\Program Files (x86)\Steam\steamapps\common\__silo_prefix_probe__\game.exe".to_string());
+
+        let survey = survey_save_folders_with(&[game], &machine);
+        assert_eq!(
+            survey.relinkable.len(),
+            1,
+            "the app id is evidence: {:?}",
+            survey.unresolved
+        );
+        let issue = &survey.relinkable[0];
+        assert_eq!(issue.found_path.as_deref(), own.to_str());
+        assert_eq!(issue.confidence, Some(MatchConfidence::Confirmed));
+        assert!(decoy.is_dir());
+    }
+
+    #[test]
+    fn the_survey_reports_a_prefix_match_it_cannot_tie_to_the_game() {
+        // The folder really is inside a prefix on this machine, but nothing says
+        // that prefix is this game's, so the relink reports it instead of applying
+        // it — and the reason has to say that the prefix is what is missing.
+        let drive_c = TempDir::new("prefix_survey");
+        let found = drive_c
+            .path()
+            .join("users/steamuser/Documents/My Games/__silo_prefix_probe__");
+        fs::create_dir_all(&found).unwrap();
+        let machine = MachinePaths {
+            prefixes: vec![WinePrefix {
+                drive_c: drive_c.path().to_path_buf(),
+                app_id: None,
+            }],
+            steamapps: Vec::new(),
+            search_dirs: Vec::new(),
+        };
+        let games = vec![survey_game(
+            "g1",
+            "__silo_prefix_probe__",
+            Some(r"C:\Users\OldPC\Documents\My Games\__silo_prefix_probe__"),
+        )];
+
+        let survey = survey_save_folders_with(&games, &machine);
+        assert!(
+            survey.relinkable.is_empty(),
+            "no identity, so no relink: {:?}",
+            survey.relinkable
+        );
+        let issue = survey.unresolved.first().expect("the game still has to be reported");
+        assert_eq!(issue.confidence, Some(MatchConfidence::Likely));
+        assert!(issue.found_path.is_none(), "and must not claim the folder");
+        assert!(
+            issue.reason.contains("prefix"),
+            "the reason has to say it was a prefix match: {}",
+            issue.reason
+        );
+        assert!(issue.reason.contains("__silo_prefix_probe__"), "{}", issue.reason);
+        assert!(issue.reason.contains("set in Edit"), "{}", issue.reason);
+    }
+
+    #[test]
+    fn the_edit_proposal_hands_back_the_name_only_match_the_bulk_relink_refuses() {
+        // The two views of the same game. The relink never acts on a name, so the
+        // survey reports it; but the user asked about this one game from Edit and
+        // will see the path before saving, so the candidate is offered — with the
+        // same weakness recorded, so the dialog can say why it needs checking.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let search = TempDir::new("proposal_name_only");
+        let candidate = search.path().join("__silo_proposal_probe__");
+        fs::create_dir_all(&candidate).unwrap();
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_proposal_probe__");
+        let game = survey_game("g1", "__silo_proposal_probe__", Some(foreign.to_str().unwrap()));
+        let machine = MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: vec![search.path().to_path_buf()],
+        };
+
+        let survey = survey_save_folders_with(std::slice::from_ref(&game), &machine);
+        assert!(survey.relinkable.is_empty(), "the bulk relink still refuses a name");
+
+        let proposal = save_folder_proposal(&game, &machine).expect("the one game is offered the candidate");
+        assert_eq!(proposal.found_path.as_deref(), candidate.to_str());
+        assert_eq!(
+            proposal.confidence,
+            Some(MatchConfidence::Guess),
+            "the weakness is carried through, not hidden"
+        );
+        assert!(
+            !proposal.confidence.is_some_and(MatchConfidence::is_enough_for_a_relink),
+            "and it is still not enough evidence for the automatic relink"
+        );
+        assert_eq!(proposal.recorded_path, foreign.to_string_lossy());
+        assert!(!foreign.exists(), "proposing must not create the other machine's folder");
+    }
+
+    #[test]
+    fn the_edit_proposal_is_silent_when_there_is_nothing_to_change() {
+        // Two kinds of nothing: a folder that already works here (so there is
+        // nothing to propose), and a game with no save folder recorded at all.
+        let machine = MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: Vec::new(),
+        };
+        let Some(profile) = current_profile_dir() else {
+            return;
+        };
+        let current = profile.join("__silo_proposal_usable__");
+        fs::create_dir_all(&current).unwrap();
+        let usable = survey_game("g1", "__silo_proposal_usable__", Some(current.to_str().unwrap()));
+        assert!(
+            save_folder_proposal(&usable, &machine).is_none(),
+            "a folder that already works here is not proposed for a change"
+        );
+        fs::remove_dir_all(&current).ok();
+
+        let empty = survey_game("g2", "__silo_proposal_empty__", None);
+        assert!(
+            save_folder_proposal(&empty, &machine).is_none(),
+            "a game with no save folder recorded has nothing to resolve"
+        );
+    }
+
+    #[test]
+    fn the_edit_proposal_still_reports_a_game_it_cannot_place() {
+        // Nothing on this machine matches, but the user is still told why, so Edit
+        // can say what to do instead of silently finding nothing.
+        let Some((_profile, parent)) = profile_and_parent() else {
+            return;
+        };
+        let foreign = parent
+            .join("__silo_no_such_account__")
+            .join("Documents")
+            .join("__silo_proposal_absent__");
+        let game = survey_game("g1", "__silo_proposal_absent__", Some(foreign.to_str().unwrap()));
+        let machine = MachinePaths {
+            prefixes: Vec::new(),
+            steamapps: Vec::new(),
+            search_dirs: Vec::new(),
+        };
+
+        let proposal = save_folder_proposal(&game, &machine).expect("the user still gets an answer");
+        assert!(proposal.found_path.is_none(), "there is no candidate to offer");
+        assert!(proposal.confidence.is_none());
+        assert!(
+            proposal.reason.contains("__silo_proposal_absent__"),
+            "the reason names the recorded folder: {}",
+            proposal.reason
+        );
+        assert!(
+            proposal.reason.contains("different PC") || proposal.reason.contains("does not exist"),
+            "and says why it does not work here: {}",
+            proposal.reason
+        );
+    }
 }
+

@@ -1,0 +1,161 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   SILO — tokens.css
+   THE single source of truth for fonts, color, surface, radius, spacing,
+   type scale and motion. Change the theme here, nowhere else.
+
+   Design direction: flat, OLED-black, editorial, minimal cyberpunk.
+   No glassmorphism: no backdrop-filter, no frosted panels, no soft glows.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Self-hosted fonts (Tauri bundles the app: zero CDN dependency) ───────── */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap; src: url('assets/fonts/inter-400.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 500; font-display: swap; src: url('assets/fonts/inter-500.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 600; font-display: swap; src: url('assets/fonts/inter-600.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/inter-700.woff2') format('woff2'); }
+
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('assets/fonts/jetbrains-mono-500.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/jetbrains-mono-700.woff2') format('woff2'); }
+
+/* Title-style picker fonts — kept available offline so the feature still works */
+@font-face { font-family: 'Roboto'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/roboto-700.woff2') format('woff2'); }
+@font-face { font-family: 'Roboto'; font-style: normal; font-weight: 900; font-display: swap; src: url('assets/fonts/roboto-900.woff2') format('woff2'); }
+@font-face { font-family: 'Outfit'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/outfit-700.woff2') format('woff2'); }
+@font-face { font-family: 'Oswald'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/oswald-700.woff2') format('woff2'); }
+@font-face { font-family: 'Cinzel'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/cinzel-700.woff2') format('woff2'); }
+@font-face { font-family: 'Bebas Neue'; font-style: normal; font-weight: 400; font-display: swap; src: url('assets/fonts/bebas-neue-400.woff2') format('woff2'); }
+@font-face { font-family: 'Press Start 2P'; font-style: normal; font-weight: 400; font-display: swap; src: url('assets/fonts/press-start-2p-400.woff2') format('woff2'); }
+@font-face { font-family: 'Playfair Display'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/playfair-display-700.woff2') format('woff2'); }
+@font-face { font-family: 'Playfair Display'; font-style: italic; font-weight: 700; font-display: swap; src: url('assets/fonts/playfair-display-700-italic.woff2') format('woff2'); }
+
+/* Bodoni Moda — the Persona menu's display face. Both are the official
+   Google Fonts variable files (wght 400–900, opsz 6–96); the licence ships
+   beside them in assets/fonts/bodoni-moda-OFL.txt. */
+@font-face {
+  font-family: 'Bodoni Moda';
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+  src: url('assets/fonts/bodoni-moda-variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Bodoni Moda';
+  font-style: italic;
+  font-weight: 400 900;
+  font-display: swap;
+  src: url('assets/fonts/bodoni-moda-italic-variable.woff2') format('woff2');
+}
+
+/* Geist — the category menu's typeface. The official variable files from
+   github.com/vercel/geist-font, bundled with the app so nothing is fetched
+   at runtime. The SIL Open Font License ships beside them in
+   assets/fonts/geist-LICENSE.txt. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('assets/fonts/geist-variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('assets/fonts/geist-mono-variable.woff2') format('woff2');
+}
+
+:root {
+  /* ── Surfaces: flat OLED black, depth via 1px hairlines only ── */
+  --bg:                 #000000;   /* app base */
+  --surface-0:          #000000;   /* modal / panel body */
+  --surface-1:          #0A0A0A;   /* raised: cards, toast, popover */
+  --surface-2:          #111111;   /* inputs, nested rows */
+  --surface-3:          #191919;   /* hover / pressed */
+  --scrim:              rgba(0, 0, 0, 0.60);  /* flat dimmer behind modals */
+  --danger-surface:     rgba(248, 113, 113, 0.10);
+
+  /* ── Hairlines ── */
+  --hairline:           rgba(255, 255, 255, 0.08);
+  --hairline-strong:    rgba(255, 255, 255, 0.14);
+
+  /* ── Text ── */
+  --text:               #EDEDED;
+  --text-muted:         rgba(255, 255, 255, 0.55);
+  --text-faint:         rgba(255, 255, 255, 0.42);
+  --text-dim:           rgba(255, 255, 255, 0.30);
+  --danger:             #f87171;
+  --warn:               #fbbf24;
+
+  /* ── Dynamic accent — app.js publishes the wallpaper-derived color here.
+     Neutral fallback when a wallpaper has no dominant color. --green names are
+     legacy aliases so every existing accent consumer keeps working. ── */
+  --accent:             #e8e8ee;
+  --accent-strong:      #c9c9d2;
+  --accent-soft:        rgba(232, 232, 238, 0.14);
+  --accent-ink:         #000000;  /* text/icon color ON accent (JS sets by luminance) */
+  --green:              var(--accent);
+  --green-dark:         var(--accent-strong);
+  --red:                var(--danger);
+
+  /* ── Radii ── */
+  --r-panel:            12px;
+  --r-card:             10px;
+  --r-input:            8px;
+  --r-sm:               6px;
+  --r-pill:             999px;
+
+  /* ── Spacing: 8px grid ── */
+  --sp-1:               4px;
+  --sp-2:               8px;
+  --sp-3:               12px;
+  --sp-4:               16px;
+  --sp-5:               24px;
+  --sp-6:               32px;
+  --sp-7:               48px;
+  --modal-pad:          24px;
+
+  /* ── Type ── */
+  --font-ui:            'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono:          'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --fs-label:           11px;   /* mono, uppercase, tracked */
+  --fs-label-sm:        10px;
+  --fs-body:            13px;
+  --fs-body-lg:         14px;
+  --fs-title:           17px;   /* modal titles, weight 600 */
+  --fs-stat:            27px;   /* main-screen stats, weight 500 */
+  --lh-stat:            1.2;
+  --ls-label:           0.12em;
+
+  /* ── Motion: subtle only ── */
+  --dur-fast:           150ms;
+  --dur:                180ms;
+  --dur-slow:           200ms;
+  --ease-out:           cubic-bezier(0.22, 1, 0.36, 1);
+  --slide:              8px;   /* the only translate distance for reveals */
+
+  /* ── Geometry ── */
+  --titlebar-h:         36px;
+  --sidebar-w:          300px;
+
+  /* ── Text shadow for values that sit directly on wallpaper ── */
+  --ink-shadow:         0 1px 12px rgba(0, 0, 0, 0.60);
+}
+
+/* Accent-on-accent text automatically picks black or white for >=4.5:1
+   contrast; app.js overrides --accent-ink per wallpaper. */
+.accent-fill {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
+/* Reduced motion: kill reveals and pulses, keep hierarchy. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) *,
+  body:not(.force-motion) *::before,
+  body:not(.force-motion) *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

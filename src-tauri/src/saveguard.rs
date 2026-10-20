@@ -467,7 +467,7 @@ fn folder_touched_since(dir: &Path, since: std::time::SystemTime) -> bool {
                 .metadata()
                 .ok()
                 .and_then(|m| m.modified().ok())
-                .map_or(false, |modified| modified >= since)
+                .is_some_and(|modified| modified >= since)
         })
 }
 
@@ -477,6 +477,7 @@ fn folder_touched_since(dir: &Path, since: std::time::SystemTime) -> bool {
 /// 2. otherwise the first folder that names the game at all — a game that
 ///    saved nothing yet still owns that folder, and it is where the next save
 ///    will land.
+///
 /// `exclude` (the game's install folder) is never adopted: backing up an
 /// install because it happens to live under a watched location would be much
 /// worse than finding no saves at all.
@@ -499,7 +500,7 @@ pub fn find_save_root_by_scan(
             .flatten();
         for entry in walk {
             let path = entry.path();
-            if exclude.map_or(false, |skip| path == skip || path.starts_with(skip)) {
+            if exclude.is_some_and(|skip| path == skip || path.starts_with(skip)) {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
@@ -602,7 +603,7 @@ mod tests {
             let base = PathBuf::from(r"C:\Users\Test\Saved Games");
             let path = PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3\saves\game0");
             assert_eq!(
-                get_save_root(&path, &[base.clone()]),
+                get_save_root(&path, std::slice::from_ref(&base)),
                 Some(PathBuf::from(r"C:\Users\Test\Saved Games\Witcher 3"))
             );
         }
@@ -611,7 +612,7 @@ mod tests {
             let base = PathBuf::from("/home/test/Saved Games");
             let path = PathBuf::from("/home/test/Saved Games/Witcher 3/saves/game0");
             assert_eq!(
-                get_save_root(&path, &[base.clone()]),
+                get_save_root(&path, std::slice::from_ref(&base)),
                 Some(PathBuf::from("/home/test/Saved Games/Witcher 3"))
             );
         }
@@ -685,7 +686,7 @@ mod tests {
             PathBuf::from("/home/test/Saved Games/CD Projekt Red/Cyberpunk 2077/ManualSave-1/sav.dat"),
             PathBuf::from("/home/test/Saved Games/CD Projekt Red/Cyberpunk 2077"),
         );
-        assert_eq!(get_save_root_for(&path, &[base.clone()], &keys), Some(expected.clone()));
+        assert_eq!(get_save_root_for(&path, std::slice::from_ref(&base), &keys), Some(expected.clone()));
         assert_eq!(save_root_by_name(&path, &[base], &keys), Some(expected));
     }
 
@@ -704,7 +705,7 @@ mod tests {
             PathBuf::from("/home/test/Documents/SomeUnknownGame/saves/slot1.dat"),
             PathBuf::from("/home/test/Documents/SomeUnknownGame"),
         );
-        assert_eq!(get_save_root_for(&path, &[base.clone()], &keys), Some(expected));
+        assert_eq!(get_save_root_for(&path, std::slice::from_ref(&base), &keys), Some(expected));
         // …but the lock-free fallback refuses to claim an unrelated game's write.
         assert_eq!(save_root_by_name(&path, &[base], &keys), None);
     }
@@ -776,7 +777,7 @@ mod tests {
 
         let keys = vec!["Cyberpunk 2077".to_string()];
         let long_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
-        assert_eq!(find_save_root_by_scan(&[base.clone()], &keys, long_ago, None), Some(game_folder.clone()));
+        assert_eq!(find_save_root_by_scan(std::slice::from_ref(&base), &keys, long_ago, None), Some(game_folder.clone()));
         // A future session start means "nothing was touched since" -> still returns
         // the named folder, because it is where the next save will land.
         let future = std::time::SystemTime::now() + Duration::from_secs(3_600);
@@ -810,7 +811,7 @@ mod tests {
 
         let keys = vec!["Cyberpunk 2077".to_string()];
         let long_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
-        assert_eq!(find_save_root_by_scan(&[base.clone()], &keys, long_ago, Some(&install)), None);
+        assert_eq!(find_save_root_by_scan(std::slice::from_ref(&base), &keys, long_ago, Some(&install)), None);
         assert_eq!(find_save_root_by_scan(&[base], &keys, long_ago, None), Some(install));
     }
 

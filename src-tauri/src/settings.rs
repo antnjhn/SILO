@@ -49,10 +49,10 @@ fn write_json_atomic(data_path: &Path, json_str: &str) -> Result<(), String> {
   }
 
   if data_path.exists() {
-    let _ = fs::copy(&data_path, &bak_path);
+        let _ = fs::copy(data_path, &bak_path);
   }
 
-  fs::rename(&tmp_path, &data_path).map_err(|e| e.to_string())?;
+    fs::rename(&tmp_path, data_path).map_err(|e| e.to_string())?;
   Ok(())
 }
 

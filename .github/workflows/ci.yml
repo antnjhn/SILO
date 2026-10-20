@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.platform }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev pkg-config libglib2.0-dev libgtk-3-dev libxdo-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+      - name: npm install
+        run: npm ci
+
+      - name: cargo fmt --check (advisory, does not fail the build)
+        continue-on-error: true
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build smoke test
+        working-directory: src-tauri
+        run: cargo build
+
+      - name: cargo audit (advisory, does not fail the build)
+        continue-on-error: true
+        working-directory: src-tauri
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: npm audit (advisory, does not fail the build)
+        continue-on-error: true
+        run: npm audit
+
+  renderer-modules:
+    name: renderer ES module check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check imports/exports
+        run: python3 .tools/check-modules.py
+
+  rust-diff-churn:
+    name: Rust diff is not mostly reformatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Pull requests only: a push has no base to compare against, and the point is
+    # to stop a reformatting sweep before it reaches main. Because the tree is not
+    # rustfmt-clean, `cargo fmt --check` cannot catch this.
+    # A deliberate sweep can opt out with the `formatting-sweep` label or an
+    # [allow-format-churn] marker in the PR body.
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.body, '[allow-format-churn]') &&
+      !contains(github.event.pull_request.labels.*.name, 'formatting-sweep')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base revision's blobs have to be present to format both sides.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check for mechanical reformatting
+        run: |
+          set -o pipefail
+          # actions/checkout hands us GitHub's merge commit, whose first parent is
+          # the base tip. HEAD^1..HEAD is exactly the PR diff, needs no extra
+          # fetches, and so also works for pull requests opened from forks.
+          base="$(git rev-parse --verify -q 'HEAD^1' || true)"
+          if [ -z "$base" ]; then
+            echo "::warning::no merge commit to compare against; churn check skipped"
+            base="$(git rev-parse --verify -q 'HEAD^' || true)"
+          fi
+          python3 .tools/check-format-churn.py \
+            --base "$base" --head HEAD --annotate 2>&1 | tee churn.md
+
+      - name: Add the report to the job summary
+        if: always()
+        run: |
+          if [ -f churn.md ]; then
+            cat churn.md >> "$GITHUB_STEP_SUMMARY"
+          fi

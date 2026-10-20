@@ -33,3 +33,15 @@ icon_squared.png
 .freebuff/ 
 *.key
 *.key
+
+# Local scratch and build output
+.uitest/
+.uitest-new/
+.uitest-repair/
+target-review/
+specs/
+halo/
+halo-dfd/
+.opencode/
+__pycache__/
+*.pyc

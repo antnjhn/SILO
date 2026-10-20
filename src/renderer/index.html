@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SILO</title>
   <!-- No CDN: fonts are self-hosted and bundled (see tokens.css) -->
+  <link rel="preload" as="font" type="font/woff2" href="assets/fonts/geist-variable.woff2" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="assets/fonts/geist-mono-variable.woff2" crossorigin />
   <link rel="stylesheet" href="tokens.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -22,6 +24,27 @@
     </div>
   </div>
 
+  <!-- Contextual filter panel and the active-filter chips. They are fixed
+       overlays, so they live outside #app and can stack above the
+       navigation's gradient. -->
+  <div id="active-filters" class="active-filters" hidden aria-label="Active filters"></div>
+  <section id="filter-panel" class="hidden" aria-label="Library filters">
+    <header><strong>FILTER</strong><button type="button" id="btn-clear-filters">CLEAR ALL</button></header>
+    <div class="filter-group">
+      <span class="filter-group-label">INSTALLATION</span>
+      <div id="install-filter" class="persona-segments" role="group" aria-label="Installation status">
+        <button type="button" data-install-filter="all" class="active" aria-pressed="true">ALL</button>
+        <button type="button" data-install-filter="installed" aria-pressed="false">INSTALLED</button>
+        <button type="button" data-install-filter="uninstalled" aria-pressed="false">UNINSTALLED</button>
+      </div>
+    </div>
+    <div class="filter-group">
+      <span class="filter-group-label">TAGS <span id="tag-filter-count">0</span></span>
+      <div id="tag-filter-options"></div>
+      <p class="filter-hint" id="filter-hint">Multiple tags match ANY selected tag.</p>
+    </div>
+  </section>
+
   <!-- Dual wallpapers for crossfade -->
   <div id="bg-wallpaper-1"></div>
   <div id="bg-wallpaper-2"></div>
@@ -30,299 +53,434 @@
   <!-- Toast container -->
   <div id="toast-container"></div>
 
-  <!-- Main layout -->
-  <div id="app">
-
-    <!-- CATEGORIES DOTS -->
-    <div id="categories-panel">
-      <!-- Category dots are built dynamically by app.js: ALL GAMES, RECENTLY PLAYED, FAVORITES, + one per tag -->
-    </div>
-
-    <!-- CATEGORY OPTION WHEEL (LEFT past the first game / C / LB) -->
-    <div id="category-wheel-overlay" class="hidden">
-      <div class="wheel-backdrop"></div>
-      <div id="category-wheel">
-        <div class="wheel-hint">CATEGORY</div>
-        <div id="wheel-list"></div>
-        <div class="wheel-hint wheel-hint-bottom">&uarr;&darr; NAVIGATE&nbsp;&nbsp;&middot;&nbsp;&nbsp;ENTER SELECT&nbsp;&nbsp;&middot;&nbsp;&nbsp;ESC CANCEL</div>
+  <!-- TOP NAVIGATION
+       Hidden by default so the game artwork owns the screen. It is revealed
+       by moving the pointer near the top edge, by an upward controller
+       input, or by an explicit shortcut, and hides itself again after a
+       short idle. The buttons keep their original ids, so the existing
+       handlers still drive them. -->
+  <nav id="topnav" aria-label="Primary">
+    <div class="topnav-gradient" aria-hidden="true"></div>
+    <div class="topnav-row">
+      <div class="topnav-items">
+        <button id="nav-home" class="topnav-item" type="button" aria-label="Home" title="Home">
+          <span class="topnav-icon" aria-hidden="true" style="--nav-icon: url('assets/icons/nav-home.png')"></span>
+        </button>
+        <span class="topnav-divider" aria-hidden="true"></span>
+        <button id="btn-stats" class="topnav-item" type="button" aria-label="Statistics" title="Statistics">
+          <span class="topnav-icon" aria-hidden="true" style="--nav-icon: url('assets/icons/nav-stats.png')"></span>
+        </button>
+        <span class="topnav-divider" aria-hidden="true"></span>
+        <button id="btn-add-game" class="topnav-item" type="button" aria-label="Import" title="Import (Y)">
+          <span class="topnav-icon" aria-hidden="true" style="--nav-icon: url('assets/icons/nav-import.png')"></span>
+        </button>
+        <span class="topnav-divider" aria-hidden="true"></span>
+        <button id="btn-settings" class="topnav-item" type="button" aria-label="Settings" title="Settings">
+          <span class="topnav-icon" aria-hidden="true" style="--nav-icon: url('assets/icons/nav-settings.png')"></span>
+        </button>
       </div>
-    </div>
 
-    <!-- LEFT: Centered logo sidebar -->
-    <div id="game-list-panel">
-      <div class="sidebar-toolbar">
-        <button id="btn-settings" class="tool-btn" title="Settings / Backup">⚙</button>
-        <button id="btn-stats" class="tool-btn" title="Statistics"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 15v-3"/><path d="M12 15V7"/><path d="M17 15v-5"/></svg></button>
-        <button id="btn-search-toggle" class="tool-btn" title="Search ( / )"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></button>
-        <input type="text" id="search-input" placeholder="Search your library" autocomplete="off" />
-        <button id="btn-add-game" class="tool-btn" title="Add Game (Y)">+</button>
-      </div>
-      <div id="filter-bar">
-        <select id="sort-select">
+      <div class="topnav-tools">
+        <span id="library-view-title" class="topnav-section">ALL GAMES</span>
+        <span id="library-result-count" class="topnav-count" aria-live="polite"></span>
+        <select id="sort-select" class="topnav-tool" title="Sort library">
           <option value="name">Name A-Z</option>
           <option value="playtime">Most Played</option>
           <option value="recent">Recently Played</option>
         </select>
-      </div>
-      <div id="game-list-viewport">
-        <div id="game-list"></div>
+        <!-- The Filter control and the Search field are out of the visible
+             interface for now. They are kept in the document so the existing
+             behaviour survives, but nothing shows them. -->
+        <button id="btn-filter-toggle" class="topnav-tool" type="button" title="Filters" aria-expanded="false" aria-controls="filter-panel" hidden>FILTER<span id="filter-badge" class="filter-badge" hidden>0</span></button>
+        <input type="text" id="search-input" class="topnav-search" placeholder="Search your library" autocomplete="off" hidden />
       </div>
     </div>
+  </nav>
 
-    <!-- DETAILS PANEL -->
-    <div id="details-panel" class="hidden">
-      <div id="details-inner">
-        <div id="details-logo-area">
-          <img id="details-logo-img" src="" alt="" />
-          <div id="details-logo-caption" aria-hidden="true"></div>
+  <!-- Main layout -->
+  <div id="app">
+    <div id="page-host">
+    <!-- PAGE: home - the game library and the selected game -->
+    <section class="page page-home" id="page-home" data-page="home" aria-label="Library" tabindex="-1">
+      <!-- Category dots: the compact navigation strip. The full curved-rail
+           menu opens over it (LEFT from the rail / C / LB). -->
+      <div id="categories-panel"></div>
+
+      <!-- CATEGORY NAVIGATION — the original curved rail, set in Bodoni Moda -->
+      <div id="category-wheel-overlay" class="hidden">
+        <div class="wheel-backdrop"></div>
+        <div class="wheel-heading">CATEGORY</div>
+        <div id="category-wheel">
+          <div id="wheel-list"></div>
+          <div class="wheel-hint wheel-hint-bottom">&uarr;&darr; NAVIGATE&nbsp;&nbsp;&middot;&nbsp;&nbsp;ENTER SELECT&nbsp;&nbsp;&middot;&nbsp;&nbsp;ESC CANCEL</div>
         </div>
-        <div id="details-content">
-          <div id="details-game-name-fallback"></div>
+      </div>
 
-          <div id="details-stats">
-            <div class="stat-block stat-hover" id="stat-block-playtime" data-stat="playtime">
-              <div class="stat-value" id="stat-playtime">0h 0m</div>
-              <div class="stat-label">PLAYTIME</div>
-            </div>
-            <div class="stat-block stat-hover" id="stat-block-sessions" data-stat="sessions">
-              <div class="stat-value" id="stat-sessions">0</div>
-              <div class="stat-label">SESSIONS</div>
-            </div>
-            <div class="stat-block">
-              <div class="stat-value" id="stat-last-played">Never</div>
-              <div class="stat-label">LAST PLAYED</div>
-            </div>
-            <div class="stat-block">
-              <select id="details-status-select" class="glass-select status-select">
-                <option value="Backlog">Backlog</option>
-                <option value="Playing">Playing</option>
-                <option value="On Hold">On Hold</option>
-                <option value="Completed">Completed</option>
-                <option value="Dropped">Dropped</option>
-              </select>
-              <div class="stat-label">STAGE</div>
-            </div>
-            <!-- Not-installed status: only shown when exe is missing / drive offline -->
-            <div class="stat-block" id="stat-block-status" style="display:none;">
-              <div class="stat-value stat-install-value-wrap">
-                <span class="stat-install-dot" aria-hidden="true"></span>
-                <span class="stat-install-value">Not installed</span>
-                <button type="button" class="stat-locate-btn">Locate…</button>
-              </div>
-              <div class="stat-label">STATUS</div>
-            </div>
+        <!-- LEFT: Centered logo sidebar -->
+        <div id="game-list-panel">
+        <div id="game-list-viewport">
+          <div id="game-list"></div>
+        </div>
+      </div>
+
+      <!-- DETAILS PANEL -->
+      <div id="details-panel" class="hidden">
+        <div id="details-inner">
+          <div id="details-logo-area">
+            <img id="details-logo-img" src="" alt="" />
+            <div id="details-logo-caption" aria-hidden="true"></div>
           </div>
+          <div id="details-content">
+            <div id="details-game-name-fallback"></div>
 
-          <div id="save-path-status"></div>
+            <div id="details-stats">
+              <div class="stat-block stat-hover" id="stat-block-playtime" data-stat="playtime" role="button" tabindex="0" aria-expanded="false" aria-label="Playtime — show the playtime preview" aria-describedby="stat-popover">
+                <div class="stat-value" id="stat-playtime">0h 0m</div>
+                <div class="stat-label">PLAYTIME</div>
+              </div>
+              <div class="stat-block stat-hover" id="stat-block-sessions" data-stat="sessions" role="button" tabindex="0" aria-expanded="false" aria-label="Sessions — show the sessions preview" aria-describedby="stat-popover">
+                <div class="stat-value" id="stat-sessions">0</div>
+                <div class="stat-label">SESSIONS</div>
+              </div>
+              <div class="stat-block">
+                <div class="stat-value" id="stat-last-played">Never</div>
+                <div class="stat-label">LAST PLAYED</div>
+              </div>
+              <div class="stat-block">
+                <select id="details-status-select" class="glass-select status-select">
+                  <option value="Backlog">Backlog</option>
+                  <option value="Playing">Playing</option>
+                  <option value="On Hold">On Hold</option>
+                  <option value="Completed">Completed</option>
+                  <option value="Dropped">Dropped</option>
+                </select>
+                <div class="stat-label">STAGE</div>
+              </div>
 
-          <div id="details-actions">
-            <!-- Launch — the one filled accent pill -->
-            <button class="pill-btn launch-pill" id="btn-launch">
-              <div class="pill-inner">
-                <div class="pill-spacer"></div>
-                <div class="pill-circle">
-                  <div class="pill-circle-icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 16">
-                      <path fill="currentColor" d="M12.175 9H0V7H12.175L6.575 1.4L8 0L16 8L8 16L6.575 14.6L12.175 9Z" />
-                    </svg>
+              <!-- Not-installed status: only shown when exe is missing / drive offline -->
+              <div class="stat-block" id="stat-block-status" style="display:none;">
+                <div class="stat-value stat-install-value-wrap">
+                  <span class="stat-install-dot" aria-hidden="true"></span>
+                  <span class="stat-install-value">Not installed</span>
+                  <button type="button" class="stat-locate-btn">Locate…</button>
+                </div>
+                <div class="stat-label">STATUS</div>
+              </div>
+            </div>
+
+            <div id="save-path-status"></div>
+
+            <div id="details-actions">
+              <!-- Launch — the one filled accent pill -->
+              <button class="pill-btn launch-pill" id="btn-launch">
+                <div class="pill-inner">
+                  <div class="pill-spacer"></div>
+                  <div class="pill-circle">
+                    <div class="pill-circle-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 16">
+                        <path fill="currentColor" d="M12.175 9H0V7H12.175L6.575 1.4L8 0L16 8L8 16L6.575 14.6L12.175 9Z" />
+                      </svg>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="pill-label">LAUNCH</div>
-            </button>
+                <div class="pill-label">LAUNCH</div>
+              </button>
 
-            <!-- Edit — match pill style -->
-            <button class="pill-btn edit-pill" id="btn-edit-game">
-              <div class="pill-inner">
-                <div class="pill-spacer"></div>
-                <div class="pill-circle">
-                  <div class="pill-circle-icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>
+              <!-- Edit — match pill style -->
+              <button class="pill-btn edit-pill" id="btn-edit-game">
+                <div class="pill-inner">
+                  <div class="pill-spacer"></div>
+                  <div class="pill-circle">
+                    <div class="pill-circle-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="pill-label">EDIT</div>
-            </button>
+                <div class="pill-label">EDIT</div>
+              </button>
 
-            <!-- Restore Save — match pill style -->
-            <button class="pill-btn restore-pill" id="btn-restore-save" style="display:none;">
-              <div class="pill-inner">
-                <div class="pill-spacer"></div>
-                <div class="pill-circle">
-                  <div class="pill-circle-icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+              <!-- Restore Save — match pill style -->
+              <button class="pill-btn restore-pill" id="btn-restore-save" style="display:none;">
+                <div class="pill-inner">
+                  <div class="pill-spacer"></div>
+                  <div class="pill-circle">
+                    <div class="pill-circle-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="pill-label">RESTORE</div>
-            </button>
+                <div class="pill-label">RESTORE</div>
+              </button>
 
-            <!-- Backup Save — match pill style -->
-            <button class="pill-btn backup-pill" id="btn-backup-save" style="display:none;">
-              <div class="pill-inner">
-                <div class="pill-spacer"></div>
-                <div class="pill-circle">
-                  <div class="pill-circle-icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>
+              <!-- Backup Save — match pill style -->
+              <button class="pill-btn backup-pill" id="btn-backup-save" style="display:none;">
+                <div class="pill-inner">
+                  <div class="pill-spacer"></div>
+                  <div class="pill-circle">
+                    <div class="pill-circle-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="pill-label">BACKUP</div>
-            </button>
+                <div class="pill-label">BACKUP</div>
+              </button>
 
-            <!-- Favorite toggle -->
-            <button class="pill-btn fav-pill" id="btn-toggle-favorite" title="Add to Favorites">
-              <div class="pill-inner">
-                <div class="pill-spacer"></div>
-                <div class="pill-circle">
-                  <div class="pill-circle-icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.013 18.582 6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.12 2.12 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.12 2.12 0 0 0 1.597-1.16l2.309-4.679a.53.53 0 0 1 .95 0l2.31 4.679a2.12 2.12 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904L20 11.5"/><path d="M15 18h6"/><path d="M18 15v6"/></svg>
+              <!-- Favorite toggle -->
+              <button class="pill-btn fav-pill" id="btn-toggle-favorite" title="Add to Favorites">
+                <div class="pill-inner">
+                  <div class="pill-spacer"></div>
+                  <div class="pill-circle">
+                    <div class="pill-circle-icon">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.013 18.582 6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.12 2.12 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.12 2.12 0 0 0 1.597-1.16l2.309-4.679a.53.53 0 0 1 .95 0l2.31 4.679a2.12 2.12 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904L20 11.5"/><path d="M15 18h6"/><path d="M18 15v6"/></svg>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="pill-label">FAVORITE</div>
-            </button>
+                <div class="pill-label">FAVORITE</div>
+              </button>
 
-            <!-- Custom Animated × remove button -->
-            <button class="new-remove-btn" id="btn-delete-game" title="Remove">
-              <p>×</p>
-              <span></span>
-              <span></span>
-              <span></span>
-              <span></span>
-            </button>
-          </div>
+              <!-- Custom Animated × remove button -->
+              <button class="new-remove-btn" id="btn-delete-game" title="Remove">
+                <p>×</p>
+                <span></span>
+                <span></span>
+                <span></span>
+                <span></span>
+              </button>
+            </div>
           
-          <button id="btn-close-details">← BACK</button>
+            <button id="btn-close-details">← BACK</button>
+          </div>
         </div>
       </div>
-    </div>
 
-    <!-- Empty state -->
-    <div id="empty-state">
-      <div id="empty-icon">⬡</div>
-      <div id="empty-title">NO GAMES YET</div>
-      <div id="empty-sub">Press + to add your first game</div>
-    </div>
+      <!-- Empty state -->
+      <div id="empty-state">
+        <div id="empty-icon">⬡</div>
+        <div id="empty-title">NO GAMES YET</div>
+        <div id="empty-sub">Press + to add your first game</div>
+      </div>
+    </section>
+    <!-- PAGE: Statistics -->
+    <section class="page page-centred page-stats hidden" id="stats-overlay" data-page="stats" aria-label="Statistics" tabindex="-1" aria-hidden="true">
+      <div id="stats-modal" class="glass-panel settings-modal stats-modal">
+        <div class="settings-title">Statistics</div>
+        <p class="settings-desc">Session history &amp; playtime, tracked locally. History begins from this version onward.</p>
+        <div class="segmented stats-view-toggle" id="stats-view-toggle">
+          <button type="button" id="btn-stats-overall" class="active"><span>Overall Stats</span></button>
+          <button type="button" id="btn-stats-games"><span>Game Stats</span></button>
+        </div>
+        <div id="stats-content"></div>
+        <div class="settings-back-row">
+          <button type="button" id="btn-stats-close" class="settings-back">&larr; Back</button>
+        </div>
+      </div>
+    </section>
+    <!-- PAGE: Import games -->
+    <section class="page page-centred page-import hidden" id="modal-overlay" data-page="import" aria-label="Import games" tabindex="-1" aria-hidden="true">
+      <div id="modal" class="glass-panel">
+        <div id="modal-title" class="modal-title">Add game</div>
+        <div class="modal-body">
+        <div id="scan-folder-container" style="display: flex; gap: 10px; margin-bottom: 16px;">
+          <button id="btn-browse-exe" class="btn-secondary" style="flex: 1;">Browse for .exe</button>
+          <button id="btn-scan-folder" class="btn-secondary" style="flex: 1;">Scan Folder</button>
+        </div>
+        <div id="import-container" class="segmented" style="margin-bottom: 16px;">
+          <button id="btn-import-steam"><span>Steam</span></button>
+          <button id="btn-import-epic"><span>Epic</span></button>
+          <button id="btn-import-gog"><span>GOG</span></button>
+        </div>
+        <div class="field-group">
+          <label>Game Name</label>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input type="text" id="input-name" placeholder="e.g. Red Dead Redemption 2" autocomplete="off" style="flex: 1;" />
+            <button id="btn-autofill" class="btn-ghost" style="display: none; flex-shrink: 0;">Auto-Fill Metadata</button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Title Style <span class="optional">(optional)</span></label>
+          <div class="color-picker-row">
+            <select id="input-font">
+              <option value="">Default Font</option>
+              <option value="Inter">Inter</option>
+              <option value="Roboto">Roboto</option>
+              <option value="Outfit">Outfit</option>
+              <option value="Oswald">Oswald</option>
+              <option value="Playfair Display">Playfair Display</option>
+              <option value="Press Start 2P">Press Start 2P</option>
+              <option value="Cinzel">Cinzel</option>
+              <option value="Bebas Neue">Bebas Neue</option>
+              <option value="Arial">Arial</option>
+              <option value="Verdana">Verdana</option>
+              <option value="Tahoma">Tahoma</option>
+              <option value="Trebuchet MS">Trebuchet MS</option>
+              <option value="Times New Roman">Times New Roman</option>
+              <option value="Georgia">Georgia</option>
+              <option value="Garamond">Garamond</option>
+              <option value="Courier New">Courier New</option>
+              <option value="Impact">Impact</option>
+              <option value="Comic Sans MS">Comic Sans MS</option>
+            </select>
+            <input type="color" id="input-color" value="#ffffff" />
+            <div class="color-preview" id="color-preview-text">#ffffff</div>
+          </div>
+          <div class="title-preview" id="title-preview">Game Title</div>
+        </div>
+        <div class="field-group">
+          <label>Executable (.exe)</label>
+          <div class="file-row">
+            <input type="text" id="input-exe" placeholder="Path to .exe" readonly />
+            <button class="btn-secondary" id="btn-pick-exe">Browse</button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Launch Target <span class="optional">(when the exe is a launcher)</span></label>
+          <div class="segmented" id="launch-target-group">
+            <button type="button" id="lt-auto">Auto</button>
+            <button type="button" id="lt-launcher">Launcher</button>
+            <button type="button" id="lt-game">Game</button>
+          </div>
+          <div id="launch-target-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;"></div>
+        </div>
+        <div class="field-group">
+          <label>Save Folder <span class="optional">(optional)</span></label>
+          <div class="file-row">
+            <input type="text" id="input-save-path" placeholder="Path to save files" readonly />
+            <button class="btn-secondary" id="btn-pick-save-path">Browse</button>
+            <button class="btn-secondary" id="btn-find-save-path">Find on this PC</button>
+            <button class="btn-ghost danger" id="btn-clear-save-path">Clear</button>
+          </div>
+          <div id="save-folder-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">An auto-detected save path shows here once the game is launched. If the library came from another PC, use Find on this PC.</div>
+        </div>
+        <div class="field-group">
+          <label>Logo <span class="optional">(transparent PNG)</span></label>
+          <div class="asset-picker">
+            <div class="asset-box">
+              <img id="edit-logo-preview-img" src="" alt="" />
+              <span class="asset-plus">+</span>
+            </div>
+            <div class="asset-actions">
+              <button class="btn-ghost" id="btn-online-logo">Search online</button>
+              <button class="btn-ghost" id="btn-pick-logo">Change</button>
+            </div>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Background Wallpaper <span class="optional">(optional)</span></label>
+          <div class="asset-picker">
+            <div class="asset-box">
+              <img id="edit-wallpaper-preview-img" src="" alt="" />
+              <span class="asset-plus">+</span>
+            </div>
+            <div class="asset-actions">
+              <button class="btn-ghost" id="btn-online-wallpaper">Search online</button>
+              <button class="btn-ghost" id="btn-pick-wallpaper-modal">Change</button>
+            </div>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Tags <span class="optional">(comma-separated)</span></label>
+          <input type="text" id="input-tags" placeholder="e.g. RPG, Indie, Favorites" autocomplete="off" />
+        </div>
+        <div class="field-group" id="backup-count-group" style="display: none;">
+          <label>Keep Last N Backups <span class="optional">(1-50)</span></label>
+          <input type="number" id="input-backup-count" min="1" max="50" value="5" />
+        </div>
+        </div>
+        <div id="modal-actions">
+          <button class="btn-ghost" id="btn-modal-cancel">Cancel</button>
+          <button class="btn-primary" id="btn-modal-save">Save</button>
+        </div>
+      </div>
+    </section>
+    <!-- PAGE: Settings -->
+    <section class="page page-centred page-settings hidden" id="settings-overlay" data-page="settings" aria-label="Settings" tabindex="-1" aria-hidden="true">
+      <div id="settings-modal" class="glass-panel settings-modal">
+        <div class="settings-head">
+          <div class="settings-title">Settings</div>
+          <p class="settings-desc">Everything here stays on this machine.</p>
+        </div>
 
+        <div class="settings-body">
+          <div class="settings-section">
+            <h3 class="settings-section-title">Library Backup</h3>
+            <div class="settings-card">
+              <div class="settings-row">
+                <button id="btn-export-backup" class="settings-btn">Export Library</button>
+                <button id="btn-import-backup" class="settings-btn">Import Library</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-section-title">SteamGridDB</h3>
+            <div class="settings-card">
+              <label class="settings-field-label" for="input-sgdb-key">API Key</label>
+              <div class="settings-key-row">
+                <input id="input-sgdb-key" type="password" class="settings-input" placeholder="Paste your SteamGridDB API key" autocomplete="off" />
+                <button type="button" id="btn-toggle-key-visibility" class="settings-key-toggle" title="Show key" aria-label="Show or hide API key">SHOW</button>
+              </div>
+              <p class="settings-hint">Adds custom logos, heroes and grids to the art picker. Get a free key at steamgriddb.com.</p>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-section-title">Display</h3>
+            <div class="settings-card">
+              <label class="settings-toggle-row" for="input-show-game-titles">
+                <span class="toggle-copy">
+                  <span class="toggle-title">Show game titles</span>
+                  <span class="toggle-sub">Display the game name as text alongside its logo.</span>
+                </span>
+                <span class="toggle-track">
+                  <input type="checkbox" id="input-show-game-titles" />
+                  <span class="toggle-thumb"></span>
+                </span>
+              </label>
+              <label class="settings-toggle-row" for="input-force-motion">
+                <span class="toggle-copy">
+                  <span class="toggle-title">Always animate</span>
+                  <span class="toggle-sub">Overrides your system's reduce-motion setting for the launcher's animations.</span>
+                </span>
+                <span class="toggle-track">
+                  <input type="checkbox" id="input-force-motion" />
+                  <span class="toggle-thumb"></span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-section-title">Preferences</h3>
+            <div class="settings-card">
+              <label class="settings-check">
+                <input type="checkbox" id="input-check-updates" />
+                <span>Check for updates on launch</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-section settings-advanced" id="settings-advanced">
+            <button class="settings-btn-advanced-toggle" id="settings-advanced-toggle">Advanced</button>
+            <div class="advanced-body">
+              <div class="advanced-inner">
+                <button id="btn-backup-manager" class="settings-ghost">Backup Manager</button>
+                <button id="btn-open-logs" class="settings-ghost">Open Logs Folder</button>
+                <button id="btn-check-updates" class="settings-ghost">Check for Updates</button>
+                <button id="btn-setup-from-another-pc" class="settings-ghost">Set Up From Another PC</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <button id="btn-settings-close" class="settings-back">&larr; Back</button>
+          <button id="btn-save-settings" class="settings-btn settings-btn-primary">Save Changes</button>
+        </div>
+      </div>
+    </section>
+    </div>
   </div>
 
-  <!-- ADD / EDIT MODAL -->
-  <div id="modal-overlay" class="hidden">
-    <div id="modal" class="glass-panel">
-      <div id="modal-title" class="modal-title">Add game</div>
-      <div class="modal-body">
-      <div id="scan-folder-container" style="display: flex; gap: 10px; margin-bottom: 16px;">
-        <button id="btn-browse-exe" class="btn-secondary" style="flex: 1;">Browse for .exe</button>
-        <button id="btn-scan-folder" class="btn-secondary" style="flex: 1;">Scan Folder</button>
-      </div>
-      <div id="import-container" class="segmented" style="margin-bottom: 16px;">
-        <button id="btn-import-steam"><span>Steam</span></button>
-        <button id="btn-import-epic"><span>Epic</span></button>
-        <button id="btn-import-gog"><span>GOG</span></button>
-      </div>
-      <div class="field-group">
-        <label>Game Name</label>
-        <div style="display: flex; gap: 8px; align-items: center;">
-          <input type="text" id="input-name" placeholder="e.g. Red Dead Redemption 2" autocomplete="off" style="flex: 1;" />
-          <button id="btn-autofill" class="btn-ghost" style="display: none; flex-shrink: 0;">Auto-Fill Metadata</button>
-        </div>
-      </div>
-      <div class="field-group">
-        <label>Title Style <span class="optional">(optional)</span></label>
-        <div class="color-picker-row">
-          <select id="input-font">
-            <option value="">Default Font</option>
-            <option value="Inter">Inter</option>
-            <option value="Roboto">Roboto</option>
-            <option value="Outfit">Outfit</option>
-            <option value="Oswald">Oswald</option>
-            <option value="Playfair Display">Playfair Display</option>
-            <option value="Press Start 2P">Press Start 2P</option>
-            <option value="Cinzel">Cinzel</option>
-            <option value="Bebas Neue">Bebas Neue</option>
-            <option value="Arial">Arial</option>
-            <option value="Verdana">Verdana</option>
-            <option value="Tahoma">Tahoma</option>
-            <option value="Trebuchet MS">Trebuchet MS</option>
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Georgia">Georgia</option>
-            <option value="Garamond">Garamond</option>
-            <option value="Courier New">Courier New</option>
-            <option value="Impact">Impact</option>
-            <option value="Comic Sans MS">Comic Sans MS</option>
-          </select>
-          <input type="color" id="input-color" value="#ffffff" />
-          <div class="color-preview" id="color-preview-text">#ffffff</div>
-        </div>
-        <div class="title-preview" id="title-preview">Game Title</div>
-      </div>
-      <div class="field-group">
-        <label>Executable (.exe)</label>
-        <div class="file-row">
-          <input type="text" id="input-exe" placeholder="Path to .exe" readonly />
-          <button class="btn-secondary" id="btn-pick-exe">Browse</button>
-        </div>
-      </div>
-      <div class="field-group">
-        <label>Launch Target <span class="optional">(when the exe is a launcher)</span></label>
-        <div class="segmented" id="launch-target-group">
-          <button type="button" id="lt-auto">Auto</button>
-          <button type="button" id="lt-launcher">Launcher</button>
-          <button type="button" id="lt-game">Game</button>
-        </div>
-        <div id="launch-target-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;"></div>
-      </div>
-      <div class="field-group">
-        <label>Save Folder <span class="optional">(optional)</span></label>
-        <div class="file-row">
-          <input type="text" id="input-save-path" placeholder="Path to save files" readonly />
-          <button class="btn-secondary" id="btn-pick-save-path">Browse</button>
-          <button class="btn-ghost danger" id="btn-clear-save-path">Clear</button>
-        </div>
-        <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">An auto-detected save path shows here once the game is launched.</div>
-      </div>
-      <div class="field-group">
-        <label>Logo <span class="optional">(transparent PNG)</span></label>
-        <div class="asset-picker">
-          <div class="asset-box">
-            <img id="edit-logo-preview-img" src="" alt="" />
-            <span class="asset-plus">+</span>
-          </div>
-          <div class="asset-actions">
-            <button class="btn-ghost" id="btn-online-logo">Search online</button>
-            <button class="btn-ghost" id="btn-pick-logo">Change</button>
-          </div>
-        </div>
-      </div>
-      <div class="field-group">
-        <label>Background Wallpaper <span class="optional">(optional)</span></label>
-        <div class="asset-picker">
-          <div class="asset-box">
-            <img id="edit-wallpaper-preview-img" src="" alt="" />
-            <span class="asset-plus">+</span>
-          </div>
-          <div class="asset-actions">
-            <button class="btn-ghost" id="btn-online-wallpaper">Search online</button>
-            <button class="btn-ghost" id="btn-pick-wallpaper-modal">Change</button>
-          </div>
-        </div>
-      </div>
-      <div class="field-group">
-        <label>Tags <span class="optional">(comma-separated)</span></label>
-        <input type="text" id="input-tags" placeholder="e.g. RPG, Indie, Favorites" autocomplete="off" />
-      </div>
-      <div class="field-group" id="backup-count-group" style="display: none;">
-        <label>Keep Last N Backups <span class="optional">(1-50)</span></label>
-        <input type="number" id="input-backup-count" min="1" max="50" value="5" />
-      </div>
-      </div>
-      <div id="modal-actions">
-        <button class="btn-ghost" id="btn-modal-cancel">Cancel</button>
-        <button class="btn-primary" id="btn-modal-save">Save</button>
-      </div>
-    </div>
-  </div>
 
   <!-- SCAN RESULTS MODAL -->
   <div id="scan-results-overlay" class="hidden">
@@ -412,98 +570,39 @@
     </div>
   </div>
 
-  <!-- SETTINGS / BACKUP MODAL -->
-  <div id="settings-overlay" class="hidden">
-    <div id="settings-modal" class="glass-panel settings-modal">
-      <div class="settings-head">
-        <div class="settings-title">Settings</div>
-        <p class="settings-desc">Everything here stays on this machine.</p>
+
+  <!-- SET UP GAMES FROM ANOTHER PC (shown once after a library restore) -->
+  <div id="migrate-overlay" class="hidden">
+    <div id="migrate-modal" class="glass-panel" style="width: 560px; max-width: 95vw;">
+      <div class="panel-title">Set up games from another PC</div>
+      <div class="panel-desc">
+        This library was recorded on another machine, so its save folders still point at paths
+        that do not exist here. Nothing is moved or deleted &mdash; each step only points a game at
+        where its saves live on this PC.
       </div>
-
-      <div class="settings-body">
-        <div class="settings-section">
-          <h3 class="settings-section-title">Library Backup</h3>
-          <div class="settings-card">
-            <div class="settings-row">
-              <button id="btn-export-backup" class="settings-btn">Export Library</button>
-              <button id="btn-import-backup" class="settings-btn">Import Library</button>
-            </div>
+      <div style="display: flex; flex-direction: column; gap: 14px; margin-bottom: 14px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 13px; font-weight: 600; color: var(--text-primary);">1. Relink save folders</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Finds each game's save folder on this machine and points it there. Games SILO cannot place are named, not guessed.</div>
           </div>
+          <button id="btn-migrate-relink" class="settings-btn">Relink</button>
         </div>
-
-        <div class="settings-section">
-          <h3 class="settings-section-title">SteamGridDB</h3>
-          <div class="settings-card">
-            <label class="settings-field-label" for="input-sgdb-key">API Key</label>
-            <div class="settings-key-row">
-              <input id="input-sgdb-key" type="password" class="settings-input" placeholder="Paste your SteamGridDB API key" autocomplete="off" />
-              <button type="button" id="btn-toggle-key-visibility" class="settings-key-toggle" title="Show key" aria-label="Show or hide API key">SHOW</button>
-            </div>
-            <p class="settings-hint">Adds custom logos, heroes and grids to the art picker. Get a free key at steamgriddb.com.</p>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 13px; font-weight: 600; color: var(--text-primary);">2. Bring saves across</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Copies save folders in for games with nowhere here to point &mdash; from the old PC's drive, or from that game's own SILO backup.</div>
           </div>
-        </div>
-
-        <div class="settings-section">
-          <h3 class="settings-section-title">Display</h3>
-          <div class="settings-card">
-            <label class="settings-toggle-row" for="input-show-game-titles">
-              <span class="toggle-copy">
-                <span class="toggle-title">Show game titles</span>
-                <span class="toggle-sub">Display the game name as text alongside its logo.</span>
-              </span>
-              <span class="toggle-track">
-                <input type="checkbox" id="input-show-game-titles" />
-                <span class="toggle-thumb"></span>
-              </span>
-            </label>
-            <label class="settings-toggle-row" for="input-force-motion">
-              <span class="toggle-copy">
-                <span class="toggle-title">Always animate</span>
-                <span class="toggle-sub">Overrides your system's reduce-motion setting for the launcher's animations.</span>
-              </span>
-              <span class="toggle-track">
-                <input type="checkbox" id="input-force-motion" />
-                <span class="toggle-thumb"></span>
-              </span>
-            </label>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <h3 class="settings-section-title">Preferences</h3>
-          <div class="settings-card">
-            <label class="settings-check">
-              <input type="checkbox" id="input-check-updates" />
-              <span>Check for updates on launch</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <h3 class="settings-section-title">Library</h3>
-          <div class="settings-card">
-            <div class="settings-row">
-              <button id="btn-rescan-installs" class="settings-btn">Rescan installs</button>
-            </div>
-            <p class="settings-hint">Checks every game's executable is still where SILO last saw it. Nothing is changed on disk.</p>
-          </div>
-        </div>
-
-        <div class="settings-section settings-advanced" id="settings-advanced">
-          <button class="settings-btn-advanced-toggle" id="settings-advanced-toggle">Advanced</button>
-          <div class="advanced-body">
-            <div class="advanced-inner">
-              <button id="btn-backup-manager" class="settings-ghost">Backup Manager</button>
-              <button id="btn-open-logs" class="settings-ghost">Open Logs Folder</button>
-              <button id="btn-check-updates" class="settings-ghost">Check for Updates</button>
-            </div>
-          </div>
+          <button id="btn-migrate-bring" class="settings-btn">Bring across</button>
         </div>
       </div>
-
-      <div class="settings-footer">
-        <button id="btn-settings-close" class="settings-back">&larr; Back</button>
-        <button id="btn-save-settings" class="settings-btn settings-btn-primary">Save Changes</button>
+      <div id="migrate-status" class="settings-hint"></div>
+      <div class="settings-hint">
+        Anything still left over can be linked by hand: open a game, choose Edit, then
+        <strong>Find on this PC</strong> beside Save Folder.
+      </div>
+      <div style="display: flex; justify-content: flex-end; margin-top: 18px;">
+        <button class="glass-btn small" id="btn-migrate-close">Close</button>
       </div>
     </div>
   </div>
@@ -520,8 +619,9 @@
     </div>
   </div>
 
+
   <!-- STAT HOVER POPOVER (PLAYTIME / SESSIONS mini-chart) -->
-  <div id="stat-popover" class="hidden">
+  <div id="stat-popover" class="hidden" role="region" tabindex="-1" aria-label="Statistics preview">
     <div class="sp-title-row">
       <span id="sp-title"></span>
       <span style="display:inline-flex; align-items:center; gap:6px;">
@@ -540,22 +640,6 @@
     </div>
   </div>
 
-  <!-- STATS HUB -->
-  <div id="stats-overlay" class="hidden">
-    <div id="stats-modal" class="glass-panel settings-modal stats-modal">
-      <div class="settings-title">Statistics</div>
-      <p class="settings-desc">Session history &amp; playtime, tracked locally. History begins from this version onward.</p>
-      <div class="segmented stats-view-toggle" id="stats-view-toggle">
-        <button type="button" id="btn-stats-overall" class="active"><span>Overall Stats</span></button>
-        <button type="button" id="btn-stats-games"><span>Game Stats</span></button>
-      </div>
-      <div id="stats-content"></div>
-      <div class="settings-back-row">
-        <button type="button" id="btn-stats-close" class="settings-back">&larr; Back</button>
-      </div>
-    </div>
-  </div>
-
-  <script src="app.js"></script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

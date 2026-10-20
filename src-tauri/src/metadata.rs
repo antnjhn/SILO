@@ -336,7 +336,7 @@ mod tests {
     // "Red Dead Redemption 2" vs "Red Dead Redemption" share {red, dead, redemption};
     // the "2" token is kept, so they must NOT be treated as identical.
     let score = name_similarity("Red Dead Redemption 2", "Red Dead Redemption");
-    assert!(score >= 60 && score < 100, "got {}", score);
+        assert!((60..100).contains(&score), "got {}", score);
   }
 
   #[test]

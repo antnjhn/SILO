@@ -75,16 +75,26 @@ html, body {
   -webkit-app-region: drag;
 }
 
+/* The wordmark is centred on the window, not on the space left over by the
+   window controls, so the two rules meet it symmetrically. */
 #titlebar-line-left, #titlebar-line-right {
-  flex: 1;
+  position: absolute;
+  top: 50%;
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.25));
 }
+#titlebar-line-left { left: 12px; right: calc(50% + 64px); }
 #titlebar-line-right {
+  left: calc(50% + 64px);
+  right: 108px;
   background: linear-gradient(90deg, rgba(255,255,255,0.25), transparent);
 }
 
 #app-title {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   font-size: 9px; font-weight: 900; letter-spacing: 6px;
   color: rgba(255,255,255,0.4);
   text-shadow: 0 0 16px rgba(255,255,255,0.15);
@@ -92,7 +102,14 @@ html, body {
   white-space: nowrap;
 }
 
-#titlebar-controls { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+#titlebar-controls {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex; gap: 2px;
+  -webkit-app-region: no-drag;
+}
 
 #titlebar-controls button {
   background: var(--surface-1);
@@ -114,6 +131,609 @@ html, body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   NAVIGATION — the compact menu chip (the category dots are gone; the
+   expanded menu replaces them)
+   ═══════════════════════════════════════════════════════════════════════════ */
+#categories-panel {
+  position: fixed;
+  top: 5px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  z-index: 1100;
+  opacity: 1;
+  transition: opacity 0.35s ease;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PAGES
+   Statistics, Import and Settings are pages rather than overlays: only one
+   is on screen at a time. Switching slides the outgoing page slightly out
+   and the incoming page in, with the opacity moving alongside. When the
+   transition is over the page that was left is hidden, so nothing is left
+   stacked underneath.
+   ═══════════════════════════════════════════════════════════════════════════ */
+#page-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.page {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.page.hidden { display: none; }
+.page-home { display: flex; }
+
+/* These three used to be modals floating over the library. As pages they
+   fill the content area instead, so the legacy overlay styling is undone
+   here: no fixed positioning, no dimmer, no centred glass card. */
+#page-host .page#modal-overlay,
+#page-host .page#settings-overlay,
+#page-host .page#stats-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  padding: clamp(84px, 12vh, 108px) clamp(12px, 2vw, 32px) clamp(24px, 4vh, 56px);
+  background: none;
+  z-index: auto;
+  transition: none;
+}
+#page-host .page#modal-overlay.hidden,
+#page-host .page#settings-overlay.hidden,
+#page-host .page#stats-overlay.hidden { opacity: 1; pointer-events: auto; }
+
+/* The hidden page is gone. This comes after the rules above, because an id
+   selector would otherwise win over the plain class and leave the page on
+   screen underneath the current one. */
+#page-host .page.hidden,
+#page-host .page#modal-overlay.hidden,
+#page-host .page#settings-overlay.hidden,
+#page-host .page#stats-overlay.hidden { display: none; }
+
+/* A control that is hidden stays hidden, whatever the surrounding rules say. */
+#topnav [hidden] { display: none !important; }
+
+/* The panels themselves become page cards rather than floating modals. */
+#page-host #modal,
+#page-host #settings-modal,
+#page-host #stats-modal {
+  width: min(760px, 100%);
+  max-height: 100%;
+  transform: none;
+  animation: none;
+  background: rgba(10, 10, 12, 0.92);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  padding: clamp(18px, 2.4vw, 30px);
+}
+#page-host #settings-modal { width: min(680px, 100%); }
+#page-host #stats-modal { width: min(860px, 100%); }
+
+/* The import form scrolls as one column. */
+#page-host #modal { overflow-y: auto; }
+
+/* The settings panel keeps its own scrolling body and its sticky footer. */
+#page-host #settings-modal {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+#page-host #settings-modal .settings-head,
+#page-host #settings-modal .settings-footer { flex-shrink: 0; }
+#page-host #settings-modal .settings-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+/* The statistics panel keeps its heading and its back control in place, and
+   scrolls the charts themselves. */
+#page-host #stats-modal {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  gap: 0;
+}
+#page-host #stats-modal > .settings-title,
+#page-host #stats-modal > .settings-desc,
+#page-host #stats-modal > .stats-view-toggle,
+#page-host #stats-modal > .settings-back-row { flex-shrink: 0; }
+#page-host #stats-modal > .stats-view-toggle { margin-bottom: 14px; }
+#page-host #stats-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* The scrollbar always keeps its space, so the charts are not resized
+     when the content grows past the bottom of the page. */
+  scrollbar-gutter: stable;
+}
+
+/* A subpage centres its panel in the content area. */
+.page-centred {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(16px, 3vh, 40px) clamp(12px, 2vw, 32px) clamp(24px, 4vh, 56px);
+  box-sizing: border-box;
+}
+
+.page.entering { animation: pageIn 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.page.leaving {
+  animation: pageOut 220ms cubic-bezier(0.4, 0, 1, 1) both;
+  pointer-events: none;
+}
+
+@keyframes pageIn {
+  from { opacity: 0; transform: translateX(26px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes pageOut {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateX(-22px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) .page.entering,
+  body:not(.force-motion) .page.leaving { animation: none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TOP NAVIGATION
+   A cinematic bar that fades in over the artwork. It is an overlay, so
+   revealing it never shifts or resizes the game content underneath.
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* The navigation sits BELOW the titlebar's stacking level, so the window
+   controls stay visible and separate from it. */
+#topnav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 999;
+  pointer-events: none;
+}
+
+/* The dark, blurred wash that fades from the top edge down into the art. */
+/* The wash sits behind the wordmark and the navigation and fades out well
+   before the middle of the screen, so the artwork and the selected game's
+   metadata stay clear. It is strongest at the very top and dissolves
+   smoothly, with no visible edge. */
+.topnav-gradient {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30vh;
+  background: linear-gradient(
+    to bottom,
+    rgba(6, 7, 9, 0.82) 0%,
+    rgba(6, 7, 9, 0.52) 26%,
+    rgba(6, 7, 9, 0.26) 52%,
+    rgba(6, 7, 9, 0.10) 74%,
+    rgba(6, 7, 9, 0.03) 88%,
+    rgba(6, 7, 9, 0) 100%
+  );
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 96%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 96%);
+  opacity: 0;
+  transition: opacity 280ms ease;
+  pointer-events: none;
+}
+#topnav.revealed .topnav-gradient { opacity: 1; }
+
+.topnav-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  height: 76px;
+  margin-top: var(--titlebar-h);
+  padding: 0 clamp(14px, 2.4vw, 34px);
+  opacity: 0;
+  transform: translateY(-10px);
+  transition: opacity 240ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+#topnav.revealed .topnav-row {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* The navigation group is centred in the window, not pinned to the left. */
+.topnav-items {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(26px, 3.4vw, 58px);
+}
+
+/* A thin divider between the navigation sections. */
+.topnav-divider {
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.topnav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* A generous, invisible hit area around a small icon. */
+  width: 60px;
+  height: 60px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  /* Inactive icons stay monochrome; the accent takes over for the active
+     item, for hover and for the keyboard focus. */
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  transition: color 200ms ease, opacity 200ms ease;
+}
+.topnav-item:hover { color: var(--accent); }
+.topnav-item:focus-visible { outline: none; color: var(--accent); }
+
+/* The icons are the supplied artwork: black line-art with a real alpha
+   channel. It is used as a mask, so the shape is filled with the current
+   colour — which means the icon follows the accent instead of being
+   permanently white. */
+.topnav-icon {
+  width: 30px;
+  height: 30px;
+  background-color: currentColor;
+  -webkit-mask: var(--nav-icon) center / contain no-repeat;
+  mask: var(--nav-icon) center / contain no-repeat;
+  opacity: 0.9;
+  transition: opacity 200ms ease, transform 200ms ease;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+/* Without a mask source there is nothing to draw, so the icon stays empty
+   instead of turning into a solid block. */
+.topnav-icon:not([style*="--nav-icon"]) { background-color: transparent; }
+.topnav-item:hover .topnav-icon { opacity: 1; }
+.topnav-item.active { color: var(--accent); }
+.topnav-item.active .topnav-icon { opacity: 1; }
+.topnav-item:focus-visible .topnav-icon { opacity: 1; transform: scale(1.06); }
+
+/* The active marker: a restrained underline in the accent, nothing more. */
+.topnav-item::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  width: 0;
+  height: 2px;
+  background: var(--accent);
+  transform: translateX(-50%);
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.topnav-item.active::after,
+.topnav-item.cursor::after { width: 26px; }
+.topnav-item:focus-visible::after { width: 26px; opacity: 0.55; }
+/* The keyboard cursor sits on the active item until it is moved. */
+.topnav-item.active.cursor::after { opacity: 1; }
+
+.topnav-tools {
+  position: absolute;
+  right: clamp(14px, 2.4vw, 34px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* The bar never grows into the centred icon group: the tools keep to this
+     width and give up their least important members first. */
+  max-width: 360px;
+}
+/* With a search open the tools give up their room so the field can have it. */
+#topnav.searching .topnav-section,
+#topnav.searching .topnav-count { display: none; }
+/* On a narrower window the tools would crowd the centred icons, so the
+   least important of them step out of the way first. */
+@media (max-width: 1440px) {
+  .topnav-section { display: none; }
+}
+@media (max-width: 1180px) {
+  .topnav-count { display: none; }
+}
+.topnav-section {
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.16em;
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.topnav-count {
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+}
+.topnav-tool {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.66);
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+.topnav-tool:hover { color: #fff; border-color: rgba(255, 255, 255, 0.34); background: rgba(255, 255, 255, 0.1); }
+.topnav-tool:focus-visible { outline: 1px solid rgba(255, 255, 255, 0.7); outline-offset: 2px; }
+select.topnav-tool {
+  min-width: 118px;
+  max-width: 168px;
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 18px;
+  text-overflow: ellipsis;
+}
+
+/* The old #sort-select rules are ID-level, so they outrank the navigation's
+   class rules. The control in the navigation is a small, quiet tool, not the
+   old full-width dropdown, so the legacy styling is overridden here. */
+#topnav #sort-select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 124px;
+  max-width: 168px;
+  height: 26px;
+  margin: 0;
+  padding: 0 18px 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.66);
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+#topnav #sort-select:hover { color: #fff; border-color: rgba(255, 255, 255, 0.34); background: rgba(255, 255, 255, 0.1); }
+#topnav #sort-select:focus-visible { outline: 1px solid rgba(255, 255, 255, 0.7); outline-offset: 2px; }
+#topnav #sort-select option { background: #101012; color: #EDEDED; }
+select.topnav-tool option { background: #101012; color: #EDEDED; }
+
+.topnav-search {
+  display: none;
+  box-sizing: border-box;
+  width: 140px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #EDEDED;
+  font: 400 12px var(--font-ui);
+  outline: none;
+}
+.topnav-search:focus { border-color: rgba(255, 255, 255, 0.45); }
+#topnav.searching .topnav-search { display: block; }
+
+.filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: #f6254d;
+  color: #fff;
+  font: 700 8px var(--font-mono);
+  letter-spacing: 0;
+}
+.filter-badge[hidden] { display: none; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONTEXTUAL FILTER PANEL
+   The installation-status choice and the library's real tags, opened on
+   demand from the navigation.
+   ═══════════════════════════════════════════════════════════════════════════ */
+#filter-panel {
+  position: fixed;
+  z-index: 1002;
+  top: calc(var(--titlebar-h) + 66px);
+  right: clamp(14px, 2.4vw, 34px);
+  width: min(320px, calc(100vw - 28px));
+  box-sizing: border-box;
+  padding: 14px 16px 16px;
+  background: rgba(10, 10, 12, 0.96);
+  border: 1px solid var(--hairline-strong);
+  border-left: 3px solid #f6254d;
+  clip-path: polygon(0 0, 100% 0, 100% 92%, 96% 100%, 0 100%);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.7);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-8px);
+  transition: opacity 160ms ease, transform 160ms ease, visibility 0s linear 160ms;
+}
+#filter-panel.hidden { display: block; }
+#filter-panel.open {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition: opacity 160ms ease, transform 160ms ease, visibility 0s;
+}
+#filter-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  font: 800 10px var(--font-mono);
+  letter-spacing: 0.18em;
+  color: rgba(255, 255, 255, 0.7);
+}
+#filter-panel header button {
+  border: 1px solid var(--hairline-strong);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  padding: 4px 8px;
+  cursor: pointer;
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.12em;
+}
+#filter-panel header button:hover { border-color: #f6254d; color: #fff; }
+.filter-group { margin-bottom: 16px; }
+.filter-group:last-child { margin-bottom: 0; }
+.filter-group-label {
+  display: block;
+  margin-bottom: 8px;
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.16em;
+  color: rgba(255, 255, 255, 0.42);
+}
+.filter-hint {
+  margin: 10px 0 0;
+  color: rgba(255, 255, 255, 0.42);
+  font: 9px var(--font-mono);
+  letter-spacing: 0.04em;
+}
+.filter-empty { color: rgba(255, 255, 255, 0.45); font: 9px var(--font-mono); letter-spacing: 0.12em; }
+
+.persona-segments { display: flex; gap: 3px; }
+.persona-segments button,
+.tag-filter {
+  border: 1px solid var(--hairline-strong);
+  background: #080808;
+  color: rgba(255, 255, 255, 0.72);
+  padding: 6px 9px;
+  cursor: pointer;
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transform: skewX(-8deg);
+  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+}
+.persona-segments button:hover,
+.tag-filter:hover { background: #1c1c1e; color: #fff; }
+.persona-segments button.active,
+.tag-filter.active { background: #f6254d; border-color: #f6254d; color: #fff; }
+.persona-segments button:focus-visible,
+.tag-filter:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+#tag-filter-options { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* The navigation uses the supplied icon artwork, so the old circular
+   add-button styling must not follow the button into the bar. The ID
+   selectors need ID-level overrides to win. */
+#topnav #btn-add-game,
+#topnav #btn-settings,
+#topnav #btn-stats,
+#topnav #btn-search-toggle {
+  width: 60px;
+  height: 60px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-size: inherit;
+  transform: none;
+  overflow: visible;
+  gap: 0;
+}
+/* The colour is set at the same level, so the accent rules below can win
+   over it: the inactive icons stay monochrome, the active one, the hover and
+   the keyboard focus take the accent. */
+#topnav #nav-home,
+#topnav #btn-add-game,
+#topnav #btn-settings,
+#topnav #btn-stats,
+#topnav #btn-search-toggle {
+  color: rgba(255, 255, 255, 0.72);
+}
+#topnav #nav-home:hover,
+#topnav #nav-home:focus-visible,
+#topnav #nav-home.active,
+#topnav #btn-stats:hover,
+#topnav #btn-stats:focus-visible,
+#topnav #btn-stats.active,
+#topnav #btn-add-game:hover,
+#topnav #btn-add-game:focus-visible,
+#topnav #btn-add-game.active,
+#topnav #btn-settings:hover,
+#topnav #btn-settings:focus-visible,
+#topnav #btn-settings.active {
+  color: var(--accent);
+}
+#topnav #btn-add-game::before { content: none; display: none; }
+#topnav #btn-add-game:hover,
+#topnav #btn-settings:hover,
+#topnav #btn-stats:hover,
+#topnav #btn-search-toggle:hover {
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+/* The filter panel and the active-filter chips, shown only when something is
+   actually filtered. */
+.active-filters {
+  position: fixed;
+  z-index: 1002;
+  top: calc(var(--titlebar-h) + 66px);
+  left: clamp(14px, 2.4vw, 34px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.active-filters[hidden] { display: none; }
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border: 1px solid rgba(246, 37, 77, 0.6);
+  border-radius: 5px;
+  background: rgba(246, 37, 77, 0.12);
+  color: #fff;
+  cursor: pointer;
+  font: 700 9px var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition: background 130ms ease;
+}
+.filter-chip:hover { background: rgba(246, 37, 77, 0.9); }
+.filter-chip span { color: rgba(255, 255, 255, 0.6); font-size: 12px; line-height: 1; }
+.filter-chip:hover span { color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) .topnav-gradient,
+  body:not(.force-motion) .topnav-row,
+  body:not(.force-motion) .topnav-item,
+  body:not(.force-motion) .topnav-item::after,
+  body:not(.force-motion) .topnav-icon,
+  body:not(.force-motion) .persona-segments button,
+  body:not(.force-motion) .tag-filter,
+  body:not(.force-motion) #filter-panel { transition: none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    CATEGORIES DOTS (LEFT OF SIDEBAR)
    ═══════════════════════════════════════════════════════════════════════════ */
 #categories-panel {
@@ -127,9 +747,6 @@ html, body {
   pointer-events: auto;
 }
 
-.categories-open #categories-panel {
-  opacity: 1;
-}
 
 .category-dot {
   width: 14px; height: 14px;
@@ -173,6 +790,7 @@ html, body {
 /* ═══════════════════════════════════════════════════════════════════════════
    CATEGORY NAVIGATION — Curved, left-leaning navigation rail
    Derives from relative focus along an arc with typography-driven hierarchy.
+   The labels are set in Geist.
    ═══════════════════════════════════════════════════════════════════════════ */
 #category-wheel-overlay {
   position: fixed; inset: 0;
@@ -183,9 +801,50 @@ html, body {
   padding-left: clamp(48px, 6vw, 84px);
 }
 #category-wheel-overlay.hidden { display: none; }
+/* The CATEGORY heading sits at the top-left of the panel, above the rail. */
+.wheel-heading {
+  position: absolute;
+  top: clamp(40px, 8vh, 92px);
+  left: clamp(48px, 6vw, 84px);
+  font-size: 11px; font-weight: 700; letter-spacing: 4px;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+  user-select: none;
+  opacity: 0;
+  transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+#category-wheel-overlay.open .wheel-heading { opacity: 1; }
+
+/* While the categories are up, the library leaves the foreground: the logo,
+   the metadata and the rail fade out, so nothing of the previous screen is
+   read through the category labels. The artwork itself is untouched. */
+.categories-open #details-panel {
+  opacity: 0;
+  transform: translateX(-30px);
+  pointer-events: none;
+}
+.categories-open #game-list-panel {
+  filter: brightness(0.35);
+  opacity: 0;
+  pointer-events: none;
+}
+.categories-open #categories-panel {
+  opacity: 0;
+  pointer-events: none;
+}
+/* One contrast layer for the whole category view: a wide radial wash that is
+   strongest under the category list and dissolves into the artwork. There is
+   no second, darker panel behind it, so the picture is never cut into a
+   black rectangle with a hard edge. */
 .wheel-backdrop {
   position: absolute; inset: 0;
-  background: var(--scrim);
+  background:
+    radial-gradient(120% 130% at 4% 50%,
+      rgba(0, 0, 0, 0.80) 0%,
+      rgba(0, 0, 0, 0.60) 24%,
+      rgba(0, 0, 0, 0.34) 44%,
+      rgba(0, 0, 0, 0.13) 62%,
+      rgba(0, 0, 0, 0) 84%);
   opacity: 0;
   transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -202,10 +861,22 @@ html, body {
 }
 #category-wheel-overlay.open #category-wheel { opacity: 1; transform: none; }
 
+/* The category menu is set in Geist: the heading, the categories, the counts
+   and the hints. Nothing else in the interface changes. */
+.wheel-heading,
+.wheel-item,
+.wheel-item .wheel-label,
+.wheel-hint {
+  font-family: 'Geist', 'Inter', sans-serif;
+}
+.wheel-item .wheel-count {
+  font-family: 'Geist Mono', 'JetBrains Mono', monospace;
+}
+
 .wheel-hint {
   font-size: 11px; font-weight: 700; letter-spacing: 4px;
   color: rgba(255, 255, 255, 0.45);
-  text-shadow: 0 1px 8px rgba(0,0,0,0.6);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
   user-select: none;
   padding-left: clamp(20px, 2.5vw, 36px);
 }
@@ -238,35 +909,43 @@ html, body {
   height: 64px;
   display: flex; align-items: center;
   justify-content: flex-start;
-  font-size: 36px;
-  font-weight: 800; letter-spacing: -0.2px;
-  color: #fff;
+  /* Geist Black — the category menu's display face. */
+  font-weight: 800;
+  font-style: normal;
+  font-size: 42px;
+  letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, 0.86);
   white-space: nowrap;
   transition: none; /* JS rAF drives every frame — zero CSS fighting */
-  will-change: transform, opacity, filter;
+  will-change: transform, opacity;
   cursor: pointer;
   user-select: none;
-  text-shadow: 0 4px 28px rgba(0, 0, 0, 0.65);
+  /* A close, dark shadow so the lettering stays crisp over bright artwork
+     without a wide halo that would blur the edges of the type. */
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.92),
+    0 2px 16px rgba(0, 0, 0, 0.72);
 }
 .wheel-item .wheel-label {
   line-height: 1;
   transition: color 240ms ease;
 }
 .wheel-item.focused .wheel-label {
-  color: #ffffff;
-  text-shadow: 0 0 24px rgba(255, 255, 255, 0.25), 0 4px 28px rgba(0, 0, 0, 0.7);
+  color: #fff;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.95),
+    0 2px 18px rgba(0, 0, 0, 0.85);
 }
 .wheel-item .wheel-count {
   font-size: 12px; font-weight: 700; letter-spacing: 1.5px;
-  color: rgba(255, 255, 255, 0.35);
-  margin-left: 16px;
+  color: rgba(255, 255, 255, 0.72);
+  margin-left: 22px;
   font-variant-numeric: tabular-nums;
   transform: translateY(2px);
   transition: color 240ms ease;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.95);
 }
-.wheel-item.focused .wheel-count {
-  color: var(--accent, #4ade80);
-}
+.wheel-item.focused .wheel-count { color: #fff; }
 
 /* Reduced motion: wheel snaps instead of rolling. */
 @media (prefers-reduced-motion: reduce) {
@@ -293,10 +972,6 @@ html, body {
   transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.4s ease, filter 0.4s ease;
 }
 
-.categories-open #game-list-panel {
-  filter: brightness(0.4);
-  pointer-events: none;
-}
 
 #game-list-panel.collapsed {
   transform: translateX(-100%);
@@ -324,11 +999,6 @@ html, body {
 #game-list-panel.focused {
   /* Give the sliding logo breathing room against the details panel. */
   --sidebar-w: 220px;
-}
-#game-list-panel.focused .sidebar-toolbar,
-#game-list-panel.focused #filter-bar {
-  opacity: 0;
-  pointer-events: none;
 }
 
 /* Viewport that clips the scrolling list */
@@ -1182,34 +1852,32 @@ body.gamepad-active #btn-edit-game .pill-circle::after { content: 'Y'; font-weig
 }
 
 /* ── Sidebar search toggle + filter ──────────────────────────────────────── */
-.sidebar-toolbar { width: 100%; justify-content: flex-start; }
 #search-input {
   display: none;
   box-sizing: border-box;
-  flex: 0 0 auto; min-width: 0;
-  width: calc(100% - 140px);
+  flex: 1 1 auto; min-width: 0;
+  max-width: 190px;
+  height: 30px;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.15);
-  border-radius: 10px;
+  border-radius: 7px;
   color: var(--text);
-  padding: 9px 12px;
+  padding: 0 10px;
   font-size: 12px;
   outline: none;
   font-family: inherit;
   transition: border-color 200ms ease, box-shadow 200ms ease;
 }
-#game-list-panel.search-mode #search-input { display: block; animation: searchGrow 280ms cubic-bezier(0.4, 0, 0.2, 1); }
+#game-list-panel.search-mode #search-input { display: block; animation: searchFade 160ms ease-out; }
 #search-input:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 12px rgba(255,255,255,0.08); }
 #search-input::placeholder { color: var(--text-muted); }
 
-/* While searching: hide the + add button, blur settings, highlight the X */
+/* While searching: the add button steps aside and the search toggle turns
+   into the clear control. */
 #game-list-panel.search-mode #btn-add-game { display: none; }
 #game-list-panel.search-mode #btn-settings { filter: blur(2px); opacity: 0.35; pointer-events: none; }
 #game-list-panel.search-mode #btn-search-toggle { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
-/* Filter bar: hidden until search mode, then slides in under the search box */
-#filter-bar { display: none; box-sizing: border-box; align-items: center; width: calc(100% - 140px); margin: 2px 0 10px 140px; align-self: flex-start; }
-#game-list-panel.search-mode #filter-bar { display: flex; animation: searchFade 240ms ease; }
 #sort-select {
   flex: 1;
   background: rgba(255,255,255,0.06);
@@ -1500,6 +2168,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* Modal overlays: flat dim behind the panel — no backdrop blur (blur is for
    glass panels floating over game art in the library view, not modals). */
 #modal-overlay, #settings-overlay, #uninstall-overlay, #backup-name-overlay {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 /* One consistent title across all four modals */
@@ -1677,8 +2347,6 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* File-row buttons must not collapse next to flex inputs */
 #modal .file-row button { flex-shrink: 0; }
 
-/* Sidebar toolbar: breathing room on the left (icon-only nav buttons keep icons) */
-.sidebar-toolbar { padding: 0 14px; }
 
 /* Add/Edit modal overflow: pin header + action row, scroll only the middle,
    and cap the whole modal so it never exceeds the viewport. */
@@ -1886,6 +2554,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 #uninstall-overlay {
   background: var(--scrim);
 }
+/* Remove Game — same console frosted panel + typography as Settings */
+#uninstall-modal {
   width: 520px; max-width: 94vw;
   max-height: 90vh; overflow-y: auto;
   padding: 36px 40px;
@@ -1918,6 +2588,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 #uninstall-overlay {
   background: linear-gradient(180deg, rgba(248, 113, 113, 0.14) 0%, rgba(15, 17, 21, 0.55) 65%);
 }
+#uninstall-modal {
   background: linear-gradient(160deg, rgba(248, 113, 113, 0.18) 0%, rgba(24, 24, 28, 0.80) 55%);
 }
 
@@ -1953,6 +2624,18 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 #save-path-status .sp-path-warn {
   color: #fbbf24;
 }
+/* When a folder is known the line is informational, so it stays quiet. */
+#save-path-status.sp-quiet {
+  opacity: 0.55;
+  font-size: 8px;
+  letter-spacing: 1.2px;
+}
+/* A recovery state the user can act on stays loud. */
+#save-path-status.sp-alert {
+  color: #fbbf24;
+  opacity: 1;
+  font-size: 9px;
+}
 
 /* Playtime / Sessions stat blocks are hover targets */
 .stat-hover { cursor: help; border-radius: 4px; padding: 2px 4px; margin: -2px -4px; }
@@ -1971,6 +2654,7 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 .stat-hover:hover::after { transform: scaleX(1); }
 
 /* Hover popover — translucent, matches the frosted console panels */
+#stat-popover {
   position: fixed;
   z-index: 900;
   width: 302px;
@@ -1991,6 +2675,9 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 #stat-popover.hidden { display: none; }
 #stat-popover.show.hidden { display: block; }
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) #stat-popover { transition: none; }
+}
 
 .sp-title-row {
   display: flex;
@@ -2124,6 +2811,14 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   text-align: center;
   line-height: 1.6;
 }
+/* An empty range takes the same room as a plotted one, so switching between
+   ranges never changes the height of the page. */
+.stats-chart-section .stats-empty {
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
 
 /* ── Stats hub modal ── */
 #stats-overlay {
@@ -2230,8 +2925,10 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 
 .stats-chart-section {
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
+/* The plot area is the same size in both ranges. */
+.stats-chart-section + .stats-chart-section { margin-top: 4px; }
 .stats-chart-head {
   display: flex;
   align-items: center;
@@ -2396,11 +3093,17 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 /* ═══════════════════════════════════════════════════════════════════════════
    PLAY TIME TREND-LINE (SVG area chart)
    ═══════════════════════════════════════════════════════════════════════════ */
+/* One controlled plot height for every range, so the week and month graphs
+   are laid out identically and neither takes over the page. The floating
+   stat popover keeps its own, smaller plot. */
 .sp-trend {
   display: block;
   width: 100%;
   height: 96px;
   overflow: visible;
+}
+.stats-chart-section .sp-trend {
+  height: 140px;
 }
 .sp-trend .sp-base {
   stroke: rgba(255, 255, 255, 0.08);
@@ -3253,13 +3956,15 @@ body.rail-fx-instant #details-panel #details-actions {
   flex: 1 1 auto;
   min-width: 0;                      /* allow shrinking instead of overflowing */
   width: auto;
+  max-width: 190px;
+  height: 30px;
   background: var(--surface-2);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-input);
+  border-radius: 7px;
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: var(--fs-body);
-  padding: 9px var(--sp-3);
+  font-size: 12px;
+  padding: 0 var(--sp-3);
   outline: none;
 }
 #search-input:focus {
@@ -3273,20 +3978,6 @@ body.rail-fx-instant #details-panel #details-actions {
 #game-list-panel.search-mode #search-input { animation: searchFade 160ms ease-out; }
 @keyframes searchGrow { from { opacity: 0; } to { opacity: 1; } }
 
-/* The sort dropdown sits exactly under the input: same left edge, same width.
-   --search-x / --search-w are measured from the real input by app.js. */
-#filter-bar,
-#game-list-panel.search-mode #filter-bar {
-  display: none;
-  box-sizing: border-box;
-  max-width: 100%;
-  margin: var(--sp-1) 0 var(--sp-3) var(--search-x, 0px);
-  width: var(--search-w, 100%);
-}
-#game-list-panel.search-mode #filter-bar {
-  display: flex;
-  animation: searchFade 160ms ease-out;
-}
 #sort-select {
   flex: 1 1 auto;
   min-width: 0;
@@ -3544,66 +4235,11 @@ body.rail-fx-instant #details-panel #details-actions {
 }
 .stat-locate-btn:hover { color: var(--accent); }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   SIDEBAR TOOLBAR — circular icon buttons, flat
-   ═══════════════════════════════════════════════════════════════════════════ */
-.sidebar-toolbar {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 0 14px;
-  margin: var(--sp-3) 0;
-  justify-content: flex-start;
-}
-.tool-btn,
-#btn-settings,
-#btn-stats,
-#btn-search-toggle,
-#btn-add-game {
-  width: 40px; height: 40px;
-  flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: var(--r-pill);
-  border: 1px solid var(--hairline);
-  background: var(--surface-1);
-  color: var(--text-faint);
-  font-size: 17px;
-  cursor: pointer;
-  position: relative;
-  overflow: visible;
-  box-shadow: none;
-  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease,
-              background var(--dur-fast) ease;
-}
-.tool-btn::before,
-#btn-add-game::before { content: none; display: none; }
-.tool-btn:hover,
-#btn-settings:hover,
-#btn-stats:hover,
-#btn-search-toggle:hover,
-#btn-add-game:hover {
-  color: var(--text);
-  border-color: var(--hairline-strong);
-  background: var(--surface-2);
-  transform: none;
-  box-shadow: none;
-}
-/* Search toggle while searching. */
+/* The search item shows that a search is running. */
 #game-list-panel.search-mode #btn-search-toggle,
 #btn-search-toggle.active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: #fff;
 }
-/* De-emphasise (no blur) the icons that are inert during search. */
-#game-list-panel.search-mode #btn-settings,
-#game-list-panel.search-mode #btn-stats {
-  filter: none;
-  opacity: 0.30;
-  pointer-events: none;
-}
-#btn-add-game { color: var(--text-muted); font-size: 20px; }
 
 /* ── ID-level corrections ──────────────────────────────────────────────────
    A few older rules use ID+attribute selectors, which outrank the class-based
