@@ -127,7 +127,7 @@ mod imp {
         });
       }
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -208,7 +208,7 @@ mod imp {
         exe_path,
       });
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -307,7 +307,7 @@ mod imp {
       Some(path) => seen.insert(path.to_lowercase()),
       None => true,
     });
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -637,7 +637,7 @@ mod linux_imp {
       }
     }
 
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -694,7 +694,7 @@ mod linux_imp {
         exe_path,
       });
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 

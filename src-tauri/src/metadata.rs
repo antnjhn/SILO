@@ -148,7 +148,7 @@ async fn fetch_steam_candidates(client: &reqwest::Client, query: &str) -> Vec<Me
     }
   }
 
-  candidates.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+  candidates.sort_by_key(|a| std::cmp::Reverse(a.confidence));
   candidates
 }
 
@@ -245,7 +245,7 @@ pub async fn fetch_metadata(app: AppHandle, name: String) -> Result<MetadataResu
           rating: None,
         });
       }
-      candidates.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+      candidates.sort_by_key(|a| std::cmp::Reverse(a.confidence));
     }
   }
 

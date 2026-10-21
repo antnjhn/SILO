@@ -3073,7 +3073,7 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
     }
 
     // Sort results alphabetically by name
-    results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    results.sort_by_key(|a| a.name.to_lowercase());
 
     Ok(results)
 }
