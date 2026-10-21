@@ -2027,7 +2027,7 @@ fn build_linux_game_command(exe_path: &str) -> (String, Vec<String>, Option<Path
         if path_str.contains("compatdata") && path_str.contains("steamapps") {
             // This is a Steam Proton game - try to use steam-run or run via proton directly
             // Find the proton runtime
-            if let Some(proton_dir) = find_proton_runtime(&path) {
+            if let Some(proton_dir) = find_proton_runtime(path) {
                 if let Some(proton_bin) = proton_dir.join("proton").to_str() {
                     let args = vec!["run".to_string(), exe_path.to_string()];
                     return (proton_bin.to_string(), args, path.parent().map(|p| p.to_path_buf()));
@@ -2115,7 +2115,7 @@ fn find_proton_runtime(game_exe_path: &Path) -> Option<PathBuf> {
                         // Find the latest Proton version
                         if let Ok(entries) = fs::read_dir(&proton_dir) {
                             let mut versions: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                            versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                            versions.sort_by_key(|a| std::cmp::Reverse(a.file_name()));
                             for entry in versions {
                                 let proton_bin = entry.path().join("proton");
                                 if proton_bin.exists() {
@@ -4986,10 +4986,10 @@ mod tests {
     /// A rooted path on a volume this machine does not have.
     fn path_on_a_missing_volume() -> &'static str {
         #[cfg(target_os = "windows")]
-        let path = r"\SiloNoSuchVolume\Saves\__silo_no_such_game__";
+        const PATH: &str = r"\SiloNoSuchVolume\Saves\__silo_no_such_game__";
         #[cfg(not(target_os = "windows"))]
-        let path = "/mnt/__silo_no_such_volume__/Saves/__silo_no_such_game__";
-        path
+        const PATH: &str = "/mnt/__silo_no_such_volume__/Saves/__silo_no_such_game__";
+        PATH
     }
 
     #[test]

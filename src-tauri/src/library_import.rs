@@ -659,7 +659,6 @@ mod linux_imp {
     title: Option<String>,
     install_path: Option<String>,
     executable: Option<String>,
-    platform: Option<String>,
   }
 
   fn heroic_library(source: &str, runner: &str) -> Vec<ImportCandidate> {
