@@ -27,6 +27,8 @@ pub fn run() {
     .plugin(tauri_plugin_updater::Builder::new().build())
     .invoke_handler(tauri::generate_handler![
       commands::get_games,
+      commands::verify_library_installs,
+      commands::verify_game_install,
       commands::add_game,
       commands::update_game,
       commands::detect_launch_target,
@@ -45,6 +47,11 @@ pub fn run() {
       commands::fetch_steam_metadata,
       commands::get_game_backups,
       commands::restore_backup,
+      commands::survey_save_folders,
+      commands::propose_save_folder,
+      commands::relink_save_folders,
+      commands::plan_save_import,
+      commands::bring_saves_across,
       commands::delete_backup,
       commands::backup_game_now,
       commands::check_uninstaller,

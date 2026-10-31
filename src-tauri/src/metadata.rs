@@ -148,7 +148,7 @@ async fn fetch_steam_candidates(client: &reqwest::Client, query: &str) -> Vec<Me
     }
   }
 
-  candidates.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+  candidates.sort_by_key(|a| std::cmp::Reverse(a.confidence));
   candidates
 }
 
@@ -245,7 +245,7 @@ pub async fn fetch_metadata(app: AppHandle, name: String) -> Result<MetadataResu
           rating: None,
         });
       }
-      candidates.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+      candidates.sort_by_key(|a| std::cmp::Reverse(a.confidence));
     }
   }
 
@@ -336,7 +336,7 @@ mod tests {
     // "Red Dead Redemption 2" vs "Red Dead Redemption" share {red, dead, redemption};
     // the "2" token is kept, so they must NOT be treated as identical.
     let score = name_similarity("Red Dead Redemption 2", "Red Dead Redemption");
-    assert!(score >= 60 && score < 100, "got {}", score);
+        assert!((60..100).contains(&score), "got {}", score);
   }
 
   #[test]

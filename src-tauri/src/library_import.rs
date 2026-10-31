@@ -114,9 +114,9 @@ mod imp {
         }) else {
           continue;
         };
-        let name = vdf_get(app_state, "name").and_then(|v| vdf_str(v)).unwrap_or_else(|| app_id.clone());
+        let name = vdf_get(app_state, "name").and_then(vdf_str).unwrap_or_else(|| app_id.clone());
         let exe_path = vdf_get(app_state, "installdir")
-          .and_then(|v| vdf_str(v))
+          .and_then(vdf_str)
           .and_then(|dir| find_best_game_exe(&steamapps.join("common").join(&dir)))
           .map(|p| p.to_string_lossy().into_owned());
         candidates.push(ImportCandidate {
@@ -127,7 +127,7 @@ mod imp {
         });
       }
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -208,7 +208,7 @@ mod imp {
         exe_path,
       });
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -307,7 +307,7 @@ mod imp {
       Some(path) => seen.insert(path.to_lowercase()),
       None => true,
     });
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -637,7 +637,7 @@ mod linux_imp {
       }
     }
 
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 
@@ -659,7 +659,6 @@ mod linux_imp {
     title: Option<String>,
     install_path: Option<String>,
     executable: Option<String>,
-    platform: Option<String>,
   }
 
   fn heroic_library(source: &str, runner: &str) -> Vec<ImportCandidate> {
@@ -694,7 +693,7 @@ mod linux_imp {
         exe_path,
       });
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_key(|a| a.name.to_lowercase());
     candidates
   }
 

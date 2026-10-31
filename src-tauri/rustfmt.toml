@@ -1,0 +1,5 @@
+# The crate is 4-space indented (some older files use 2); 120 columns keeps the
+# long Tauri command signatures from being rewrapped. The tree is not fully
+# rustfmt-clean yet, so CI runs `cargo fmt --check` as an advisory step only.
+tab_spaces = 4
+max_width = 120

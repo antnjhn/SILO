@@ -185,7 +185,6 @@ SaveGuard watches these locations for save files:
 - Wine prefixes (`~/.wine/drive_c/users/...`)
 
 ### Known Linux limitations
-- Xbox Mode (Windows+F11 hotkey) is Windows-only
 - Some Windows-only games may require manual Wine/Proton configuration
 - SteamGridDB artwork requires a free API key (same as Windows)
 - AppImage requires FUSE (`libfuse2`) to run
