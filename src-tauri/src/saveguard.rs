@@ -1,19 +1,19 @@
+use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
-use notify::{Watcher, RecursiveMode, EventKind};
-use sysinfo::{System, Pid};
+use sysinfo::{Pid, System};
 use tauri::{AppHandle, Manager};
 #[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
 #[cfg(target_os = "windows")]
-use windows::Win32::System::RestartManager::*;
-#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::*;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::RestartManager::*;
 use zip::write::FileOptions;
-use std::io::{Write, Read};
 
 #[cfg(target_os = "windows")]
 pub fn get_locking_pids(path: &Path) -> Vec<u32> {
@@ -21,13 +21,17 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
     unsafe {
         let mut session_handle: u32 = 0;
         let mut session_key: [u16; CCH_RM_SESSION_KEY as usize + 1] = [0; CCH_RM_SESSION_KEY as usize + 1];
-        
+
         let res = RmStartSession(&mut session_handle, 0, windows::core::PWSTR(session_key.as_mut_ptr()));
         if res != ERROR_SUCCESS {
             return pids;
         }
 
-        let path_wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+        let path_wide: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let pcwstr = PCWSTR(path_wide.as_ptr());
         let resources = [pcwstr];
 
@@ -36,7 +40,7 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
             let mut proc_info_needed = 0;
             let mut proc_info_count = 0;
             let mut reason: u32 = 0;
-            
+
             let res = RmGetList(
                 session_handle,
                 &mut proc_info_needed,
@@ -48,7 +52,7 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
             if res == ERROR_MORE_DATA {
                 proc_info_count = proc_info_needed;
                 let mut proc_infos: Vec<RM_PROCESS_INFO> = vec![std::mem::zeroed(); proc_info_count as usize];
-                
+
                 let res = RmGetList(
                     session_handle,
                     &mut proc_info_needed,
@@ -64,7 +68,7 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
                 }
             }
         }
-        
+
         let _ = RmEndSession(session_handle);
     }
     pids
@@ -85,7 +89,9 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
                         for fd in fd_entries.filter_map(|e| e.ok()) {
                             if let Ok(target) = fs::read_link(fd.path()) {
                                 if let Ok(canonical_target) = target.canonicalize() {
-                                    if canonical_target.starts_with(&canonical_path) || canonical_path.starts_with(&canonical_target) {
+                                    if canonical_target.starts_with(&canonical_path)
+                                        || canonical_path.starts_with(&canonical_target)
+                                    {
                                         pids.push(pid);
                                         break;
                                     }
@@ -96,14 +102,16 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
                             }
                         }
                     }
-                    
+
                     // Also check memory-mapped files (for memory-mapped saves)
                     let map_dir = entry.path().join("map_files");
                     if let Ok(map_entries) = fs::read_dir(map_dir) {
                         for map_entry in map_entries.filter_map(|e| e.ok()) {
                             if let Ok(target) = fs::read_link(map_entry.path()) {
                                 if let Ok(canonical_target) = target.canonicalize() {
-                                    if canonical_target.starts_with(&canonical_path) || canonical_path.starts_with(&canonical_target) {
+                                    if canonical_target.starts_with(&canonical_path)
+                                        || canonical_path.starts_with(&canonical_target)
+                                    {
                                         pids.push(pid);
                                         break;
                                     }
@@ -122,8 +130,10 @@ pub fn get_locking_pids(path: &Path) -> Vec<u32> {
 }
 
 pub fn is_descendant(system: &System, target_pid: u32, ancestor_pid: u32) -> bool {
-    if target_pid == ancestor_pid { return true; }
-    
+    if target_pid == ancestor_pid {
+        return true;
+    }
+
     let mut current_pid = target_pid;
     while let Some(proc) = system.process(Pid::from_u32(current_pid)) {
         if let Some(parent) = proc.parent() {
@@ -145,15 +155,17 @@ pub fn is_descendant(system: &System, target_pid: u32, ancestor_pid: u32) -> boo
 /// game's child/helper processes are attributed even though the session snapshot only
 /// tracks the single pinned game PID. Refresh cost is one PID per step of the chain.
 pub fn pid_is_descendant_of(system: &mut System, target_pid: u32, ancestor_pid: u32) -> bool {
-    if target_pid == ancestor_pid { return true; }
+    if target_pid == ancestor_pid {
+        return true;
+    }
 
     let mut current_pid = target_pid;
     for _ in 0..64 {
-        system.refresh_processes(
-            sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(current_pid)]),
-            false,
-        );
-        let parent_pid = match system.process(Pid::from_u32(current_pid)).and_then(|proc| proc.parent()) {
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(current_pid)]), false);
+        let parent_pid = match system
+            .process(Pid::from_u32(current_pid))
+            .and_then(|proc| proc.parent())
+        {
             Some(parent) => parent.as_u32(),
             // Process is gone or its parent is not visible — treat as not a descendant.
             None => return false,
@@ -174,15 +186,25 @@ pub fn pid_is_descendant_of(system: &mut System, target_pid: u32, ancestor_pid: 
 /// single live root: intermediate launchers may have already exited, and a PID
 /// recorded in `known` while its chain was still intact keeps the subtree linked.
 pub fn pid_chain_reaches(system: &System, target_pid: u32, known: &HashSet<u32>) -> bool {
-    if known.contains(&target_pid) { return true; }
+    if known.contains(&target_pid) {
+        return true;
+    }
 
     let mut current_pid = target_pid;
     for _ in 0..64 {
-        let Some(proc) = system.process(Pid::from_u32(current_pid)) else { return false; };
-        let Some(parent) = proc.parent() else { return false; };
+        let Some(proc) = system.process(Pid::from_u32(current_pid)) else {
+            return false;
+        };
+        let Some(parent) = proc.parent() else {
+            return false;
+        };
         let parent_pid = parent.as_u32();
-        if known.contains(&parent_pid) { return true; }
-        if parent_pid == current_pid { return false; } // safety valve: no meaningful parent
+        if known.contains(&parent_pid) {
+            return true;
+        }
+        if parent_pid == current_pid {
+            return false;
+        } // safety valve: no meaningful parent
         current_pid = parent_pid;
     }
     false
@@ -202,7 +224,7 @@ pub fn is_save_root_excluded(folder_name: &str) -> bool {
         "cef",
         "webcache",
         "gpuconfig",
-        "shadercache"
+        "shadercache",
     ];
     exclusions.contains(&folder_name)
 }
@@ -284,10 +306,7 @@ fn deepest_name_match(rel: &Path, name_keys: &[String]) -> Option<usize> {
         if is_save_root_excluded(&name) {
             continue;
         }
-        if name_keys
-            .iter()
-            .any(|key| name_matches(&name, key))
-        {
+        if name_keys.iter().any(|key| name_matches(&name, key)) {
             found = Some(index + 1);
         }
     }
@@ -354,12 +373,18 @@ pub fn start_watcher(pid: u32, game_id: String, app_handle: AppHandle) {
                 return;
             }
         };
-        
+
         let path_resolver = app_handle.path();
         let mut base_dirs = Vec::new();
-        if let Ok(dir) = path_resolver.local_data_dir() { base_dirs.push(dir); }
-        if let Ok(dir) = path_resolver.data_dir() { base_dirs.push(dir); }
-        if let Ok(dir) = path_resolver.config_dir() { base_dirs.push(dir); }
+        if let Ok(dir) = path_resolver.local_data_dir() {
+            base_dirs.push(dir);
+        }
+        if let Ok(dir) = path_resolver.data_dir() {
+            base_dirs.push(dir);
+        }
+        if let Ok(dir) = path_resolver.config_dir() {
+            base_dirs.push(dir);
+        }
         if let Ok(dir) = path_resolver.document_dir() {
             base_dirs.push(dir.clone());
             base_dirs.push(dir.join("My Games"));
@@ -522,14 +547,16 @@ pub fn find_save_root_by_scan(
 }
 
 pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHandle) {
-    if roots.is_empty() { return; }
-    
+    if roots.is_empty() {
+        return;
+    }
+
     let saves_dir = app_handle.path().app_data_dir().unwrap().join("saves").join(game_id);
     let _ = fs::create_dir_all(&saves_dir);
-    
+
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let zip_path = saves_dir.join(format!("{}.zip", timestamp));
-    
+
     let zip_file = match File::create(&zip_path) {
         Ok(f) => f,
         Err(e) => {
@@ -537,7 +564,7 @@ pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHan
             return;
         }
     };
-    
+
     let mut zip = zip::ZipWriter::new(zip_file);
     let options = FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -551,14 +578,14 @@ pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHan
                 Err(_) => continue,
             };
             let path = entry.path();
-            
+
             let rel_path = match path.strip_prefix(root) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            
+
             let zip_internal_path = format!("{}/{}", root_name, rel_path.to_string_lossy().replace("\\", "/"));
-            
+
             if path.is_file() {
                 if let Ok(mut f) = File::open(path) {
                     if zip.start_file(&zip_internal_path, options).is_ok() {
@@ -573,7 +600,7 @@ pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHan
             }
         }
     }
-    
+
     let _ = zip.finish();
     log::info!("Backup created at {:?}", zip_path);
 }
@@ -584,7 +611,15 @@ mod tests {
 
     #[test]
     fn is_save_root_excluded_covers_known_cache_folders() {
-        for folder in ["temp", "cache", "crashpad", "crash_reports", "logs", "shadercache", "nvidia"] {
+        for folder in [
+            "temp",
+            "cache",
+            "crashpad",
+            "crash_reports",
+            "logs",
+            "shadercache",
+            "nvidia",
+        ] {
             assert!(is_save_root_excluded(folder), "expected {:?} excluded", folder);
         }
     }
@@ -686,7 +721,10 @@ mod tests {
             PathBuf::from("/home/test/Saved Games/CD Projekt Red/Cyberpunk 2077/ManualSave-1/sav.dat"),
             PathBuf::from("/home/test/Saved Games/CD Projekt Red/Cyberpunk 2077"),
         );
-        assert_eq!(get_save_root_for(&path, std::slice::from_ref(&base), &keys), Some(expected.clone()));
+        assert_eq!(
+            get_save_root_for(&path, std::slice::from_ref(&base), &keys),
+            Some(expected.clone())
+        );
         assert_eq!(save_root_by_name(&path, &[base], &keys), Some(expected));
     }
 
@@ -705,7 +743,10 @@ mod tests {
             PathBuf::from("/home/test/Documents/SomeUnknownGame/saves/slot1.dat"),
             PathBuf::from("/home/test/Documents/SomeUnknownGame"),
         );
-        assert_eq!(get_save_root_for(&path, std::slice::from_ref(&base), &keys), Some(expected));
+        assert_eq!(
+            get_save_root_for(&path, std::slice::from_ref(&base), &keys),
+            Some(expected)
+        );
         // …but the lock-free fallback refuses to claim an unrelated game's write.
         assert_eq!(save_root_by_name(&path, &[base], &keys), None);
     }
@@ -777,7 +818,10 @@ mod tests {
 
         let keys = vec!["Cyberpunk 2077".to_string()];
         let long_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
-        assert_eq!(find_save_root_by_scan(std::slice::from_ref(&base), &keys, long_ago, None), Some(game_folder.clone()));
+        assert_eq!(
+            find_save_root_by_scan(std::slice::from_ref(&base), &keys, long_ago, None),
+            Some(game_folder.clone())
+        );
         // A future session start means "nothing was touched since" -> still returns
         // the named folder, because it is where the next save will land.
         let future = std::time::SystemTime::now() + Duration::from_secs(3_600);
@@ -811,7 +855,10 @@ mod tests {
 
         let keys = vec!["Cyberpunk 2077".to_string()];
         let long_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
-        assert_eq!(find_save_root_by_scan(std::slice::from_ref(&base), &keys, long_ago, Some(&install)), None);
+        assert_eq!(
+            find_save_root_by_scan(std::slice::from_ref(&base), &keys, long_ago, Some(&install)),
+            None
+        );
         assert_eq!(find_save_root_by_scan(&[base], &keys, long_ago, None), Some(install));
     }
 

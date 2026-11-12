@@ -3825,7 +3825,7 @@ dependencies = [
 
 [[package]]
 name = "silo"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3844,6 +3844,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "urlencoding",
+ "uuid",
  "walkdir",
  "windows 0.58.0",
  "winreg 0.52.0",

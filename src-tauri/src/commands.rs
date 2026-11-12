@@ -1,23 +1,23 @@
+use crate::settings::CloseBehaviour;
+use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Component, Path, PathBuf};
-use tauri::{AppHandle, Manager, Emitter};
-use std::process::Command;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-use std::sync::mpsc::channel;
 use std::collections::{HashMap, HashSet};
-use notify::{Watcher, RecursiveMode, EventKind};
-use walkdir::WalkDir;
+use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::time::Instant;
 #[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::PermissionsExt;
-
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc::{channel, Receiver};
+use std::time::Instant;
+use tauri::{AppHandle, Emitter, Manager};
+use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Game {
+pub(crate) struct Game {
     pub id: String,
     pub name: String,
     #[serde(rename = "exePath", default)]
@@ -32,6 +32,11 @@ pub struct Game {
     pub font_color: Option<String>,
     #[serde(rename = "playtimeMinutes", default)]
     pub playtime_minutes: u32,
+    /// Playtime that is only a lower bound, because it was reconstructed from
+    /// durable checkpoints after an app restart. It is kept out of
+    /// `playtimeMinutes` so the exact total is never inflated by a guess.
+    #[serde(rename = "uncertainPlaytimeMinutes", default)]
+    pub uncertain_playtime_minutes: u32,
     #[serde(rename = "sessionCount", default)]
     pub session_count: u32,
     #[serde(rename = "lastPlayed", default)]
@@ -57,6 +62,11 @@ pub struct Game {
     /// camelCase like every other field.
     #[serde(rename = "launchTarget", default)]
     pub launch_target: Option<String>,
+    /// The game executable this entry launches, when the user configured it
+    /// explicitly. In `launcher` mode it is the game the launcher starts; in
+    /// `game` mode it is the game itself. Serialization uses camelCase.
+    #[serde(rename = "launchChildPath", default)]
+    pub launch_child_path: Option<String>,
     /// Directory containing the executable. Reserved for future per-game exe
     /// caching; not currently read.
     #[serde(default, skip_serializing)]
@@ -129,7 +139,10 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
         if bak_path.exists() {
             if let Ok(data) = fs::read_to_string(&bak_path) {
                 if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&data) {
-                    let _ = app.emit("library-corrupt-recovered", "Primary library missing. Recovered from backup.");
+                    let _ = app.emit(
+                        "library-corrupt-recovered",
+                        "Primary library missing. Recovered from backup.",
+                    );
                     for game in &mut games {
                         game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
                     }
@@ -147,13 +160,16 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
                 game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
             }
             games
-        },
+        }
         Err(e) => {
             log::error!("Failed to parse games.json: {}", e);
             if bak_path.exists() {
                 if let Ok(bak_data) = fs::read_to_string(&bak_path) {
                     if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&bak_data) {
-                        let _ = app.emit("library-corrupt-recovered", format!("Primary library corrupt ({}). Recovered from backup.", e));
+                        let _ = app.emit(
+                            "library-corrupt-recovered",
+                            format!("Primary library corrupt ({}). Recovered from backup.", e),
+                        );
                         for game in &mut games {
                             game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
                         }
@@ -161,29 +177,32 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
                     }
                 }
             }
-            let _ = app.emit("library-corrupt-failed", format!("Primary library corrupt and backup recovery failed: {}", e));
+            let _ = app.emit(
+                "library-corrupt-failed",
+                format!("Primary library corrupt and backup recovery failed: {}", e),
+            );
             vec![]
         }
     }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   STARTUP INSTALL CHECK
+STARTUP INSTALL CHECK
 
-   Verifies that every game in the library is still installed. Runs fully off
-   the UI thread, a few paths at a time, and each probe is bounded by
-   INSTALL_TIMEOUT so a disconnected network share or an unplugged external
-   drive can never hang startup. Three states per game:
+Verifies that every game in the library is still installed. Runs fully off
+the UI thread, a few paths at a time, and each probe is bounded by
+INSTALL_TIMEOUT so a disconnected network share or an unplugged external
+drive can never hang startup. Three states per game:
 
-     installed   — the executable (or, for launcher entries, the resolved game
-                   binary) is present
-     missing     — not launchable, but its drive/root is reachable, so the game
-                   was most likely uninstalled or moved
-     unavailable — the drive/root itself is gone (external drive unplugged)
+  installed   — the executable (or, for launcher entries, the resolved game
+                binary) is present
+  missing     — not launchable, but its drive/root is reachable, so the game
+                was most likely uninstalled or moved
+  unavailable — the drive/root itself is gone (external drive unplugged)
 
-   The result is kept in app state with a timestamp. It is never persisted, and
-   no game, save, backup or statistic is ever modified because of a check.
-   ═══════════════════════════════════════════════════════════════════════════ */
+The result is kept in app state with a timestamp. It is never persisted, and
+no game, save, backup or statistic is ever modified because of a check.
+═══════════════════════════════════════════════════════════════════════════ */
 
 pub const INSTALL_INSTALLED: &str = "installed";
 pub const INSTALL_MISSING: &str = "missing";
@@ -209,8 +228,7 @@ struct InstallSnapshot {
     entries: Vec<InstallStatus>,
 }
 
-static INSTALL_SNAPSHOT: std::sync::OnceLock<std::sync::Mutex<InstallSnapshot>> =
-    std::sync::OnceLock::new();
+static INSTALL_SNAPSHOT: std::sync::OnceLock<std::sync::Mutex<InstallSnapshot>> = std::sync::OnceLock::new();
 
 fn install_snapshot() -> &'static std::sync::Mutex<InstallSnapshot> {
     INSTALL_SNAPSHOT.get_or_init(|| std::sync::Mutex::new(InstallSnapshot::default()))
@@ -269,10 +287,7 @@ fn install_job(game: &Game) -> InstallJob {
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .map(PathBuf::from),
-        launch_target: game
-            .launch_target
-            .clone()
-            .unwrap_or_else(|| "auto".to_string()),
+        launch_target: game.launch_target.clone().unwrap_or_else(|| "auto".to_string()),
     }
 }
 
@@ -347,10 +362,7 @@ pub async fn verify_library_installs(app: AppHandle) -> Vec<InstallStatus> {
         }
     };
 
-    let broken = results
-        .iter()
-        .filter(|r| r.status != INSTALL_INSTALLED)
-        .count();
+    let broken = results.iter().filter(|r| r.status != INSTALL_INSTALLED).count();
 
     if let Ok(mut snap) = install_snapshot().lock() {
         // Report what changed since the previous check, then store this one.
@@ -405,11 +417,26 @@ pub async fn verify_game_install(app: AppHandle, game_id: String) -> Option<Inst
 // The IPC contract sends one argument per field, so the count is set by the
 // command surface rather than by a design smell.
 #[allow(clippy::too_many_arguments)]
-pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpaper: Option<String>, logo_path: Option<String>, font_family: Option<String>, font_color: Option<String>, save_path: Option<String>, launch_target: Option<String>) -> Result<Game, String> {
+pub fn add_game(
+    app: AppHandle,
+    name: String,
+    exe_path: Option<String>,
+    wallpaper: Option<String>,
+    logo_path: Option<String>,
+    font_family: Option<String>,
+    font_color: Option<String>,
+    save_path: Option<String>,
+    launch_target: Option<String>,
+    launch_child_path: Option<String>,
+) -> Result<Game, String> {
     let mut games = get_games(app.clone());
     let save_path = normalize_save_path(save_path.as_deref())?;
     let new_game = Game {
-        id: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string(),
+        id: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string(),
         name,
         exe_path,
         wallpaper,
@@ -417,6 +444,7 @@ pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpape
         font_family,
         font_color,
         playtime_minutes: 0,
+        uncertain_playtime_minutes: 0,
         session_count: 0,
         last_played: None,
         is_installed: Some(true),
@@ -428,6 +456,9 @@ pub fn add_game(app: AppHandle, name: String, exe_path: Option<String>, wallpape
         favorite: false,
         tags: vec![],
         launch_target: launch_target.filter(|t| matches!(t.as_str(), "auto" | "launcher" | "game")),
+        launch_child_path: launch_child_path
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty()),
         exe_dir: None,
     };
     games.push(new_game.clone());
@@ -452,7 +483,9 @@ fn apply_optional(value: Option<&serde_json::Value>, target: &mut Option<String>
 pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Result<Option<Game>, String> {
     let mut games = get_games(app.clone());
     if let Some(game) = games.iter_mut().find(|g| g.id == id) {
-        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) { game.name = name.to_string(); }
+        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+            game.name = name.to_string();
+        }
         apply_optional(updates.get("exePath"), &mut game.exe_path);
         apply_optional(updates.get("wallpaper"), &mut game.wallpaper);
         apply_optional(updates.get("logoPath"), &mut game.logo_path);
@@ -460,6 +493,12 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
         apply_optional(updates.get("fontColor"), &mut game.font_color);
         apply_optional(updates.get("status"), &mut game.status);
         apply_optional(updates.get("launchTarget"), &mut game.launch_target);
+        if let Some(value) = updates.get("launchChildPath") {
+            game.launch_child_path = value
+                .as_str()
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty());
+        }
 
         if let Some(save_path) = updates.get("savePath") {
             if save_path.is_null() {
@@ -506,6 +545,13 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
 pub struct LaunchTargetInfo {
     pub launcher_like: bool,
     pub real_game_path: Option<String>,
+    /// The target SILO would pick for this executable. This is a *suggestion*
+    /// for the Edit modal: the stored setting stays explicit, because the
+    /// launch classifier never infers a game from a file name.
+    pub suggested_target: String,
+    /// The game binary SILO is confident about, if any. It can be stored as the
+    /// explicit child path so `launcher` mode has something to track.
+    pub suggested_child_path: Option<String>,
 }
 
 #[tauri::command]
@@ -515,12 +561,25 @@ pub fn detect_launch_target(exe_path: String) -> LaunchTargetInfo {
         .file_name()
         .map(|n| is_launcher_like(&n.to_string_lossy().to_lowercase()))
         .unwrap_or(false);
-    let real_game_path = if launcher_like {
-        find_real_game_exe(path).map(|p| p.to_string_lossy().into_owned())
+    let resolved = find_real_game_exe(path);
+    let confident = resolved
+        .as_deref()
+        .is_some_and(|candidate| is_confident_game_exe(candidate, path));
+    // A launcher-looking executable is offered as "launcher"; anything else is
+    // offered as "game". The suggestion is only a default for the segmented
+    // control — the user still confirms it explicitly.
+    let suggested_target = if launcher_like { "launcher" } else { "game" }.to_string();
+    let suggested_child_path = if confident {
+        resolved.as_ref().map(|path| path.to_string_lossy().into_owned())
     } else {
         None
     };
-    LaunchTargetInfo { launcher_like, real_game_path }
+    LaunchTargetInfo {
+        launcher_like,
+        real_game_path: resolved.map(|path| path.to_string_lossy().into_owned()),
+        suggested_target,
+        suggested_child_path,
+    }
 }
 
 #[tauri::command]
@@ -591,7 +650,9 @@ pub async fn pick_exe(app: AppHandle) -> Option<String> {
     #[cfg(target_os = "windows")]
     let dialog = app.dialog().file().add_filter("Executables", &["exe"]);
     #[cfg(not(target_os = "windows"))]
-    let dialog = app.dialog().file()
+    let dialog = app
+        .dialog()
+        .file()
         .add_filter("Executables", &["sh", "x86_64", "bin", "AppImage", "appimage"])
         .add_filter("Wine/Proton", &["exe"])
         .add_filter("All Files", &["*"]);
@@ -600,16 +661,27 @@ pub async fn pick_exe(app: AppHandle) -> Option<String> {
 
 #[tauri::command]
 pub async fn pick_save_folder(app: AppHandle) -> Option<String> {
-    let folder = app.dialog().file().set_title("Select Save Folder").blocking_pick_folder();
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("Select Save Folder")
+        .blocking_pick_folder();
     folder.map(|path| path.to_string())
 }
 
 #[tauri::command]
 pub async fn pick_wallpaper(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
-    let file_path = app.dialog().file().add_filter("Images", &["jpg", "jpeg", "png", "webp", "gif"]).blocking_pick_file();
+    let file_path = app
+        .dialog()
+        .file()
+        .add_filter("Images", &["jpg", "jpeg", "png", "webp", "gif"])
+        .blocking_pick_file();
     if let Some(src) = file_path {
         let src_str = src.to_string();
-        let ext = std::path::Path::new(&src_str).extension().and_then(|s| s.to_str()).unwrap_or("png");
+        let ext = std::path::Path::new(&src_str)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png");
         let wallpapers_dir = get_wallpapers_dir(&app);
         fs::create_dir_all(&wallpapers_dir).map_err(|e| e.to_string())?;
         let dest = wallpapers_dir.join(format!("{}.{}", game_id, ext));
@@ -621,10 +693,17 @@ pub async fn pick_wallpaper(app: AppHandle, game_id: String) -> Result<Option<St
 
 #[tauri::command]
 pub async fn pick_logo(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
-    let file_path = app.dialog().file().add_filter("Images", &["jpg", "jpeg", "png", "webp"]).blocking_pick_file();
+    let file_path = app
+        .dialog()
+        .file()
+        .add_filter("Images", &["jpg", "jpeg", "png", "webp", "gif"])
+        .blocking_pick_file();
     if let Some(src) = file_path {
         let src_str = src.to_string();
-        let ext = std::path::Path::new(&src_str).extension().and_then(|s| s.to_str()).unwrap_or("png");
+        let ext = std::path::Path::new(&src_str)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png");
         let wallpapers_dir = get_wallpapers_dir(&app);
         fs::create_dir_all(&wallpapers_dir).map_err(|e| e.to_string())?;
         let dest = wallpapers_dir.join(format!("logo_{}.{}", game_id, ext));
@@ -649,7 +728,11 @@ fn set_launcher_background(background: bool) {
         // trims; restored to foreground mode the instant the game ends.
         let _ = SetPriorityClass(
             GetCurrentProcess(),
-            if background { PROCESS_MODE_BACKGROUND_BEGIN } else { PROCESS_MODE_BACKGROUND_END },
+            if background {
+                PROCESS_MODE_BACKGROUND_BEGIN
+            } else {
+                PROCESS_MODE_BACKGROUND_END
+            },
         );
     }
 }
@@ -665,6 +748,173 @@ fn save_detection_needed(save_path: Option<&str>) -> bool {
     match save_path {
         None => true,
         Some(path) => !Path::new(path).is_dir(),
+    }
+}
+
+/// Keeps the two legacy reasons for starting SaveGuard in one decision point.
+pub(crate) fn save_watch_required(save_path: Option<&str>, name_keys: &[String]) -> (bool, bool, bool) {
+    let run_detection = save_detection_needed(save_path);
+    let stored_is_suspect = save_path
+        .map(|path| Path::new(path).is_dir() && !save_path_names_game(path, name_keys))
+        .unwrap_or(false);
+    (run_detection, stored_is_suspect, run_detection || stored_is_suspect)
+}
+
+fn save_event_is_write(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Modify(_) | EventKind::Create(_))
+}
+
+fn path_is_under_detected_root(path: &Path, roots: &HashSet<PathBuf>) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+const SAVE_EVENT_COALESCE_MS: u128 = 750;
+
+pub(crate) struct SaveWatchEvents {
+    watcher: Option<notify::RecommendedWatcher>,
+    receiver: Option<Receiver<notify::Event>>,
+    pending_paths: HashSet<PathBuf>,
+    last_detection_check: Option<Instant>,
+}
+
+fn save_watch_check_due(last_check: Option<Instant>, pending: bool, now: Instant) -> bool {
+    match last_check {
+        Some(last) => now.duration_since(last).as_millis() >= SAVE_EVENT_COALESCE_MS,
+        None => pending,
+    }
+}
+
+fn select_attributed_save_root(
+    lock_attributed_root: Option<PathBuf>,
+    name_fallback_root: Option<PathBuf>,
+) -> Option<(PathBuf, bool)> {
+    lock_attributed_root
+        .map(|root| (root, true))
+        .or_else(|| name_fallback_root.map(|root| (root, false)))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attribute_save_paths(
+    paths: Vec<PathBuf>,
+    detected_path: &mut Option<PathBuf>,
+    detected_roots: &mut HashSet<PathBuf>,
+    stored_is_suspect: bool,
+    system: &mut sysinfo::System,
+    known_pids: &HashSet<u32>,
+    game_pid: Option<u32>,
+    watch_dirs: &[PathBuf],
+    name_keys: &[String],
+) {
+    for path in paths {
+        if path_is_under_detected_root(&path, detected_roots) {
+            continue;
+        }
+        let pids = crate::saveguard::get_locking_pids(&path);
+        let lock_pids: &[u32] = if stored_is_suspect { &[] } else { &pids };
+        let mut lock_attributed_root = None;
+        for &locking_pid in lock_pids {
+            if crate::saveguard::pid_chain_reaches(system, locking_pid, known_pids)
+                || game_pid.is_some_and(|target| crate::saveguard::pid_is_descendant_of(system, locking_pid, target))
+            {
+                lock_attributed_root = crate::saveguard::get_save_root_for(&path, watch_dirs, name_keys);
+                if lock_attributed_root.is_some() {
+                    break;
+                }
+            }
+        }
+        let name_fallback_root = if lock_attributed_root.is_none() {
+            crate::saveguard::save_root_by_name(&path, watch_dirs, name_keys)
+        } else {
+            None
+        };
+        if let Some((root, by_lock)) = select_attributed_save_root(lock_attributed_root, name_fallback_root) {
+            if by_lock {
+                log::info!("SaveGuard detected save root: {:?}", root);
+            } else {
+                log::info!("SaveGuard detected save root by name: {:?}", root);
+            }
+            *detected_path = Some(root.clone());
+            detected_roots.insert(root);
+        }
+        if detected_path.is_some() {
+            break;
+        }
+    }
+}
+
+fn collect_save_event_paths(
+    event: notify::Event,
+    detected: bool,
+    detected_roots: &HashSet<PathBuf>,
+    pending_paths: &mut HashSet<PathBuf>,
+) {
+    if save_event_is_write(&event.kind) && !detected {
+        pending_paths.extend(
+            event
+                .paths
+                .into_iter()
+                .filter(|path| !path_is_under_detected_root(path, detected_roots)),
+        );
+    }
+}
+
+impl SaveWatchEvents {
+    pub(crate) fn new(watch: bool) -> Self {
+        let (watcher, receiver) = if watch {
+            let (tx, rx) = channel();
+            let watcher_res = notify::recommended_watcher(move |res| {
+                if let Ok(event) = res {
+                    let _ = tx.send(event);
+                }
+            });
+            match watcher_res {
+                Ok(mut watcher) => {
+                    for path in get_watch_directories() {
+                        let _ = watcher.watch(&path, RecursiveMode::Recursive);
+                    }
+                    (Some(watcher), Some(rx))
+                }
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        Self {
+            watcher,
+            receiver,
+            pending_paths: HashSet::new(),
+            last_detection_check: None,
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.watcher = None;
+        self.receiver = None;
+    }
+
+    pub(crate) fn take_due_paths(&mut self, detected: bool, detected_roots: &HashSet<PathBuf>) -> Vec<PathBuf> {
+        let Some(receiver) = self.receiver.as_ref() else {
+            return Vec::new();
+        };
+        while let Ok(event) = receiver.try_recv() {
+            collect_save_event_paths(event, detected, detected_roots, &mut self.pending_paths);
+        }
+
+        let due = save_watch_check_due(
+            self.last_detection_check,
+            !self.pending_paths.is_empty(),
+            Instant::now(),
+        );
+        if !due || detected || self.pending_paths.is_empty() {
+            return Vec::new();
+        }
+
+        self.last_detection_check = Some(Instant::now());
+        self.pending_paths
+            .drain()
+            .filter(|path| !path_is_under_detected_root(path, detected_roots))
+            .collect()
     }
 }
 
@@ -1610,11 +1860,7 @@ fn save_folder_proposal(game: &Game, machine: &MachinePaths) -> Option<SaveFolde
             found,
             reason,
             confidence,
-        } => (
-            Some(found.to_string_lossy().into_owned()),
-            Some(confidence),
-            reason,
-        ),
+        } => (Some(found.to_string_lossy().into_owned()), Some(confidence), reason),
         SaveFolderOutcome::Unresolved { reason } => (None, None, reason),
         // Guarded by the check above, and a game with no recorded folder already
         // returned; nothing else can reach here.
@@ -2141,7 +2387,7 @@ fn find_proton_runtime(game_exe_path: &Path) -> Option<PathBuf> {
 // reaches any of those PIDs — even after intermediate launchers have exited.
 
 /// Collect `pid` plus every process that has it (transitively) as an ancestor.
-fn collect_subtree_pids(system: &sysinfo::System, root_pid: u32) -> HashSet<u32> {
+pub(crate) fn collect_subtree_pids(system: &sysinfo::System, root_pid: u32) -> HashSet<u32> {
     let mut known: HashSet<u32> = HashSet::new();
     known.insert(root_pid);
     // Children maps each parent PID to its live children. sysinfo does not
@@ -2178,7 +2424,7 @@ const LAUNCHER_NAME_HINTS: &[&str] = &[
 ];
 
 /// True when an exe name smells like a launcher rather than a game binary.
-fn is_launcher_like(name_lower: &str) -> bool {
+pub(crate) fn is_launcher_like(name_lower: &str) -> bool {
     LAUNCHER_NAME_HINTS.iter().any(|hint| name_lower.contains(hint))
 }
 
@@ -2337,6 +2583,510 @@ fn save_name_keys(game_name: &str, game_exe: &Path) -> Vec<String> {
     keys
 }
 
+/// Merges the save-folder name keys of several executables.
+///
+/// The Gaming Mode path knows both the configured executable and the game it
+/// actually tracks, and saves may be named after either one.
+fn merged_name_keys(game_name: &str, paths: &[&Path]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for path in paths {
+        for key in save_name_keys(game_name, path) {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+#[cfg(target_os = "windows")]
+fn launch_game_native_monitor(app: AppHandle, game: Game) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let configured = game.exe_path.clone().ok_or("No executable set")?;
+    let configured_path = PathBuf::from(&configured);
+    let launch_target = crate::game_launch::LaunchTarget::from_setting(game.launch_target.as_deref());
+    // An explicitly configured child is the user's own statement about which
+    // binary is the game. It is only honoured when the path is non-empty.
+    let explicit_child = game
+        .launch_child_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let resolved_game = find_real_game_exe(&configured_path);
+    let confident = resolved_game
+        .as_deref()
+        .is_some_and(|candidate| is_confident_game_exe(candidate, &configured_path));
+    let classification = crate::game_launch::classify_launch(crate::game_launch::LaunchInputs {
+        target: launch_target,
+        configured: &configured_path,
+        explicit_child: explicit_child.as_deref(),
+        resolved_game: resolved_game.as_deref(),
+        resolved_is_confident: confident,
+    });
+    let executable = classification.executable().to_path_buf();
+    let expectation = classification.expectation();
+    log::info!(
+        "Gaming Mode launch classification for {}: {:?} -> {:?}",
+        game.id,
+        classification,
+        expectation
+    );
+    let cwd = executable.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let name_keys = merged_name_keys(&game.name, &[&configured_path, executable.as_path()]);
+    let game_id = game.id.clone();
+    let game_name = game.name.clone();
+    let initial_save_path = game.save_path.clone();
+    let backup_count = game.backup_count.unwrap_or(5);
+    tauri::async_runtime::spawn_blocking(move || {
+        // Stage 6 lifecycle: this launch is accepted by the native monitor, so
+        // the process moves to `Launching`. That is the state which authorises a
+        // later WebView release; the monitor only releases after the target
+        // identity is pinned and the journal is durably written, so a failed
+        // journal write leaves the process here (and never releases).
+        crate::window_lifecycle::record_launch_accepted();
+        native_monitor_session(
+            app,
+            app_data,
+            game,
+            game_id,
+            game_name,
+            executable,
+            expectation,
+            cwd,
+            initial_save_path,
+            name_keys,
+            backup_count,
+        )
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn native_monitor_session(
+    app: AppHandle,
+    app_data: PathBuf,
+    _game: Game,
+    game_id: String,
+    game_name: String,
+    executable: PathBuf,
+    expectation: crate::game_launch::TargetExpectation,
+    cwd: PathBuf,
+    initial_save_path: Option<String>,
+    name_keys: Vec<String>,
+    backup_count: u32,
+) {
+    let config = crate::gaming_session_monitor::LaunchMonitorConfig {
+        app_data: app_data.clone(),
+        game_id: game_id.clone(),
+        executable: executable.clone(),
+        expectation,
+        cwd,
+        initial_save_path: initial_save_path.clone(),
+        name_keys: name_keys.clone(),
+        discovery_timeout: crate::gaming_session_monitor::PRODUCTION_DISCOVERY_TIMEOUT,
+        poll_interval: crate::gaming_session_monitor::PRODUCTION_POLL_INTERVAL,
+        checkpoint_interval: crate::gaming_session_monitor::PRODUCTION_CHECKPOINT_INTERVAL,
+    };
+    // Hiding (or releasing) the launcher is a host effect, so the monitor only asks
+    // for it once the exact target identity is pinned. This is the Stage 6 safe
+    // lifecycle point: the pinned journal has already been written and synced, so
+    // the session is durable before the WebView can be destroyed.
+    let outcome = crate::gaming_session_monitor::monitor_session(
+        config,
+        &|| {
+            release_launcher_for_session(&app);
+            set_launcher_background(true);
+        },
+        &|pid| {
+            let _ = app.emit(
+                "gaming-session-launch-confirmed",
+                serde_json::json!({
+                    "gameId": game_id,
+                    "gameName": game_name,
+                    "pid": pid,
+                    "message": "Process created successfully.",
+                }),
+            );
+        },
+    );
+    let (run_detection, _stored_is_suspect, watch_for_saves) =
+        save_watch_required(initial_save_path.as_deref(), &name_keys);
+    match outcome {
+        crate::gaming_session_monitor::MonitorOutcome::Ended(session) => {
+            let tail = crate::gaming_session_tail::SessionTail {
+                app_data,
+                game_id: game_id.clone(),
+                initial_save_path,
+                name_keys,
+                executable: executable.to_string_lossy().into_owned(),
+                backup_count,
+                watch_for_saves,
+                run_detection,
+            };
+            crate::gaming_session_tail::run_session_tail(tail, *session, &TauriSessionTailHost { app: app.clone() });
+        }
+        crate::gaming_session_monitor::MonitorOutcome::TrackingUncertain => {
+            // An uncertain session is neither finalized nor presented as over:
+            // the game may still be running, so the launcher window is not
+            // restored and no playtime is committed. The journal is retained as
+            // evidence and reconciliation resolves it at the next startup.
+            log::warn!(
+                "Gaming Mode tracking uncertain for {game_id}; journal retained, no restoration and no finalization"
+            );
+            if crate::window_lifecycle::webview_is_released() {
+                // Stage 6 left the launcher windowless, and there is no renderer
+                // left to explain the outcome to. The tray is the recovery route:
+                // Show SILO rebuilds the window.
+                log::warn!(
+                    "Gaming Mode has no launcher WebView for {game_id}; use the tray's Show SILO to bring the launcher back"
+                );
+            }
+            // The launch command has already returned, so this event is the only
+            // way the visible UI can explain why nothing was recorded.
+            notify_gaming_session(
+                &app,
+                "gaming-session-uncertain",
+                serde_json::json!({
+                    "gameId": game_id,
+                    "gameName": game_name,
+                    "message": "SILO could not identify this game's process, so the session was not tracked. If the game starts straight into the game, set its Launch target to Game in Edit."
+                }),
+            );
+        }
+        crate::gaming_session_monitor::MonitorOutcome::SessionAlreadyActive => {
+            log::warn!("Gaming Mode launch rejected for {game_id}: another session is active");
+            notify_gaming_session(
+                &app,
+                "gaming-session-rejected",
+                serde_json::json!({
+                    "gameId": game_id,
+                    "gameName": game_name,
+                    "message": "Another game is already running under Gaming Mode. This launch was ignored."
+                }),
+            );
+        }
+        crate::gaming_session_monitor::MonitorOutcome::LaunchFailed => {
+            log::error!("Gaming Mode launch failed for {game_id}");
+            notify_gaming_session(
+                &app,
+                "gaming-session-launch-failed",
+                serde_json::json!({
+                    "gameId": game_id,
+                    "gameName": game_name,
+                    "message": "The game could not be started. See the logs for the launcher's error."
+                }),
+            );
+        }
+        crate::gaming_session_monitor::MonitorOutcome::JournalUnavailable => {
+            log::error!("Gaming Mode journal unavailable for {game_id}");
+            notify_gaming_session(
+                &app,
+                "gaming-session-launch-failed",
+                serde_json::json!({
+                    "gameId": game_id,
+                    "gameName": game_name,
+                    "message": "SILO could not write its session journal, so this session will not be recorded."
+                }),
+            );
+        }
+    }
+    let _ = game_name;
+    // Stage 6 lifecycle: the session has been accounted for, so the launcher
+    // returns to `IdleWithWindow` — including the "launch failure" and
+    // "windowless phase that never committed" transitions. Recorded before the
+    // Session 5 deferred-quit handling so a quit is unaffected by it.
+    crate::window_lifecycle::record_session_ended();
+    // A quit requested during the session is honoured now that the session has
+    // been accounted for (and only when no other session still owns the app).
+    crate::gaming_lifecycle::finish_session(&app);
+}
+
+/// Emits a Gaming Mode lifecycle notice to the renderer.
+///
+/// The launch command returns as soon as the monitor accepts the launch, so an
+/// outcome discovered later (an untrackable process, a refused concurrent
+/// launch, a failed spawn) can only reach the user through an event.
+#[cfg(target_os = "windows")]
+fn notify_gaming_session(app: &AppHandle, event: &str, payload: serde_json::Value) {
+    if let Err(error) = app.emit(event, payload) {
+        log::warn!("Gaming Mode could not emit {event}: {error}");
+    }
+}
+
+/// What the pinned-identity host effect does to the launcher window.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionWindowAction {
+    /// Stage 4/5: hide the live window, keeping the WebView alive.
+    Hide,
+    /// Stage 6: destroy the WebView so its resources are really released.
+    Release,
+}
+
+/// Pure Stage 6 gate: the setting decides whether the WebView is destroyed.
+///
+/// `false` keeps the window on the verified Stage 4/5 hide path, exactly as it
+/// was before Stage 6 existed. `true` — the shipped default — destroys it.
+#[cfg(target_os = "windows")]
+fn session_window_action(release_webview_enabled: bool) -> SessionWindowAction {
+    if release_webview_enabled {
+        SessionWindowAction::Release
+    } else {
+        SessionWindowAction::Hide
+    }
+}
+
+/// Steps the launcher aside once the game identity is pinned and the journal is
+/// durable, in the way the owner of this machine chose.
+///
+/// * `gamingModeReleaseWebview = true` (the shipped default, Stage 6): the
+///   `main` WebView is really destroyed, so the WebView2 host, its GPU surface
+///   and the renderer are gone while the game runs. The session monitor,
+///   journal, SaveGuard and the tray do not need it.
+/// * `gamingModeReleaseWebview = false` (Stage 4/5): the window is
+///   hidden through the verified `IsWindowVisible` path, exactly as before.
+///
+/// A release that cannot be verified is reported as a failure and falls back to
+/// the hide: SILO never claims a windowless state it does not have.
+#[cfg(target_os = "windows")]
+fn release_launcher_for_session(app: &AppHandle) {
+    let opted_in = crate::settings::get_settings(app.clone()).gaming_mode_release_webview;
+    match session_window_action(opted_in) {
+        SessionWindowAction::Hide => hide_launcher_window(app),
+        SessionWindowAction::Release => release_launcher_webview(app),
+    }
+}
+
+/// Destroys the launcher WebView, or reports why it could not be.
+#[cfg(target_os = "windows")]
+fn release_launcher_webview(app: &AppHandle) {
+    match crate::window_lifecycle::destroy_main_window(app) {
+        outcome @ crate::window_lifecycle::ReleaseOutcome::Released { .. } => log::info!(
+            "Gaming Mode released the launcher WebView ({}); the session continues without a renderer",
+            outcome.describe()
+        ),
+        crate::window_lifecycle::ReleaseOutcome::AlreadyReleased => {
+            // A duplicate request must not corrupt state: there is nothing left to
+            // release and nothing else to do.
+            log::warn!("Gaming Mode launcher WebView release: already released")
+        }
+        crate::window_lifecycle::ReleaseOutcome::Failed { reason } => {
+            log::error!(
+                "Gaming Mode could not release the launcher WebView: {reason}; \
+                 falling back to hiding the launcher window"
+            );
+            hide_launcher_window(app);
+        }
+        crate::window_lifecycle::ReleaseOutcome::NotEligible { reason } => {
+            log::warn!("Gaming Mode launcher WebView release not possible: {reason}; falling back to hiding the launcher window");
+            hide_launcher_window(app);
+        }
+    }
+}
+
+/// Hides the launcher while SILO owns a Gaming Mode session.
+///
+/// The change is applied to the real HWND and verified with `IsWindowVisible`,
+/// so a successful return is never mistaken for a hidden window.
+fn hide_launcher_window(app: &AppHandle) {
+    let outcome = crate::gaming_window::hide_launcher_window(app);
+    match outcome {
+        crate::gaming_window::VisibilityOutcome::Hidden { .. } => {
+            log::info!("Gaming Mode hid the launcher window ({})", outcome.describe())
+        }
+        other => log::warn!("Gaming Mode launcher hide failed: {}", other.describe()),
+    }
+}
+
+/// Restores the launcher after an owned Gaming Mode session.
+///
+/// When Stage 6 released the WebView there is nothing to show any more: a new
+/// `main` window is built from the configured window instead, so the return is
+/// a genuinely new renderer and not a resurrected handle.
+fn restore_launcher_window(app: &AppHandle) {
+    set_launcher_background(false);
+    if crate::window_lifecycle::webview_is_released() {
+        let outcome = crate::window_lifecycle::rebuild_main_window(app);
+        match &outcome {
+            crate::window_lifecycle::RebuildOutcome::Rebuilt { .. } => {
+                log::info!("Gaming Mode recreated the launcher window ({})", outcome.describe())
+            }
+            crate::window_lifecycle::RebuildOutcome::AlreadyPresent { .. } => {
+                log::info!("Gaming Mode launcher restore: {}", outcome.describe())
+            }
+            crate::window_lifecycle::RebuildOutcome::StaleRegistration { .. } => log::error!(
+                "Gaming Mode could not bring the launcher back: {}. The WebView stays released, so the tray's Show SILO can retry.",
+                outcome.describe()
+            ),
+            other => log::error!(
+                "Gaming Mode could not recreate the launcher window: {}",
+                other.describe()
+            ),
+        }
+        return;
+    }
+    let outcome = crate::gaming_window::restore_launcher_window(app);
+    match outcome {
+        crate::gaming_window::VisibilityOutcome::Restored { .. } => {
+            log::info!("Gaming Mode restored the launcher window ({})", outcome.describe())
+        }
+        other => log::warn!("Gaming Mode launcher restore failed: {}", other.describe()),
+    }
+}
+
+/// Host implementation for the Gaming Mode command tail. This is the only place the
+/// tail touches Tauri; tests substitute a recording host.
+struct TauriSessionTailHost {
+    app: AppHandle,
+}
+
+impl crate::gaming_session_tail::SessionTailHost for TauriSessionTailHost {
+    fn hide_launcher(&self) {
+        hide_launcher_window(&self.app);
+        set_launcher_background(true);
+    }
+
+    fn restore_launcher(&self) {
+        restore_launcher_window(&self.app);
+    }
+
+    fn complete_save_guard(&self, request: crate::gaming_session_tail::SaveCompletion) {
+        let mut detected_roots = request.detected_roots;
+        let _ = finish_save_watch(
+            &self.app,
+            request.watch_for_saves,
+            request.run_detection,
+            request.detected_path,
+            request.initial_save_path,
+            &get_watch_directories(),
+            &request.name_keys,
+            Some(request.started_sys),
+            &request.executable,
+            &request.game_id,
+            request.backup_count,
+            true,
+            &mut detected_roots,
+        );
+    }
+
+    fn game_totals(&self, game_id: &str) -> Option<crate::gaming_session_tail::GameTotals> {
+        get_games(self.app.clone())
+            .into_iter()
+            .find(|game| game.id == game_id)
+            .map(|game| crate::gaming_session_tail::GameTotals {
+                playtime_minutes: game.playtime_minutes,
+                uncertain_playtime_minutes: game.uncertain_playtime_minutes,
+                session_count: game.session_count,
+            })
+    }
+
+    fn emit_playtime_updated(&self, game_id: &str) {
+        if let Some(updated) = get_games(self.app.clone()).into_iter().find(|game| game.id == game_id) {
+            let _ = self.app.emit("playtime-updated", updated);
+        }
+    }
+}
+
+/// Startup recovery for the opt-in Windows path: reattach a still-running game, or
+/// reconcile a finished/uncertain journal exactly as before.
+#[cfg(target_os = "windows")]
+pub fn recover_gaming_sessions(app: AppHandle) {
+    let Ok(app_data) = app.path().app_data_dir() else {
+        return;
+    };
+    match crate::gaming_session_recovery::take_running_session(&app_data) {
+        Ok(Some((journal, tracked))) => reattach_running_session(app, app_data, journal, tracked),
+        Ok(None) => {
+            if let Err(error) = crate::gaming_session_recovery::reconcile(&app_data) {
+                log::error!("Gaming session startup reconciliation failed: {error}");
+            }
+        }
+        Err(error) => log::error!("Gaming session startup inspection failed: {error}"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reattach_running_session(
+    app: AppHandle,
+    app_data: PathBuf,
+    journal: crate::gaming_session_persistence::GamingSessionJournal,
+    tracked: crate::process_monitor::TrackedProcess,
+) {
+    // Stage 6 lifecycle: a reattached session is a launch too, so the process
+    // enters `Launching` before the monitor starts and can only release the
+    // WebView once the reattached journal is durable and the identity is pinned.
+    crate::window_lifecycle::record_launch_accepted();
+    let journal_game_id = journal.game_id.clone();
+    let game = get_games(app.clone())
+        .into_iter()
+        .find(|candidate| candidate.id == journal_game_id);
+    let (save_path, name_keys, backup_count, executable) = match game {
+        Some(game) => {
+            let exe = game.exe_path.clone().unwrap_or_default();
+            let child = game.launch_child_path.clone().unwrap_or_default();
+            let mut paths: Vec<&Path> = vec![Path::new(&exe)];
+            if !child.is_empty() {
+                paths.push(Path::new(&child));
+            }
+            (
+                game.save_path.clone(),
+                merged_name_keys(&game.name, &paths),
+                game.backup_count.unwrap_or(5),
+                exe,
+            )
+        }
+        None => (None, Vec::new(), 5, String::new()),
+    };
+    let (run_detection, _stored_is_suspect, watch_for_saves) = save_watch_required(save_path.as_deref(), &name_keys);
+    log::info!("Gaming Mode reattaching to running session for {journal_game_id}");
+    let outcome = crate::gaming_session_monitor::reattach_session(
+        crate::gaming_session_monitor::ReattachConfig {
+            app_data: app_data.clone(),
+            poll_interval: crate::gaming_session_monitor::PRODUCTION_POLL_INTERVAL,
+            checkpoint_interval: crate::gaming_session_monitor::PRODUCTION_CHECKPOINT_INTERVAL,
+        },
+        journal,
+        tracked,
+        &|| {
+            release_launcher_for_session(&app);
+            set_launcher_background(true);
+        },
+    );
+    match outcome {
+        crate::gaming_session_monitor::MonitorOutcome::Ended(session) => {
+            let tail = crate::gaming_session_tail::SessionTail {
+                app_data,
+                game_id: session.journal.game_id.clone(),
+                initial_save_path: save_path,
+                name_keys,
+                executable,
+                backup_count,
+                watch_for_saves,
+                run_detection,
+            };
+            crate::gaming_session_tail::run_session_tail(tail, *session, &TauriSessionTailHost { app: app.clone() });
+        }
+        crate::gaming_session_monitor::MonitorOutcome::SessionAlreadyActive => {
+            log::warn!("Gaming Mode reattachment skipped: another session is active");
+        }
+        other => {
+            log::warn!("Gaming Mode reattachment ended without finalization: {other:?}");
+            notify_gaming_session(
+                &app,
+                "gaming-session-uncertain",
+                serde_json::json!({
+                    "gameId": journal_game_id,
+                    "message": "SILO found a session from a previous run but could not keep tracking it. Its journal is retained for the next check."
+                }),
+            );
+        }
+    }
+    crate::window_lifecycle::record_session_ended();
+    crate::gaming_lifecycle::finish_session(&app);
+}
+
 #[tauri::command]
 pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> {
     let games = get_games(app.clone());
@@ -2367,6 +3117,18 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
     // whichever exe we ended up starting (and through publisher nesting).
     let name_keys = save_name_keys(&game.name, Path::new(&exe_path));
 
+    let gaming_mode_enabled = crate::settings::get_settings(app.clone()).gaming_mode_release_webview;
+    #[cfg(target_os = "windows")]
+    if gaming_mode_enabled {
+        // The opt-in Gaming Mode path classifies the launch itself, with the
+        // explicit and conservative semantics: it never guesses a game from a
+        // file name and never pins an arbitrary descendant.
+        launch_game_native_monitor(app.clone(), game)?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = gaming_mode_enabled;
+
     let game_id_clone = game_id.clone();
     let save_path_clone = game.save_path.clone();
     let backup_count_clone = game.backup_count.unwrap_or(5);
@@ -2378,438 +3140,150 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
             .parent()
             .unwrap_or(std::path::Path::new(""));
 
-        #[cfg(target_os = "windows")]
-        let mut cmd = {
-            let mut c = Command::new("cmd");
-            c.creation_flags(0x08000000);
-            c.current_dir(working_dir);
-            c.raw_arg(format!("/C start \"\" /HIGH /WAIT \"{}\"", exe_path));
-            c
+        // Direct process creation: obtain the real game handle and PID immediately,
+        // with elevation fallback for executables that require administrator rights.
+        // The window stays visible until a valid tracking target is established.
+        let spawn_args: Vec<std::ffi::OsString> = Vec::new();
+        let spawn_result =
+            crate::game_launch::spawn_direct_game(Path::new(&exe_path), &working_dir, &spawn_args, true);
+
+        let (game_pid, _tracked_process) = match spawn_result {
+            Ok(crate::game_launch::DirectSpawnOutcome::Tracked(process)) => {
+                (Some(process.identity.pid), Some(process))
+            }
+            Ok(crate::game_launch::DirectSpawnOutcome::LaunchedButTrackingUncertain {
+                pid, ..
+            }) => (pid, None),
+            Err(error) => {
+                log::error!("Game launch failed for {}: {:?}", game_id_clone, error);
+                return;
+            }
         };
 
-        #[cfg(not(target_os = "windows"))]
-        let mut cmd = {
-            let (cmd_name, args, work_dir_override) = build_linux_game_command(&exe_path);
-            let mut c = Command::new(&cmd_name);
-            c.args(&args);
-            c.current_dir(work_dir_override.unwrap_or_else(|| working_dir.to_path_buf()));
-            c
+        let game_pid = match game_pid {
+            Some(pid) => pid,
+            None => {
+                log::error!(
+                    "Game launch succeeded but no PID could be obtained for {}",
+                    game_id_clone
+                );
+                return;
+            }
         };
 
-        if let Ok(mut child) = cmd.spawn() {
-            // Hide SILO's window for the whole session (both modes) so the OS/GPU compositor
-            // doesn't keep compositing a full-screen launcher surface — lowers compositor and
-            // GPU memory while the game runs. Restored when the game exits.
-            if let Some(win) = &window {
-                let _ = win.hide();
+        let game_started_at = Some(Instant::now());
+        let game_started_wall = Some(chrono::Local::now().to_rfc3339());
+        let game_started_sys = Some(std::time::SystemTime::now());
+
+        // Hide SILO's window only after successful process creation and PID acquisition,
+        // so the interface never disappears permanently if launch or tracking fails.
+        if let Some(win) = &window {
+            let _ = win.hide();
+        }
+        set_launcher_background(true);
+
+        // Watch for save writes when we have no usable folder yet — or when the stored
+        // folder has vanished (game moved/reinstalled) so a fresh location is re-found
+        // instead of silently never backing up again.
+        let (run_detection, _stored_is_suspect, watch_for_saves) =
+            save_watch_required(save_path_clone.as_deref(), &name_keys);
+        // A folder that exists can still be the wrong one: an older build could
+        // have stored the publisher folder instead of the game's own, which then
+        // suppresses detection forever. Keep looking in that case — but only a
+        // folder that names the game may replace it.
+        let detected_path: Option<PathBuf> = None;
+        let mut save_watch = SaveWatchEvents::new(watch_for_saves);
+
+        let mut system = sysinfo::System::new();
+        let mut is_running = true;
+        let launch_start = Instant::now();
+        const MAX_LAUNCH_WAIT_SECS: u64 = 1800; // 30 minutes
+        let mut launch_timed_out = false;
+        let watch_dirs = get_watch_directories();
+        let mut detected_roots: HashSet<PathBuf> = HashSet::new();
+        // Track the directly-spawned process; no cmd.exe intermediary or subtree
+        // scanning is needed since we already hold the game's own handle/PID.
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let mut known_pids: HashSet<u32> = HashSet::new();
+        known_pids.insert(game_pid);
+
+        while is_running {
+            // Refresh only the tracked game PID; direct process creation means
+            // there is no cmd.exe intermediary or launcher handoff to follow.
+            system.refresh_processes(
+                sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid)]),
+                true,
+            );
+
+            // Drop the save watcher the moment a root is found (nothing left to
+            // watch); otherwise keep it alive for the whole session so late
+            // autosaves are caught.
+            if detected_path.is_some() {
+                save_watch.stop();
             }
-            // Lower our priority for the whole session so the game gets the memory and
-            // SILO's pages become the OS's first reclaim candidate. Restored on exit.
-            set_launcher_background(true);
-            let exe_name = Path::new(&exe_path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
 
-            // Watch for save writes when we have no usable folder yet — or when the stored
-            // folder has vanished (game moved/reinstalled) so a fresh location is re-found
-            // instead of silently never backing up again.
-            let run_detection = save_detection_needed(save_path_clone.as_deref());
-            // A folder that exists can still be the wrong one: an older build could
-            // have stored the publisher folder instead of the game's own, which then
-            // suppresses detection forever. Keep looking in that case — but only a
-            // folder that names the game may replace it.
-            let stored_is_suspect = save_path_clone
-                .as_deref()
-                .map(|p| Path::new(p).is_dir() && !save_path_names_game(p, &name_keys))
-                .unwrap_or(false);
-            let watch_for_saves = run_detection || stored_is_suspect;
-            let mut detected_path: Option<PathBuf> = None;
-            let mut watcher_opt = None;
-            let mut rx_opt = None;
+            save_watch.stop();
 
-            if watch_for_saves {
-                let (tx, rx) = channel();
-                let watcher_res = notify::recommended_watcher(move |res| {
-                    if let Ok(event) = res {
-                        let _ = tx.send(event);
-                    }
-                });
+            std::thread::sleep(std::time::Duration::from_millis(2500));
 
-                if let Ok(mut watcher) = watcher_res {
-                    for path in get_watch_directories() {
-                        let _ = watcher.watch(&path, RecursiveMode::Recursive);
-                    }
-                    watcher_opt = Some(watcher);
-                    rx_opt = Some(rx);
-                }
+            // Safety timeout: diagnostic and recovery only. Does not assume the
+            // game has exited, does not stop tracking a running process, and does
+            // not record false playtime. Simply restores the interface so the
+            // user is never left with a permanently hidden window.
+            if launch_start.elapsed().as_secs() >= MAX_LAUNCH_WAIT_SECS {
+                log::warn!(
+                    "Game launch session exceeded maximum wait time ({}s); restoring the launcher window while monitoring continues",
+                    MAX_LAUNCH_WAIT_SECS
+                );
+                launch_timed_out = true;
+                break;
             }
 
-            let spawned_child_pid = child.id();
-            let mut system = sysinfo::System::new();
-            let mut game_pid: Option<u32> = None;
-            let mut game_started_at: Option<Instant> = None;
-            let mut is_running = true;
-            let mut found_process = false;
-            let mut game_is_ours = false; // true only when game_pid is a descendant of our spawned cmd
-            let check_start = Instant::now();
-            let watch_dirs = get_watch_directories();
-            let mut pending_paths: HashSet<PathBuf> = HashSet::new();
-            let mut detected_roots: HashSet<PathBuf> = HashSet::new();
-            let mut last_detection_check: Option<Instant> = None;
-            // Wall-clock moment the game process was first seen, used for the session log.
-            let mut game_started_wall: Option<String> = None;
-            // Same moment as a wall clock, for the end-of-session save sweep.
-            let mut game_started_sys: Option<std::time::SystemTime> = None;
-            // Every PID in the subtree SILO spawned (launcher chain + game + helpers).
-            // Keeps launcher handoffs linked even after intermediate processes exit.
-            let mut known_pids: HashSet<u32> = HashSet::new();
-            known_pids.insert(spawned_child_pid);
-
-            while is_running {
-                if game_pid.is_none() {
-                    // Hunt for the real game PID. First keep the spawned subtree fresh so
-                    // launcher handoffs (launcher exits, game spawns) stay attributed to
-                    // this session. Then look for a game-named process INSIDE the subtree.
-                    // This is what makes save detection work when the configured exe is a
-                    // launcher like REDprelauncher.exe: the game spawns under it, and the
-                    // subtree keeps the lineage even once the launcher process is gone.
-                    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                    known_pids = collect_subtree_pids(&system, spawned_child_pid);
-
-                    let mut name_match: Option<u32> = None;
-                    // Best candidate inside our subtree even when names differ: when the
-                    // configured exe is a launcher (REDprelauncher.exe), the real game has
-                    // a different name and must still be pinned. A large binary that is
-                    // NOT launcher-like and lives in (or under) the game install dir is
-                    // almost certainly the game itself.
-                    let mut subtree_best_score: i32 = -1;
-                    let mut subtree_best_score_pid: Option<u32> = None;
-                    for (pid, proc) in system.processes() {
-                        let proc_name = proc.name().to_string_lossy().to_lowercase();
-                        let candidate_pid = pid.as_u32();
-                        let in_subtree = known_pids.contains(&candidate_pid);
-
-                        if proc_name == exe_name.to_lowercase() {
-                            // Prefer a process spawned inside our tracked subtree (avoids
-                            // matching a second instance of the same game already running).
-                            if in_subtree {
-                                game_pid = Some(candidate_pid);
-                                game_is_ours = true;
-                                break;
-                            }
-                            if name_match.is_none() {
-                                name_match = Some(candidate_pid);
-                            }
-                            continue;
-                        }
-
-                        // Launcher-handoff detection: score every process inside the
-                        // subtree that isn't the launcher itself.
-                        if in_subtree
-                            && game_pid.is_none()
-                            && !is_launcher_like(&proc_name)
-                            && proc_name != "cmd.exe"
-                            && candidate_pid != spawned_child_pid
-                        {
-                            let score = {
-                                let exe_path: Option<&std::path::Path> = proc.exe();
-                                let size: u64 = exe_path
-                                    .as_ref()
-                                    .and_then(|p| std::fs::metadata(p).ok())
-                                    .map(|m| m.len())
-                                    .unwrap_or(0);
-                                (size / (10 * 1024 * 1024)).min(50) as i32
-                            };
-                            if score > subtree_best_score {
-                                subtree_best_score = score;
-                                subtree_best_score_pid = Some(candidate_pid);
-                            }
-                        }
-                    }
-                    if game_pid.is_none() && subtree_best_score_pid.is_some() && check_start.elapsed().as_secs() >= 5 {
-                        // The launcher handed off to a differently-named game binary.
-                        game_pid = subtree_best_score_pid;
-                        game_is_ours = true;
-                    }
-                    // Fall back to name-only matching after a grace period (some games
-                    // launch through an out-of-tree service rather than our cmd).
-                    if game_pid.is_none() && name_match.is_some() && check_start.elapsed().as_secs() >= 3 {
-                        game_pid = name_match;
-                        game_is_ours = false;
-                    }
-                    if game_pid.is_some() {
-                        game_started_at = Some(Instant::now());
-                        game_started_wall = Some(chrono::Local::now().to_rfc3339());
-                        game_started_sys = Some(std::time::SystemTime::now());
-                        // Free the full-process snapshot: once pinned we only need the
-                        // subtree set, so drop the rest of the table to keep session RAM low.
-                        system = sysinfo::System::new();
-                    }
-                } else if let Some(game_pid) = game_pid {
-                    // Keep the whole subtree refreshed: launcher-to-game handoffs happen
-                    // AFTER the initial pin, so new children (the real game process) must
-                    // keep entering known_pids or save attribution would silently miss them.
-                    let root_alive = system
-                        .process(sysinfo::Pid::from_u32(spawned_child_pid))
-                        .is_some();
-                    if root_alive {
-                        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                        known_pids = collect_subtree_pids(&system, spawned_child_pid);
-                    } else {
-                        // Spawned root is gone (launcher exited after handing off). Refresh
-                        // only the pinned PID so we know when the game itself ends.
-                        system.refresh_processes(
-                            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(game_pid)]),
-                            true,
-                        );
-                    }
-                }
-
-                // Drop the save watcher the moment a root is found (nothing left to watch);
-                // otherwise keep it alive for the whole session so late autosaves are caught.
-                if detected_path.is_some() {
-                    if let Some(w) = watcher_opt.take() {
-                        drop(w);
-                    }
-                    rx_opt = None;
-                }
-                if let Some(rx) = rx_opt.as_ref() {
-                    while let Ok(event) = rx.try_recv() {
-                        let is_write = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
-
-                        // Accumulate changed paths and skip ones under an already-detected
-                        // save root so Restart Manager isn't queried on every Modify event.
-                        if is_write && detected_path.is_none() {
-                            for path in event.paths {
-                                if detected_roots.iter().any(|root| path.starts_with(root)) {
-                                    continue;
-                                }
-                                pending_paths.insert(path);
-                            }
-                        }
-                    }
-
-                    // Coalesce detection runs to at most once every ~750ms.
-                    let due = match last_detection_check {
-                        Some(last) => last.elapsed().as_millis() >= 750,
-                        None => !pending_paths.is_empty(),
-                    };
-                    if due && detected_path.is_none() && !pending_paths.is_empty() {
-                        last_detection_check = Some(Instant::now());
-                        {
-                            let paths: Vec<PathBuf> = pending_paths.drain().collect();
-                            for path in paths {
-                                if detected_roots.iter().any(|root| path.starts_with(root)) {
-                                    continue;
-                                }
-                                let pids = crate::saveguard::get_locking_pids(&path);
-                                // Lock evidence only replaces a stored folder when that
-                                // folder was already unusable; a suspect folder is only
-                                // replaced by one that names the game.
-                                let lock_pids: &[u32] = if stored_is_suspect { &[] } else { &pids };
-                                for &locking_pid in lock_pids {
-                                    // Attribute the write to this session when the locking
-                                    // PID's parent chain reaches ANY PID SILO spawned. This
-                                    // works through launchers: the game writes saves even if
-                                    // the launcher that spawned it has already exited, because
-                                    // the subtree kept every PID the chain passed through.
-                                    if crate::saveguard::pid_chain_reaches(&system, locking_pid, &known_pids)
-                                        || game_pid.is_some_and(|target| {
-                                            crate::saveguard::pid_is_descendant_of(&mut system, locking_pid, target)
-                                        })
-                                    {
-                                        if let Some(root) =
-                                            crate::saveguard::get_save_root_for(&path, &watch_dirs, &name_keys)
-                                        {
-                                            log::info!("SaveGuard detected save root: {:?}", root);
-                                            detected_path = Some(root.clone());
-                                            detected_roots.insert(root);
-                                            break;
-                                        }
-                                    }
-                                }
-                                // Lock-free fallback. A launcher hands the game off
-                                // outside the tree SILO spawned, and many games save
-                                // atomically (write, rename, close) so no process holds
-                                // the file by the time Restart Manager is asked. The
-                                // folder that names this game is evidence enough — and
-                                // because a wrong folder here is visible and overridable,
-                                // missing the saves entirely is the worse failure.
-                                if detected_path.is_none() {
-                                    if let Some(root) =
-                                        crate::saveguard::save_root_by_name(&path, &watch_dirs, &name_keys)
-                                    {
-                                        log::info!("SaveGuard detected save root by name: {:?}", root);
-                                        detected_path = Some(root.clone());
-                                        detected_roots.insert(root);
-                                    }
-                                }
-                                if detected_path.is_some() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                std::thread::sleep(std::time::Duration::from_millis(2500));
-
-                let child_exited = matches!(child.try_wait(), Ok(Some(_)));
-
-                if child_exited {
-                    // Only keep the loop alive if the pinned PID is still running. Name-only
-                    // fallback pins can grab an unrelated already-running instance of the
-                    // same game; trusting those here would make this loop never terminate
-                    // and the save backup never run.
-                    let running_in_system = match game_pid {
-                        Some(pid) => game_is_ours && system.process(sysinfo::Pid::from_u32(pid)).is_some(),
-                        None => false,
-                    };
-                    if running_in_system {
-                        found_process = true;
-                    } else {
-                        is_running = !found_process && check_start.elapsed().as_secs() < 12;
-                    }
-                } else {
-                    found_process = true;
+            match system.process(sysinfo::Pid::from_u32(game_pid)) {
+                Some(_) => {
                     is_running = true;
                 }
-            }
-
-            if let Some(watcher) = watcher_opt {
-                drop(watcher);
-            }
-
-            // Game is over — restore normal priority before the backup/playtime writes.
-            set_launcher_background(false);
-
-            // Bring the launcher back BEFORE emitting save status events so the toasts
-            // are actually visible when the game exits.
-            if let Some(win) = &window {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-
-            // Last resort before the backup: nothing was ever attributed to this
-            // session — no handle to query (atomic saves), a launcher that started
-            // the game outside our tree, or a session that never wrote a file.
-            // Sweep the standard save locations for a folder that names the game
-            // and was touched while it ran.
-            if watch_for_saves && detected_path.is_none() && game_pid.is_some() {
-                let since = game_started_sys.unwrap_or_else(std::time::SystemTime::now);
-                let install_dir = Path::new(&exe_path).parent();
-                if let Some(root) =
-                    crate::saveguard::find_save_root_by_scan(&watch_dirs, &name_keys, since, install_dir)
-                {
-                    log::info!("SaveGuard found save root by scan: {:?}", root);
-                    detected_roots.insert(root.clone());
-                    detected_path = Some(root);
-                }
-            }
-
-            let mut final_save_path = save_path_clone;
-
-            if let Some(path) = detected_path {
-                let path_str = path.to_string_lossy().into_owned();
-                let mut games = get_games(app.clone());
-                if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
-                    g.save_path = Some(path_str.clone());
-                    g.save_path_source = Some("auto".to_string());
-                    let _ = save_games_atomic(&app, &games);
-
-                    let _ = app.emit(
-                        "saveguard-path-detected",
-                        serde_json::json!({
-                            "gameId": game_id_clone,
-                            "savePath": path_str
-                        }),
-                    );
-                }
-                final_save_path = Some(path_str);
-            }
-
-            // Auto-backup after a session — and surface every outcome instead of failing
-            // silently. When a known folder has gone missing, the next launch re-runs
-            // detection (save_detection_needed) to re-find it.
-            match &final_save_path {
-                Some(path_str) => {
-                    let save_path = Path::new(path_str);
-                    let backups_dir = get_backups_dir(&app, &game_id_clone);
-                    if save_path.exists() {
-                        match fs::create_dir_all(&backups_dir) {
-                            Ok(()) => {
-                                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-                                let backup_file = backups_dir.join(format!("auto_{}.zip", timestamp));
-                                match zip_dir(save_path, &backup_file) {
-                                    Ok(()) => {
-                                        let _ = prune_backups(&backups_dir, backup_count_clone as usize);
-                                        let _ = app.emit(
-                                            "saveguard-backup-complete",
-                                            serde_json::json!({
-                                                "gameId": game_id_clone,
-                                                "timestamp": timestamp
-                                            }),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::warn!("SaveGuard auto-backup failed for {}: {}", game_id_clone, e);
-                                        let _ = app.emit(
-                                            "saveguard-backup-failed",
-                                            serde_json::json!({
-                                                "gameId": game_id_clone,
-                                                "reason": e
-                                            }),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("SaveGuard could not create backups dir for {}: {}", game_id_clone, e);
-                                let _ = app.emit(
-                                    "saveguard-backup-failed",
-                                    serde_json::json!({
-                                        "gameId": game_id_clone,
-                                        "reason": e.to_string()
-                                    }),
-                                );
-                            }
-                        }
-                    } else {
-                        log::warn!(
-                            "SaveGuard known save folder missing at exit for {}: {:?}",
-                            game_id_clone,
-                            save_path
-                        );
-                        let _ = app.emit(
-                            "saveguard-path-missing",
-                            serde_json::json!({
-                                "gameId": game_id_clone,
-                                "savePath": path_str
-                            }),
-                        );
-                    }
-                }
                 None => {
-                    // A session ran with no usable save folder and SaveGuard could not
-                    // attribute one — surface it so the user is never left wondering.
-                    if run_detection {
-                        log::info!("SaveGuard found no save folder for {} this session", game_id_clone);
-                        let _ = app.emit(
-                            "saveguard-not-found",
-                            serde_json::json!({
-                                "gameId": game_id_clone
-                            }),
-                        );
-                    }
+                    // The tracked game process has exited. Stop monitoring and
+                    // proceed to session finalisation.
+                    is_running = false;
                 }
             }
+        }
 
-            // Playtime is measured from when the game process was first detected, not from spawn.
-            let elapsed_secs = game_started_at.map_or(0, |started| started.elapsed().as_secs());
-            let elapsed_minutes = if elapsed_secs > 0 { elapsed_secs.div_ceil(60) } else { 0 };
+        // Restore the launcher window after the monitoring loop ends
+        // (either by game exit or by timeout).
+        set_launcher_background(false);
+        if let Some(win) = &window {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
 
+        let _final_save_path = finish_save_watch(
+            &app,
+            watch_for_saves,
+            run_detection,
+            detected_path,
+            save_path_clone,
+            &watch_dirs,
+            &name_keys,
+            game_started_sys,
+            &exe_path,
+            &game_id_clone,
+            backup_count_clone,
+            true,
+            &mut detected_roots,
+        );
+
+        // Playtime is measured from when the game process was first detected, not from spawn.
+        let elapsed_secs = game_started_at.map_or(0, |started| started.elapsed().as_secs());
+        let elapsed_minutes = if elapsed_secs > 0 { elapsed_secs.div_ceil(60) } else { 0 };
+
+        // Only record playtime/session when a game was actually tracked.
+        // On a timeout break, no game process termination was observed, so
+        // recording a session would falsely count a launch that never
+        // concluded.
+        if !launch_timed_out {
             let mut games = get_games(app.clone());
             if let Some(g) = games.iter_mut().find(|g| g.id == game_id_clone) {
                 if elapsed_minutes > 0 {
@@ -2834,6 +3308,138 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finish_save_watch(
+    app: &AppHandle,
+    watch_for_saves: bool,
+    run_detection: bool,
+    mut detected_path: Option<PathBuf>,
+    save_path_clone: Option<String>,
+    watch_dirs: &[PathBuf],
+    name_keys: &[String],
+    game_started_sys: Option<std::time::SystemTime>,
+    exe_path: &str,
+    game_id: &str,
+    backup_count: u32,
+    has_game_pid: bool,
+    detected_roots: &mut std::collections::HashSet<PathBuf>,
+) -> Option<String> {
+    // Last resort before the backup: nothing was ever attributed to this
+    // session — no handle to query (atomic saves), a launcher that started
+    // the game outside our tree, or a session that never wrote a file.
+    // Sweep the standard save locations for a folder that names the game
+    // and was touched while it ran.
+    if should_run_final_save_scan(watch_for_saves, detected_path.is_some(), has_game_pid) {
+        let since = game_started_sys.unwrap_or_else(std::time::SystemTime::now);
+        let install_dir = Path::new(exe_path).parent();
+        if let Some(root) = crate::saveguard::find_save_root_by_scan(watch_dirs, name_keys, since, install_dir) {
+            log::info!("SaveGuard found save root by scan: {:?}", root);
+            detected_roots.insert(root.clone());
+            detected_path = Some(root);
+        }
+    }
+
+    let mut final_save_path = save_path_clone;
+
+    if let Some(path) = detected_path {
+        let path_str = path.to_string_lossy().into_owned();
+        let mut games = get_games(app.clone());
+        if let Some(g) = games.iter_mut().find(|g| g.id == game_id) {
+            g.save_path = Some(path_str.clone());
+            g.save_path_source = Some("auto".to_string());
+            let _ = save_games_atomic(app, &games);
+
+            let _ = app.emit(
+                "saveguard-path-detected",
+                serde_json::json!({"gameId": game_id, "savePath": path_str}),
+            );
+        }
+        final_save_path = Some(path_str);
+    }
+
+    // Auto-backup after a session — and surface every outcome instead of failing
+    // silently. When a known folder has gone missing, the next launch re-runs
+    // detection (save_detection_needed) to re-find it.
+    let path_exists = final_save_path.as_deref().is_some_and(|path| Path::new(path).exists());
+    match save_watch_completion(&final_save_path, path_exists) {
+        SaveWatchCompletion::KnownPathPresent(path_str) => {
+            let save_path = Path::new(path_str);
+            let backups_dir = get_backups_dir(app, game_id);
+            match fs::create_dir_all(&backups_dir) {
+                Ok(()) => {
+                    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+                    let backup_file = backups_dir.join(format!("auto_{}.zip", timestamp));
+                    match zip_dir(save_path, &backup_file) {
+                        Ok(()) => {
+                            let _ = prune_backups(&backups_dir, backup_count as usize);
+                            let _ = app.emit(
+                                "saveguard-backup-complete",
+                                serde_json::json!({"gameId": game_id, "timestamp": timestamp}),
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("SaveGuard auto-backup failed for {}: {}", game_id, e);
+                            let _ = app.emit(
+                                "saveguard-backup-failed",
+                                serde_json::json!({"gameId": game_id, "reason": e}),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("SaveGuard could not create backups dir for {}: {}", game_id, e);
+                    let _ = app.emit(
+                        "saveguard-backup-failed",
+                        serde_json::json!({"gameId": game_id, "reason": e.to_string()}),
+                    );
+                }
+            }
+        }
+        SaveWatchCompletion::NoPath => {
+            // A session ran with no usable save folder and SaveGuard could not
+            // attribute one — surface it so the user is never left wondering.
+            if should_emit_saveguard_not_found(run_detection) {
+                log::info!("SaveGuard found no save folder for {} this session", game_id);
+                let _ = app.emit("saveguard-not-found", serde_json::json!({"gameId": game_id}));
+            }
+        }
+        SaveWatchCompletion::KnownPathMissing(path_str) => {
+            log::warn!(
+                "SaveGuard known save folder missing at exit for {}: {:?}",
+                game_id,
+                Path::new(path_str)
+            );
+            let _ = app.emit(
+                "saveguard-path-missing",
+                serde_json::json!({"gameId": game_id, "savePath": path_str}),
+            );
+        }
+    }
+    final_save_path
+}
+
+enum SaveWatchCompletion<'a> {
+    NoPath,
+    KnownPathPresent(&'a str),
+    KnownPathMissing(&'a str),
+}
+
+fn save_watch_completion(final_save_path: &Option<String>, path_exists: bool) -> SaveWatchCompletion<'_> {
+    match final_save_path.as_deref() {
+        None => SaveWatchCompletion::NoPath,
+        Some(path) if path_exists => SaveWatchCompletion::KnownPathPresent(path),
+        Some(path) => SaveWatchCompletion::KnownPathMissing(path),
+    }
+}
+
+fn should_run_final_save_scan(watch_for_saves: bool, has_detected_path: bool, has_game_pid: bool) -> bool {
+    watch_for_saves && !has_detected_path && has_game_pid
+}
+
+fn should_emit_saveguard_not_found(run_detection: bool) -> bool {
+    run_detection
+}
+
 #[tauri::command]
 pub fn window_minimize(window: tauri::Window) {
     window.minimize().ok();
@@ -2852,7 +3458,21 @@ pub fn window_maximize(window: tauri::Window) {
 
 #[tauri::command]
 pub fn window_close(window: tauri::Window) {
-    window.close().ok();
+    let app = window.app_handle();
+    let behaviour = crate::settings::load_settings(&app).close_behaviour;
+    match crate::tray::close_decision(crate::tray::is_installed(), crate::gaming_lifecycle::is_exiting(), behaviour) {
+        crate::tray::CloseDecision::StepAside => {
+            crate::tray::hide_to_tray(&app);
+        }
+        crate::tray::CloseDecision::AllowClose => {
+            let _ = window.close();
+        }
+        crate::tray::CloseDecision::AskUser => {
+            // The window stays open until the user answers the confirmation
+            // dialog, which the frontend shows in response to this event.
+            let _ = app.emit("close-confirm-requested", serde_json::Value::Null);
+        }
+    }
 }
 
 #[tauri::command]
@@ -2941,8 +3561,8 @@ pub struct ScannedGame {
 
 #[tauri::command]
 pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String> {
-    use walkdir::WalkDir;
     use std::collections::HashMap;
+    use walkdir::WalkDir;
 
     let folder = std::path::Path::new(&folder_path);
 
@@ -3158,6 +3778,88 @@ pub async fn fetch_steam_metadata(name: String) -> Result<Option<SteamMetadata>,
     }
 }
 
+// ── Wallpaper bytes for renderer-side dominant-color extraction ─────────────
+// The webview CSP allowlists image sources but has no connect-src for the
+// same remote CDNs, so the renderer cannot fetch wallpaper art itself. This
+// Rust-side command does the fetch, guarded to the same art hosts the CSP
+// already trusts, and hands the raw bytes back for color extraction.
+fn parse_art_host(url: &str) -> Result<String, String> {
+    let rest = match url.strip_prefix("https://") {
+        Some(rest) => rest,
+        None => return Err("Only https URLs are allowed".to_string()),
+    };
+    // Host runs from the start of `rest` up to the first '/', so path or
+    // query data can never smuggle a second host into the check.
+    let end = rest.find('/').unwrap_or(rest.len());
+    let host = rest[..end].to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("Only https URLs are allowed".to_string());
+    }
+    Ok(host)
+}
+
+fn is_allowed_art_host(host: &str) -> bool {
+    const ART_HOSTS: [&str; 7] = [
+        "cdn2.steamgriddb.com",
+        "cdn.cloudflare.steamstatic.com",
+        "shared.akamai.steamstatic.com",
+        "shared.fastly.steamstatic.com",
+        "cdn.akamai.steamstatic.com",
+        "cdn.fastly.steamstatic.com",
+        "store.steampowered.com",
+    ];
+    let host = host.to_ascii_lowercase();
+    ART_HOSTS.contains(&host.as_str())
+        || host.ends_with(".steamstatic.com")
+        || host.ends_with(".steamgriddb.com")
+        || host.ends_with(".steampowered.com")
+}
+
+#[tauri::command]
+pub async fn fetch_wallpaper_bytes(url: String) -> Result<Vec<u8>, String> {
+    let host = parse_art_host(&url)?;
+    if !is_allowed_art_host(&host) {
+        return Err(format!("URL host is not an allowed art source: {}", host));
+    }
+
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(e) => return Err(format!("Failed to fetch: {}", e)),
+    };
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status));
+    }
+
+    const MAX_WALLPAPER_BYTES: u64 = 15 * 1024 * 1024;
+    if let Some(len) = response.content_length() {
+        if len > MAX_WALLPAPER_BYTES {
+            return Err(format!("Wallpaper is too large: {} bytes", len));
+        }
+    }
+
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(format!("Failed to read bytes: {}", e)),
+    };
+
+    if bytes.len() as u64 > MAX_WALLPAPER_BYTES {
+        return Err(format!("Wallpaper is too large: {} bytes", bytes.len()));
+    }
+
+    Ok(bytes.to_vec())
+}
+
 // Helper functions and commands for SaveGuard
 fn get_backups_dir(app: &AppHandle, game_id: &str) -> PathBuf {
     app.path().app_data_dir().unwrap().join("backups").join(game_id)
@@ -3168,12 +3870,22 @@ fn get_backups_dir(app: &AppHandle, game_id: &str) -> PathBuf {
 // where playtime totals are updated, so the log and the aggregates always agree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none", default)]
+    pub session_id: Option<String>,
     #[serde(rename = "gameId")]
     pub game_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: String,
     // Whole minutes, same ceiling used to increment playtimeMinutes.
     pub minutes: u32,
+    /// Whether `minutes` is an exact measurement or a lower bound reconstructed
+    /// from durable checkpoints. Legacy rows omit it and are therefore exact.
+    #[serde(
+        rename = "durationKind",
+        default,
+        skip_serializing_if = "crate::gaming_session_persistence::DurationKind::is_exact"
+    )]
+    pub duration_kind: crate::gaming_session_persistence::DurationKind,
 }
 
 fn get_sessions_path(app: &AppHandle) -> PathBuf {
@@ -3206,9 +3918,11 @@ fn save_sessions_atomic(app: &AppHandle, sessions: &[SessionRecord]) -> Result<(
 pub fn record_session(app: &AppHandle, game_id: &str, started_at: &str, minutes: u32) {
     let mut sessions = read_sessions(app);
     sessions.push(SessionRecord {
+        session_id: None,
         game_id: game_id.to_string(),
         started_at: started_at.to_string(),
         minutes,
+        duration_kind: crate::gaming_session_persistence::DurationKind::Exact,
     });
     if let Err(e) = save_sessions_atomic(app, &sessions) {
         log::warn!("Failed to record session for {}: {}", game_id, e);
@@ -3231,11 +3945,7 @@ pub fn list_sessions(app: AppHandle) -> Vec<SessionRecord> {
     sessions
 }
 
-
-
-
-
-fn get_watch_directories() -> Vec<PathBuf> {
+pub(crate) fn get_watch_directories() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     #[cfg(target_os = "windows")]
@@ -3922,132 +4632,96 @@ pub async fn backup_game_now(app: AppHandle, game_id: String, custom_name: Optio
     Ok(())
 }
 
-#[tauri::command]
-pub fn check_uninstaller(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
-    let games = get_games(app);
-    let game = games.into_iter().find(|g| g.id == game_id).ok_or("Game not found")?;
-    let exe_path_str = game.exe_path.unwrap_or_default();
-    let exe_path = Path::new(&exe_path_str);
-    if let Some(parent) = exe_path.parent() {
+/// Component-wise containment with native Windows ordinal case semantics.
+/// Unrepresentable components or comparison failures conservatively count as
+/// matching so security checks never mistake an uncertain path for an outsider.
+fn path_is_equal_or_beneath(path: &Path, root: &Path) -> bool {
+    let mut path_components = path.components();
+    for root_component in root.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
         #[cfg(target_os = "windows")]
-        {
-            let unins = parent.join("unins000.exe");
-            if unins.exists() {
-                return Ok(Some(unins.to_string_lossy().to_string()));
-            }
-            let unins = parent.join("uninstall.exe");
-            if unins.exists() {
-                return Ok(Some(unins.to_string_lossy().to_string()));
-            }
-        }
+        let equal = {
+            use std::os::windows::ffi::OsStrExt;
 
+            if std::mem::discriminant(&path_component) != std::mem::discriminant(&root_component) {
+                false
+            } else {
+                let path_units: Vec<u16> = path_component.as_os_str().encode_wide().collect();
+                let root_units: Vec<u16> = root_component.as_os_str().encode_wide().collect();
+                if path_units.len() > i32::MAX as usize || root_units.len() > i32::MAX as usize {
+                    true
+                } else {
+                    // SAFETY: both slices remain alive for the call and lengths
+                    // describe their initialized UTF-16 code units.
+                    let result =
+                        unsafe { windows::Win32::Globalization::CompareStringOrdinal(&path_units, &root_units, true) };
+                    windows_ordinal_result_is_equal_or_uncertain(result)
+                }
+            }
+        };
         #[cfg(not(target_os = "windows"))]
-        {
-            let exe_path_str = exe_path_str.to_lowercase();
-
-            // Check for Wine/Proton uninstallers
-            let unins = parent.join("unins000.exe");
-            if unins.exists() {
-                return Ok(Some(unins.to_string_lossy().to_string()));
-            }
-            let unins = parent.join("uninstall.exe");
-            if unins.exists() {
-                return Ok(Some(unins.to_string_lossy().to_string()));
-            }
-
-            // Check for Steam game (in compatdata or steamapps)
-            if exe_path_str.contains("steamapps") || exe_path_str.contains("compatdata") {
-                // Try to find the appmanifest to get app ID
-                let mut current = parent;
-                while let Some(p) = current.parent() {
-                    if p.file_name().and_then(|n| n.to_str()) == Some("steamapps") {
-                        // Look for appmanifest_*.acf files
-                        if let Ok(entries) = fs::read_dir(p) {
-                            for entry in entries.filter_map(|e| e.ok()) {
-                                let path = entry.path();
-                                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                if name.starts_with("appmanifest_") && name.ends_with(".acf") {
-                                    if let Ok(data) = fs::read_to_string(&path) {
-                                        for line in data.lines() {
-                                            let t = line.trim();
-                                            if t.starts_with("\"appid\"") {
-                                                let parts: Vec<&str> = t.splitn(4, '"').collect();
-                                                if parts.len() >= 4 {
-                                                    let app_id = parts[3];
-                                                    return Ok(Some(format!("steam://uninstall/{}", app_id)));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    current = p;
-                }
-                // Fallback: just return a generic steam uninstall hint
-                return Ok(Some("steam://open/minigameslist".to_string()));
-            }
-
-            // Check for Flatpak
-            if exe_path_str.contains(".var/app/") {
-                // Extract flatpak app ID from path
-                let parts: Vec<&str> = exe_path_str.split(".var/app/").collect();
-                if parts.len() > 1 {
-                    let after = parts[1];
-                    let app_id = after.split('/').next().unwrap_or("");
-                    if !app_id.is_empty() {
-                        return Ok(Some(format!("flatpak uninstall {}", app_id)));
-                    }
-                }
-            }
-
-            // Check for native Linux uninstall scripts
-            let uninstall_scripts = ["uninstall.sh", "uninstall", "uninstall.bin"];
-            for script in uninstall_scripts {
-                let script_path = parent.join(script);
-                if script_path.exists() {
-                    return Ok(Some(script_path.to_string_lossy().to_string()));
-                }
-            }
+        let equal = path_component == root_component;
+        if !equal {
+            return false;
         }
     }
-    Ok(None)
+    true
 }
 
-fn is_protected_dir(path: &Path) -> bool {
+#[cfg(target_os = "windows")]
+fn windows_ordinal_result_is_equal_or_uncertain(result: windows::Win32::Globalization::COMPARESTRING_RESULT) -> bool {
+    use windows::Win32::Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN};
+
+    match result {
+        CSTR_EQUAL => true,
+        CSTR_LESS_THAN | CSTR_GREATER_THAN => false,
+        // CompareStringOrdinal returns zero on API failure. Treat that and any
+        // unexpected value as contained so destructive checks fail closed.
+        _ => true,
+    }
+}
+
+fn is_protected_path(path: &Path, protected_roots: &[PathBuf], home: Option<&Path>) -> bool {
     if path.parent().is_none() {
         return true;
     }
+    if protected_roots.iter().any(|root| path_is_equal_or_beneath(path, root)) {
+        return true;
+    }
+    let Some(home) = home else { return false };
+    if path == home {
+        return true;
+    }
+    ["Desktop", "Documents", "Downloads", "Videos", "Pictures", "Music"]
+        .iter()
+        .any(|child| path_is_equal_or_beneath(path, &home.join(child)))
+}
 
+fn is_protected_dir(path: &Path) -> bool {
     let canonical = match path.canonicalize() {
         Ok(c) => c,
         Err(_) => return false,
     };
 
-    let mut protected = Vec::new();
+    let mut protected_roots = Vec::new();
+    let mut home = None;
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(home) = std::env::var("USERPROFILE") {
-            let h = PathBuf::from(home);
-            protected.push(h.clone());
-            protected.push(h.join("Desktop"));
-            protected.push(h.join("Documents"));
-            protected.push(h.join("Downloads"));
-            protected.push(h.join("Videos"));
-            protected.push(h.join("Pictures"));
-            protected.push(h.join("Music"));
+        if let Ok(home_dir) = std::env::var("USERPROFILE") {
+            let h = PathBuf::from(home_dir);
+            home = Some(h);
         }
         if let Ok(pf) = std::env::var("ProgramFiles") {
-            protected.push(PathBuf::from(pf));
+            protected_roots.push(PathBuf::from(pf));
         }
         if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
-            protected.push(PathBuf::from(pf86));
+            protected_roots.push(PathBuf::from(pf86));
         }
         if let Ok(sys) = std::env::var("SystemRoot") {
-            protected.push(PathBuf::from(sys));
+            protected_roots.push(PathBuf::from(sys));
         }
     }
 
@@ -4058,54 +4732,173 @@ fn is_protected_dir(path: &Path) -> bool {
             "/", "/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/proc", "/sys", "/dev", "/run",
             "/tmp",
         ] {
-            protected.push(PathBuf::from(sys_dir));
+            protected_roots.push(PathBuf::from(sys_dir));
         }
-        if let Ok(home) = std::env::var("HOME") {
-            let h = PathBuf::from(home);
-            protected.push(h.clone());
-            protected.push(h.join("Desktop"));
-            protected.push(h.join("Documents"));
-            protected.push(h.join("Downloads"));
-            protected.push(h.join("Videos"));
-            protected.push(h.join("Pictures"));
-            protected.push(h.join("Music"));
+        if let Ok(home_dir) = std::env::var("HOME") {
+            home = Some(PathBuf::from(home_dir));
         }
     }
 
-    for p in protected {
-        if let Ok(c) = p.canonicalize() {
-            if canonical == c {
+    let canonical_roots: Vec<_> = protected_roots
+        .into_iter()
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
+    let canonical_home = home.and_then(|p| p.canonicalize().ok());
+    is_protected_path(&canonical, &canonical_roots, canonical_home.as_deref())
+}
+
+fn has_reparse_component(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        // A Windows prefix (for example `C:`) is not a filesystem component:
+        // querying it alone treats it as a drive-relative path and fails.
+        // Keep it in the accumulator so the root and following components are
+        // inspected using their actual absolute paths.
+        #[cfg(target_os = "windows")]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            return true;
+        };
+        if metadata.file_type().is_symlink() {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return true;
             }
         }
     }
-
     false
+}
+
+fn lexical_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Some(normalized)
+}
+
+fn validate_game_folder_target(game: &Game, games: &[Game]) -> Result<PathBuf, String> {
+    let exe = game
+        .exe_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "Cannot delete game folder: this library entry has no configured executable path. Set it in Edit first."
+                .to_string()
+        })?;
+    let exe = Path::new(exe);
+    if !exe.is_absolute() || has_reparse_component(exe) {
+        return Err(
+            "Cannot safely establish the install folder: the executable path is not an absolute, reparse-free path."
+                .into(),
+        );
+    }
+    let exe = exe
+        .canonicalize()
+        .map_err(|e| format!("Cannot establish the install folder from the configured executable: {e}"))?;
+    if !exe.is_file() {
+        return Err("Cannot safely establish the install folder: the configured executable is not a file.".into());
+    }
+    let target = exe
+        .parent()
+        .ok_or_else(|| "Cannot safely establish the install folder.".to_string())?;
+    let target = target
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve install folder: {e}"))?;
+    if has_reparse_component(&target) || is_protected_dir(&target) || target.parent().is_none() {
+        return Err("Refusing to delete a filesystem root, protected, or linked folder.".into());
+    }
+    let leaf = target.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+    const GENERIC: &[&str] = &[
+        "games",
+        "game",
+        "program files",
+        "program files (x86)",
+        "steamapps",
+        "common",
+        "applications",
+        "apps",
+        "software",
+        "library",
+        "libraries",
+        "users",
+        "home",
+        "documents and settings",
+    ];
+    if GENERIC.contains(&leaf.as_str()) {
+        return Err("Refusing to delete a generic/shared install directory. Configure the executable inside a dedicated game folder.".into());
+    }
+    for other in games.iter().filter(|other| other.id != game.id) {
+        let Some(other_exe) = other.exe_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let other_path = Path::new(other_exe);
+        let Some(other_lexical) = lexical_absolute_path(other_path) else {
+            return Err(format!("Cannot verify another registered game's executable path ({}); correct its path before deleting this folder.", other.name));
+        };
+        if path_is_equal_or_beneath(&other_lexical, &target) {
+            return Err(format!(
+                "Refusing to delete this folder because it also contains another registered game's executable ({}).",
+                other.name
+            ));
+        }
+        let resolved = other_path.canonicalize().or_else(|_| {
+            other_path
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .map(|parent| other_path.file_name().map(|name| parent.join(name)).unwrap_or(parent))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "path and parent are unresolved"))
+        });
+        match resolved {
+            Ok(path) if path_is_equal_or_beneath(&path, &target) => {
+                return Err(format!("Refusing to delete this folder because it also contains another registered game's executable ({}).", other.name));
+            }
+            Ok(_) => {}
+            Err(_) => return Err(format!("Cannot safely determine whether another registered game's executable path ({}) is inside this folder. Correct or remove that library path before deleting.", other.name)),
+        }
+    }
+    // The target itself must identify this game. An ancestor may be an ordinary
+    // shared container such as `Games`, but it cannot establish ownership.
+    let key = game.name.to_lowercase().replace([' ', '-', '_'], "");
+    let leaf_key = leaf.replace([' ', '-', '_'], "");
+    if key.is_empty() || !leaf_key.contains(&key) {
+        return Err("Cannot confirm this is a game-specific folder. Rename/configure the install folder so it clearly identifies this game.".into());
+    }
+    Ok(target)
 }
 
 #[tauri::command]
 pub fn delete_game_folder(app: AppHandle, game_id: String) -> Result<(), String> {
     let games = get_games(app);
-    let game = games.into_iter().find(|g| g.id == game_id).ok_or("Game not found")?;
-    let exe_path_str = game.exe_path.unwrap_or_default();
-    let exe_path = Path::new(&exe_path_str);
-    if let Some(parent) = exe_path.parent() {
-        if is_protected_dir(parent) {
-            return Err("Cannot delete protected system or root directory".to_string());
-        }
-        if parent.exists() {
-            fs::remove_dir_all(parent).map_err(|e| e.to_string())?;
-        }
+    let game = games.iter().find(|g| g.id == game_id).ok_or("Game not found")?;
+    let target = validate_game_folder_target(game, &games)?;
+    // Re-resolve immediately before deletion; this narrows but does not eliminate
+    // pathname races (std::fs::remove_dir_all is not handle-relative).
+    let current = target
+        .canonicalize()
+        .map_err(|e| format!("Install folder changed before deletion: {e}"))?;
+    if current != target || has_reparse_component(&current) || is_protected_dir(&current) {
+        return Err("Install folder changed or is no longer safe to delete.".into());
     }
-    Ok(())
-}
-
-
-#[tauri::command]
-pub fn run_uninstaller(uninstaller_path: String) -> Result<(), String> {
-    std::process::Command::new(uninstaller_path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    fs::remove_dir_all(current).map_err(|e| format!("Could not delete game folder: {e}"))?;
     Ok(())
 }
 
@@ -4192,11 +4985,350 @@ pub async fn restore_library(app: AppHandle) -> Result<String, String> {
     Err("Restore cancelled".into())
 }
 
+/// Handles the user's answer to the "Close SILO?" confirmation dialog.
+///
+/// `choice` is `"tray"` (hide to the system tray) or `"exit"` (genuine
+/// shutdown). When `remember` is set, the stored close behaviour is updated so
+/// the user is not asked again. A quit during an active gaming session is
+/// deferred by `gaming_lifecycle` — playtime and the session journal are never
+/// abandoned.
+#[tauri::command]
+pub fn confirm_close(app: AppHandle, choice: String, remember: bool) -> Result<(), String> {
+    if remember {
+        let mut settings = crate::settings::load_settings(&app);
+        settings.close_behaviour = match choice.as_str() {
+            "tray" => CloseBehaviour::MinimiseToTray,
+            "exit" => CloseBehaviour::ExitApplication,
+            other => return Err(format!("invalid close choice: {other}")),
+        };
+        crate::settings::save_settings_atomic(&app, &settings)?;
+    }
+    match choice.as_str() {
+        "tray" => {
+            if crate::tray::is_installed() {
+                crate::tray::hide_to_tray(&app);
+            } else {
+                // No tray icon to keep the app reachable, so hiding would strand
+                // the user. A genuine exit is the only safe option here.
+                let session_active = crate::gaming_session_guard::session_is_active();
+                crate::gaming_lifecycle::request_quit(&app, session_active);
+            }
+            Ok(())
+        }
+        "exit" => {
+            let session_active = crate::gaming_session_guard::session_is_active();
+            crate::gaming_lifecycle::request_quit(&app, session_active);
+            Ok(())
+        }
+        other => Err(format!("invalid close choice: {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// The Stage 6 gate is a pure function of the setting: the WebView is only
+    /// ever destroyed when release is enabled, and the hide path is still
+    /// exactly what it was before Stage 6 existed.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn the_release_gate_maps_the_setting_onto_the_window_action() {
+        // The disable path is untouched: nothing but the setting can destroy
+        // the WebView, and turning it off keeps the verified hide.
+        assert_eq!(session_window_action(false), SessionWindowAction::Hide);
+        assert_eq!(session_window_action(true), SessionWindowAction::Release);
+        // Releasing during gameplay is the shipped default, so a fresh
+        // installation — and an existing one that never wrote the field —
+        // both land on the release path.
+        assert_eq!(
+            session_window_action(crate::settings::Settings::default().gaming_mode_release_webview),
+            SessionWindowAction::Release
+        );
+    }
+
+    #[test]
+    fn save_root_selection_prefers_lock_attribution_then_name_fallback() {
+        let locked = PathBuf::from("locked");
+        let named = PathBuf::from("named");
+        assert_eq!(
+            select_attributed_save_root(Some(locked.clone()), Some(named)),
+            Some((locked, true))
+        );
+        assert_eq!(
+            select_attributed_save_root(None, Some(PathBuf::from("named"))),
+            Some((PathBuf::from("named"), false))
+        );
+        assert_eq!(select_attributed_save_root(None, None), None);
+    }
+
+    fn game(id: &str, name: &str, exe: &Path) -> Game {
+        Game {
+            id: id.into(),
+            name: name.into(),
+            exe_path: Some(exe.to_string_lossy().into_owned()),
+            wallpaper: None,
+            logo_path: None,
+            font_family: None,
+            font_color: None,
+            playtime_minutes: 0,
+            uncertain_playtime_minutes: 0,
+            session_count: 0,
+            last_played: None,
+            status: None,
+            added_at: String::new(),
+            save_path: None,
+            save_path_source: None,
+            backup_count: None,
+            is_installed: None,
+            favorite: false,
+            tags: vec![],
+            launch_target: None,
+            launch_child_path: None,
+            exe_dir: None,
+        }
+    }
+
+    #[test]
+    fn protected_path_policy_rejects_system_root_descendants() {
+        let temp = TempDir::new("protected_descendants");
+        let system_root = temp.path().join("Program Files");
+        let target = system_root.join("Example Game");
+        fs::create_dir_all(&target).unwrap();
+        let canonical_root = system_root.canonicalize().unwrap();
+        let canonical_target = target.canonicalize().unwrap();
+        assert!(is_protected_path(&canonical_target, &[canonical_root], None));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn protected_path_policy_matches_case_insensitive_descendants_and_component_boundaries() {
+        let root = PathBuf::from(r"C:\Program Files\SILO");
+        assert!(path_is_equal_or_beneath(
+            Path::new(r"c:\PROGRAM FILES\silo\Game"),
+            &root
+        ));
+        assert!(!path_is_equal_or_beneath(
+            Path::new(r"C:\Program Files\SILO2\Game"),
+            &root
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn path_containment_handles_non_ascii_case_and_component_boundaries() {
+        let root = PathBuf::from(r"C:\Games\Ärena");
+        assert!(path_is_equal_or_beneath(Path::new(r"C:\Games\äRENA\save"), &root));
+        assert!(!path_is_equal_or_beneath(Path::new(r"C:\Games\ärena2\save"), &root));
+    }
+
+    #[test]
+    fn protected_path_policy_allows_dedicated_game_under_home_games() {
+        let temp = TempDir::new("home_games_policy");
+        let home = temp.path().join("home");
+        let target = home.join("Games").join("Example Game");
+        fs::create_dir_all(&target).unwrap();
+        assert!(!is_protected_path(
+            &target.canonicalize().unwrap(),
+            &[],
+            Some(&home.canonicalize().unwrap())
+        ));
+
+        let sensitive = home.join("Documents").join("Example Game");
+        fs::create_dir_all(&sensitive).unwrap();
+        assert!(is_protected_path(
+            &sensitive.canonicalize().unwrap(),
+            &[],
+            Some(&home.canonicalize().unwrap())
+        ));
+    }
+
+    #[test]
+    fn game_folder_policy_accepts_nested_game_folder_and_rejects_shared_or_containing_other_game() {
+        let Some(temp) = GameFolderTestDir::new("delete_policy") else {
+            return;
+        };
+        let shared = temp.path().join("Games");
+        let game_root = shared.join("Example Game");
+        fs::create_dir_all(&game_root).unwrap();
+        let exe = game_root.join("example.exe");
+        File::create(&exe).unwrap();
+        let g = game("1", "Example Game", &exe);
+        assert_eq!(
+            validate_game_folder_target(&g, std::slice::from_ref(&g)).unwrap(),
+            game_root.canonicalize().unwrap()
+        );
+
+        let shared_exe = shared.join("example.exe");
+        File::create(&shared_exe).unwrap();
+        let shared_game = game("2", "Games", &shared_exe);
+        assert!(validate_game_folder_target(&shared_game, std::slice::from_ref(&shared_game)).is_err());
+
+        let other_exe = game_root.join("other.exe");
+        File::create(&other_exe).unwrap();
+        let other = game("3", "Other Game", &other_exe);
+        assert!(validate_game_folder_target(&g, &[g.clone(), other]).is_err());
+    }
+
+    #[test]
+    fn game_folder_policy_rejects_common_and_apps_leaf_false_positives() {
+        let Some(temp) = GameFolderTestDir::new("delete_generic_leaf") else {
+            return;
+        };
+        for (leaf, game_name) in [("Common", "Common"), ("Apps", "Apps")] {
+            let root = temp.path().join("SteamApps").join(leaf);
+            fs::create_dir_all(&root).unwrap();
+            let exe = root.join("game.exe");
+            File::create(&exe).unwrap();
+            let g = game(leaf, game_name, &exe);
+            assert!(validate_game_folder_target(&g, std::slice::from_ref(&g)).is_err());
+        }
+    }
+
+    #[test]
+    fn game_folder_policy_rejects_stale_other_exe_lexically_inside_target() {
+        let Some(temp) = GameFolderTestDir::new("delete_stale_other") else {
+            return;
+        };
+        let root = temp.path().join("Example Game");
+        fs::create_dir_all(&root).unwrap();
+        let exe = root.join("example.exe");
+        File::create(&exe).unwrap();
+        let g = game("1", "Example Game", &exe);
+        let other = game("2", "Other Game", &root.join("missing.exe"));
+        assert!(validate_game_folder_target(&g, &[g.clone(), other]).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn game_folder_policy_rejects_other_exe_with_different_path_case() {
+        let Some(temp) = GameFolderTestDir::new("delete_other_case") else {
+            return;
+        };
+        let root = temp.path().join("Example Game");
+        fs::create_dir_all(&root).unwrap();
+        let exe = root.join("example.exe");
+        File::create(&exe).unwrap();
+        let g = game("1", "Example Game", &exe);
+        let other = game(
+            "2",
+            "Other Game",
+            &PathBuf::from(root.to_string_lossy().to_uppercase()).join("missing.exe"),
+        );
+        assert!(validate_game_folder_target(&g, &[g.clone(), other]).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn game_folder_policy_accepts_dedicated_nested_windows_game_folder() {
+        let Some(temp) = GameFolderTestDir::new("delete_policy_windows_nested") else {
+            return;
+        };
+        let game_root = temp.path().join("Games").join("Example Game");
+        fs::create_dir_all(&game_root).unwrap();
+        let exe = game_root.join("example.exe");
+        File::create(&exe).unwrap();
+
+        let g = game("1", "Example Game", &exe);
+        assert_eq!(
+            validate_game_folder_target(&g, std::slice::from_ref(&g)).unwrap(),
+            game_root.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn game_folder_policy_rejects_symlinked_executable_path() {
+        use std::os::unix::fs::symlink;
+        let Some(temp) = GameFolderTestDir::new("delete_symlink") else {
+            return;
+        };
+        let root = temp.path().join("Example Game");
+        fs::create_dir_all(&root).unwrap();
+        let exe = root.join("game.exe");
+        File::create(&exe).unwrap();
+        let alias = temp.path().join("alias.exe");
+        symlink(&exe, &alias).unwrap();
+        let g = game("1", "Example Game", &alias);
+        assert!(validate_game_folder_target(&g, std::slice::from_ref(&g)).is_err());
+    }
 
     struct TempDir(PathBuf);
+
+    // Keep folder-deletion fixtures outside system temp locations: Unix policy
+    // deliberately treats /tmp descendants as protected.
+    struct GameFolderTestDir(PathBuf);
+
+    impl GameFolderTestDir {
+        fn new(tag: &str) -> Option<Self> {
+            let unique = format!(
+                "{}_{}_{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock must be after Unix epoch")
+                    .as_nanos()
+            );
+            let mut candidates = Vec::new();
+            if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+                candidates.push(PathBuf::from(home).join("Games"));
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                candidates.push(cwd.join("target").join("silo-test-sandbox"));
+                candidates.push(cwd.join(".silo-test-sandbox"));
+            }
+
+            for root in candidates {
+                if fs::create_dir_all(&root).is_err() {
+                    continue;
+                }
+                let Ok(canonical_root) = root.canonicalize() else {
+                    continue;
+                };
+                if is_protected_dir(&canonical_root) {
+                    continue;
+                }
+                let parent = canonical_root.join(".silo-policy-tests");
+                if fs::create_dir_all(&parent).is_err() {
+                    continue;
+                }
+                let Ok(canonical_parent) = parent.canonicalize() else {
+                    continue;
+                };
+                if is_protected_dir(&canonical_parent) {
+                    continue;
+                }
+                let dir = canonical_parent.join(&unique);
+                if fs::create_dir(&dir).is_err() {
+                    continue;
+                }
+                let Ok(canonical_dir) = dir.canonicalize() else {
+                    let _ = fs::remove_dir(&dir);
+                    continue;
+                };
+                if is_protected_dir(&canonical_dir) || canonical_dir.parent() != Some(canonical_parent.as_path()) {
+                    let _ = fs::remove_dir(&dir);
+                    continue;
+                }
+                return Some(Self(canonical_dir));
+            }
+
+            eprintln!("skipping game-folder policy acceptance test: no safe writable test directory outside protected locations was available");
+            None
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for GameFolderTestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     impl TempDir {
         fn new(tag: &str) -> Self {
@@ -4523,6 +5655,135 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         // Folder gone (game moved / reinstalled / wiped) -> must re-detect.
         assert!(save_detection_needed(Some(&dir.to_string_lossy())));
+    }
+
+    #[test]
+    fn save_watch_decision_preserves_missing_and_suspect_folder_rules() {
+        let missing = save_watch_required(None, &[]);
+        assert_eq!(missing, (true, false, true));
+
+        let existing = TempDir::new("save_watch_decision");
+        let keys = vec!["actual game".to_string()];
+        let valid = existing.path().join("Actual Game");
+        let suspect = existing.path().join("Publisher");
+        fs::create_dir_all(&valid).unwrap();
+        fs::create_dir_all(&suspect).unwrap();
+        assert_eq!(save_watch_required(valid.to_str(), &keys), (false, false, false));
+        assert_eq!(save_watch_required(suspect.to_str(), &keys), (false, true, true));
+    }
+
+    #[test]
+    fn save_watch_completion_decisions_cover_paths_and_detection_setting() {
+        assert!(should_run_final_save_scan(true, false, true));
+        assert!(!should_run_final_save_scan(false, false, true));
+        assert!(!should_run_final_save_scan(true, true, true));
+        assert!(!should_run_final_save_scan(true, false, false));
+
+        assert!(matches!(
+            save_watch_completion(&None, false),
+            SaveWatchCompletion::NoPath
+        ));
+        assert!(matches!(
+            save_watch_completion(&None, true),
+            SaveWatchCompletion::NoPath
+        ));
+
+        let dir = TempDir::new("save_watch_completion");
+        let path = dir.path().to_string_lossy().into_owned();
+        assert!(matches!(
+            save_watch_completion(&Some(path.clone()), true),
+            SaveWatchCompletion::KnownPathPresent(_)
+        ));
+        assert!(matches!(
+            save_watch_completion(&Some(path.clone()), false),
+            SaveWatchCompletion::KnownPathMissing(_)
+        ));
+
+        for run_detection in [false, true] {
+            assert!(matches!(
+                save_watch_completion(&None, false),
+                SaveWatchCompletion::NoPath
+            ));
+            assert_eq!(should_emit_saveguard_not_found(run_detection), run_detection);
+        }
+    }
+
+    #[test]
+    fn save_watcher_keeps_only_write_events_outside_detected_roots() {
+        let root = PathBuf::from("saves");
+        let nested = root.join("slot.dat");
+        let roots = HashSet::from([root]);
+        assert!(path_is_under_detected_root(&nested, &roots));
+        assert!(!path_is_under_detected_root(Path::new("other/file"), &roots));
+        assert!(save_event_is_write(&EventKind::Create(notify::event::CreateKind::File)));
+        assert!(save_event_is_write(&EventKind::Modify(
+            notify::event::ModifyKind::Data(notify::event::DataChange::Any,)
+        )));
+        assert!(!save_event_is_write(&EventKind::Remove(
+            notify::event::RemoveKind::File
+        )));
+    }
+
+    #[test]
+    fn save_watch_coalesces_deduplicates_and_excludes_detected_roots() {
+        let start = Instant::now();
+        assert!(save_watch_check_due(None, true, start));
+        assert!(!save_watch_check_due(
+            Some(start),
+            true,
+            start + Duration::from_millis(749)
+        ));
+        assert!(save_watch_check_due(
+            Some(start),
+            true,
+            start + Duration::from_millis(750)
+        ));
+        assert!(!save_watch_check_due(None, false, start));
+
+        let root = PathBuf::from("saves");
+        let ignored = root.join("slot.dat");
+        let tracked = PathBuf::from("other/slot.dat");
+        let roots = HashSet::from([root]);
+        let mut pending = HashSet::new();
+        for path in [&ignored, &tracked, &tracked] {
+            collect_save_event_paths(
+                notify::Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(path.to_path_buf()),
+                false,
+                &roots,
+                &mut pending,
+            );
+        }
+        collect_save_event_paths(
+            notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File)).add_path(PathBuf::from("remove")),
+            false,
+            &roots,
+            &mut pending,
+        );
+        assert_eq!(pending, HashSet::from([tracked]));
+        collect_save_event_paths(
+            notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(PathBuf::from("detected")),
+            true,
+            &roots,
+            &mut pending,
+        );
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn save_watch_stop_drops_injected_receiver_and_pending_paths() {
+        let (tx, rx) = channel();
+        let mut watch = SaveWatchEvents {
+            watcher: None,
+            receiver: Some(rx),
+            pending_paths: HashSet::from([PathBuf::from("pending")]),
+            last_detection_check: None,
+        };
+        watch.stop();
+        assert!(watch.receiver.is_none());
+        assert!(watch.take_due_paths(false, &HashSet::new()).is_empty());
+        assert!(tx
+            .send(notify::Event::new(EventKind::Create(notify::event::CreateKind::File)))
+            .is_err());
     }
 
     // ----- find_real_game_exe (launcher-aware "go straight to the game") -----
@@ -5982,6 +7243,18 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn ordinal_comparison_failures_fail_closed() {
+        use windows::Win32::Globalization::{COMPARESTRING_RESULT, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN};
+
+        assert!(windows_ordinal_result_is_equal_or_uncertain(CSTR_EQUAL));
+        assert!(!windows_ordinal_result_is_equal_or_uncertain(CSTR_LESS_THAN));
+        assert!(!windows_ordinal_result_is_equal_or_uncertain(CSTR_GREATER_THAN));
+        assert!(windows_ordinal_result_is_equal_or_uncertain(COMPARESTRING_RESULT(0)));
+        assert!(windows_ordinal_result_is_equal_or_uncertain(COMPARESTRING_RESULT(99)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn survey_never_relinks_a_game_onto_another_games_save_folder() {
         let Some((profile, parent)) = profile_and_parent() else {
             return;
@@ -6416,7 +7689,10 @@ mod tests {
             "and it is still not enough evidence for the automatic relink"
         );
         assert_eq!(proposal.recorded_path, foreign.to_string_lossy());
-        assert!(!foreign.exists(), "proposing must not create the other machine's folder");
+        assert!(
+            !foreign.exists(),
+            "proposing must not create the other machine's folder"
+        );
     }
 
     #[test]
@@ -6479,5 +7755,67 @@ mod tests {
             proposal.reason
         );
     }
-}
 
+    // ----- wallpaper fetch: host allowlist / scheme guard -----
+
+    #[test]
+    fn art_host_allowlist_admits_exact_hosts() {
+        assert!(is_allowed_art_host("cdn2.steamgriddb.com"));
+        assert!(is_allowed_art_host("cdn.cloudflare.steamstatic.com"));
+        assert!(is_allowed_art_host("shared.akamai.steamstatic.com"));
+        assert!(is_allowed_art_host("shared.fastly.steamstatic.com"));
+        assert!(is_allowed_art_host("cdn.akamai.steamstatic.com"));
+        assert!(is_allowed_art_host("cdn.fastly.steamstatic.com"));
+        assert!(is_allowed_art_host("store.steampowered.com"));
+    }
+
+    #[test]
+    fn art_host_allowlist_matches_case_insensitively() {
+        assert!(is_allowed_art_host("CDN2.SteamGridDB.com"));
+        assert!(is_allowed_art_host("Shared.Akamai.SteamStatic.com"));
+    }
+
+    #[test]
+    fn art_host_allowlist_admits_subdomains_of_art_domains() {
+        assert!(is_allowed_art_host("media.steamgriddb.com"));
+        assert!(is_allowed_art_host("a.b.c.steamstatic.com"));
+        assert!(is_allowed_art_host("api.steampowered.com"));
+    }
+
+    #[test]
+    fn art_host_allowlist_rejects_lookalike_domains() {
+        assert!(!is_allowed_art_host("evil.com"));
+        assert!(!is_allowed_art_host("notsteamgriddb.com"));
+        // Bare art domains are not themselves allowed — only their subdomains.
+        assert!(!is_allowed_art_host("steamstatic.com"));
+        // A trusted prefix glued onto an untrusted domain stays untrusted.
+        assert!(!is_allowed_art_host("cdn2.steamgriddb.com.evil.com"));
+        assert!(!is_allowed_art_host(""));
+    }
+
+    #[test]
+    fn art_url_parse_requires_https_and_a_host() {
+        assert_eq!(
+            parse_art_host("https://cdn2.steamgriddb.com/image.jpg"),
+            Ok("cdn2.steamgriddb.com".to_string())
+        );
+        // No path at all is fine — the host runs to the end of the string.
+        assert_eq!(
+            parse_art_host("https://cdn2.steamgriddb.com"),
+            Ok("cdn2.steamgriddb.com".to_string())
+        );
+        assert!(parse_art_host("http://cdn2.steamgriddb.com/image.jpg").is_err());
+        assert!(parse_art_host("ftp://cdn2.steamgriddb.com/image.jpg").is_err());
+        assert!(parse_art_host("cdn2.steamgriddb.com/image.jpg").is_err());
+        assert!(parse_art_host("https:///image.jpg").is_err());
+        assert!(parse_art_host("").is_err());
+    }
+
+    #[test]
+    fn art_url_parse_lowercases_and_cannot_be_smuggled_via_query() {
+        assert_eq!(
+            parse_art_host("https://CDN2.SteamGridDB.com/a.jpg?next=https://evil.com"),
+            Ok("cdn2.steamgriddb.com".to_string())
+        );
+    }
+}
