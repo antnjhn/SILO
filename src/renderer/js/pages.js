@@ -13,6 +13,8 @@
 const PAGES = ['home', 'stats', 'import', 'settings'];
 const TRANSITION_MS = 220;
 
+import { rememberUiState } from './uistate.js';
+
 const enterHandlers = new Map();
 const leaveHandlers = new Map();
 let current = 'home';
@@ -91,6 +93,10 @@ export function showPage(id, { instant = false } = {}) {
     from.setAttribute('aria-hidden', 'true');
   }
   current = id;
+
+  // Route memory: Stage 6's recreated WebView boots into the page the user was
+  // last on, instead of silently back at the library.
+  rememberUiState({ page: id });
 
   const finish = (outgoing, incoming) => {
     // Focus follows the page: if the focus was inside the page that was left,

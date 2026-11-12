@@ -1,3 +1,5 @@
+import { revealNavAndFocus } from './js/nav.js';
+
 /* ── State ─────────────────────────────────────────────────────────────────*/
 let allGames = [];
 let games = [];
@@ -274,6 +276,7 @@ window.vault = {
   importEpicLibrary: () => invoke('import_epic_library'),
   importGogLibrary: () => invoke('import_gog_library'),
 };
+
 function getFileSrc(path, imgElement) {
   if (!path) return;
   if (path.startsWith('http://') || path.startsWith('https://')) {
@@ -2384,7 +2387,12 @@ document.addEventListener('keydown', e => {
     // back out. A / Enter still opens the full details view.
     case 'ArrowUp':
       e.preventDefault();
-      if (!detailsOpen && selectedIndex > 0) selectGame(selectedIndex - 1);
+      if (!detailsOpen) {
+        // UP from the topmost game reveals the nav bar; otherwise step back
+        // along the rail. Matches the controller's d-pad UP in gamepad.js.
+        if (selectedIndex === 0) revealNavAndFocus();
+        else selectGame(selectedIndex - 1);
+      }
       break;
     case 'ArrowDown':
       e.preventDefault();

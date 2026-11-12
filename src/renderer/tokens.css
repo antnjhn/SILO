@@ -64,6 +64,22 @@
   src: url('assets/fonts/geist-mono-variable.woff2') format('woff2');
 }
 
+/* ── Animatable accent properties ──────────────────────────────────────────
+   Registered, inherited custom properties: switching games can now cross-fade
+   the whole accent system over 400ms instead of snapping. Initial values
+   match the neutral fallbacks below exactly, so first paint is identical. */
+@property --accent        { syntax: '<color>'; inherits: true; initial-value: #e8e8ee; }
+@property --accent-strong { syntax: '<color>'; inherits: true; initial-value: #c9c9d2; }
+@property --accent-soft   { syntax: '<color>'; inherits: true; initial-value: rgba(232, 232, 238, 0.14); }
+@property --accent-ink    { syntax: '<color>'; inherits: true; initial-value: #000000; }
+@property --accent-deep   { syntax: '<color>'; inherits: true; initial-value: #9090ad; }
+@property --surface-tint  { syntax: '<color>'; inherits: true; initial-value: rgba(233, 233, 235, 0.04); }
+
+/* --accent-ink joins the cross-fade so glyphs blend with their tiles instead of
+   snapping mid-fade; --accent-deep (ivory-legible dark companion) never snaps
+   either — the Delete triangles swap fill during the convergence. */
+:root { transition: --accent 400ms ease, --accent-strong 400ms ease, --accent-soft 400ms ease, --accent-ink 400ms ease, --accent-deep 400ms ease, --surface-tint 400ms ease; }
+
 :root {
   /* ── Surfaces: flat OLED black, depth via 1px hairlines only ── */
   --bg:                 #000000;   /* app base */
@@ -93,6 +109,8 @@
   --accent-strong:      #c9c9d2;
   --accent-soft:        rgba(232, 232, 238, 0.14);
   --accent-ink:         #000000;  /* text/icon color ON accent (JS sets by luminance) */
+  --accent-deep:        #9090ad;  /* same-hue dark companion for ivory surfaces (JS darkens to >=3:1) */
+  --surface-tint:       rgba(233, 233, 235, 0.04);  /* neutral wash derived from the fallback accent */
   --green:              var(--accent);
   --green-dark:         var(--accent-strong);
   --red:                var(--danger);
@@ -114,17 +132,27 @@
   --sp-7:               48px;
   --modal-pad:          24px;
 
-  /* ── Type ── */
-  --font-ui:            'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  /* ── Type ──
+   Inter is the primary UI font; Geist remains the category menu's typeface.
+   ── */
+  --font-ui:            'Inter', 'Geist', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono:          'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
-  --fs-label:           11px;   /* mono, uppercase, tracked */
-  --fs-label-sm:        10px;
-  --fs-body:            13px;
-  --fs-body-lg:         14px;
-  --fs-title:           17px;   /* modal titles, weight 600 */
+
+  /* Type scale — modular, consistent across the app */
+  --fs-display:         48px;   /* hero titles, weight 900 */
+  --fs-title:           15px;   /* modal titles, weight 600 */
+  --fs-section:         15px;   /* section headings, weight 600 */
+  --fs-body:            14px;   /* body text, weight 500 */
+  --fs-body-sm:         13px;   /* smaller body text */
+  --fs-label:           11px;   /* field labels, weight 600 */
+  --fs-label-sm:        11px;   /* smaller labels */
+  --fs-caption:         10px;   /* captions, hints, metadata */
   --fs-stat:            27px;   /* main-screen stats, weight 500 */
+  --lh-body:            1.55;
+  --lh-heading:         1.2;
   --lh-stat:            1.2;
-  --ls-label:           0.12em;
+  --ls-label:           0.16em;   /* letter-spacing for labels */
+  --ls-display:         -0.02em;  /* letter-spacing for display text */
 
   /* ── Motion: subtle only ── */
   --dur-fast:           150ms;

@@ -3,12 +3,17 @@
    without creating an import cycle. */
 
 /* ── Toast ─────────────────────────────────────────────────────────────────*
-   Flat notifications, top right. At most 3 are visible, each auto-dismisses
+   Variant notifications, top right. At most 3 are visible, each auto-dismisses
    (errors get longer, warnings/info 4s), hovering or focusing pauses the
-   countdown, and an optional text action ("View", "Undo") sits inline. */
+   countdown, and an optional text action ("View", "Undo") sits inline.
+   Variants: info · success · warning · error — colour, icon and duration each. */
 const TOAST_MAX = 3;
-const TOAST_MS = { info: 4000, success: 4000, warning: 4000, error: 6000 };
-const TOAST_ICON = { error: '⚠', warning: '⚠', success: '✓', info: 'ℹ' };
+const TOAST_VARIANT = {
+  info:    { ms: 4000,  icon: 'ℹ',  label: 'Info' },
+  success: { ms: 4000,  icon: '✓',  label: 'Success' },
+  warning: { ms: 5000,  icon: '⚠',  label: 'Warning' },
+  error:   { ms: 8000,  icon: '⚠',  label: 'Error' },
+};
 
 function dismissToast(toast) {
   if (!toast || !toast.isConnected || toast.classList.contains('leaving')) return;
@@ -21,19 +26,27 @@ function dismissToast(toast) {
 export function showToast(type, title, msg, opts = {}) {
   const container = document.getElementById('toast-container');
   if (!container) return null;
-  const kind = TOAST_MS[type] ? type : 'info';
+  const variant = TOAST_VARIANT[type] || TOAST_VARIANT.info;
+  const kind = variant === TOAST_VARIANT.info && !TOAST_VARIANT[type] ? 'info' : type;
+  const persistent = opts.persistent === true;
   const toast = document.createElement('div');
   toast.className = `toast ${kind}`;
   toast.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   toast.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
+  toast.setAttribute('aria-label', `${variant.label}: ${esc(title)}${msg ? '. ' + esc(msg) : ''}`);
   toast.innerHTML = `
-    <span class="toast-icon" aria-hidden="true">${TOAST_ICON[kind]}</span>
-    <div class="toast-body">
-      <div class="toast-title">${esc(title)}</div>
-      ${msg ? `<div class="toast-msg">${esc(msg)}</div>` : ''}
+    <div class="toast-header">
+      <span class="toast-icon" aria-hidden="true">${variant.icon}</span>
+      <div class="toast-body">
+        <div class="toast-title">${esc(title)}</div>
+        ${msg ? `<div class="toast-msg">${esc(msg)}</div>` : ''}
+      </div>
     </div>
-    ${opts.actionLabel ? `<button type="button" class="toast-action">${esc(opts.actionLabel)}</button>` : ''}
-    <button type="button" class="toast-close" aria-label="Dismiss">✕</button>
+    ${!persistent ? `<div class="toast-progress"><span></span></div>` : ''}
+    <div class="toast-actions">
+      ${opts.actionLabel ? `<button type="button" class="toast-action">${esc(opts.actionLabel)}</button>` : ''}
+      <button type="button" class="toast-close" aria-label="Dismiss"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
   `;
   container.appendChild(toast);
 
@@ -42,22 +55,25 @@ export function showToast(type, title, msg, opts = {}) {
   while (live.length > TOAST_MAX) dismissToast(live.shift());
 
   // Countdown, paused while the toast is hovered or focused inside.
-  let remaining = opts.duration ?? TOAST_MS[kind];
-  let startedAt = performance.now();
-  let timer = 0;
-  const start = () => {
-    startedAt = performance.now();
-    timer = setTimeout(() => dismissToast(toast), remaining);
-  };
-  const hold = () => {
-    clearTimeout(timer);
-    remaining -= performance.now() - startedAt;
-  };
-  if (remaining > 0) start();
-  toast.addEventListener('mouseenter', hold);
-  toast.addEventListener('mouseleave', () => { if (remaining > 0) start(); });
-  toast.addEventListener('focusin', hold);
-  toast.addEventListener('focusout', () => { if (remaining > 0) start(); });
+  // Persistent toasts never auto-dismiss.
+  if (!persistent) {
+    let remaining = opts.duration ?? variant.ms;
+    let startedAt = performance.now();
+    let timer = 0;
+    const start = () => {
+      startedAt = performance.now();
+      timer = setTimeout(() => dismissToast(toast), remaining);
+    };
+    const hold = () => {
+      clearTimeout(timer);
+      remaining -= performance.now() - startedAt;
+    };
+    start();
+    toast.addEventListener('mouseenter', hold);
+    toast.addEventListener('mouseleave', () => { if (remaining > 0) start(); });
+    toast.addEventListener('focusin', hold);
+    toast.addEventListener('focusout', () => { if (remaining > 0) start(); });
+  }
 
   const action = toast.querySelector('.toast-action');
   if (action) action.addEventListener('click', () => { dismissToast(toast); opts.onAction?.(); });
@@ -74,6 +90,23 @@ export function fmtTime(min) {
   if (!min || min < 1) return '0h 0m';
   const h = Math.floor(min / 60), m = min % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/* Tracked playtime. `uncertain` minutes were reconstructed after SILO was closed
+   for part of the session, so they are a lower bound: the total is shown as
+   ">= x" and never as an exact figure. */
+export function fmtTrackedTime(min, uncertain) {
+  const exact = Math.max(0, Math.round(min || 0));
+  const lowerBound = Math.max(0, Math.round(uncertain || 0));
+  if (!lowerBound) return fmtTime(exact);
+  return `\u2265 ${fmtTime(exact + lowerBound)}`;
+}
+
+/* Explains a lower-bound duration where there is room for a tooltip. */
+export function trackedTimeTitle(uncertain) {
+  const lowerBound = Math.max(0, Math.round(uncertain || 0));
+  if (!lowerBound) return '';
+  return `Includes ${fmtShort(lowerBound)} tracked while SILO was not running: the real playtime is at least this much.`;
 }
 
 export function fmtDate(iso) {

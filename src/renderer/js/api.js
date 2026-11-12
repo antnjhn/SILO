@@ -33,13 +33,26 @@ window.vault = {
   fetchMetadata: (name) => invoke('fetch_metadata', { name }),
   getSettings: () => invoke('get_settings'),
   setSettings: (data) => invoke('set_settings', { settings: data.settings }),
+  confirmClose: (choice, remember) => invoke('confirm_close', { choice, remember }),
   openLogsFolder: () => invoke('open_logs_folder'),
   getAllBackups: () => invoke('get_all_backups'),
   deleteGameBackups: (gameId) => invoke('delete_game_backups', { gameId }),
   importSteamLibrary: () => invoke('import_steam_library'),
   importEpicLibrary: () => invoke('import_epic_library'),
   importGogLibrary: () => invoke('import_gog_library'),
+  getDisplayInfo: () => invoke('get_display_info'),
+  sgdbSearchGames: (query) => invoke('sgdb_search_games', { query }),
+  sgdbArt: (gameId, kind, page, limit) => invoke('sgdb_art', { gameId, kind, page, limit }),
+  discoverUninstallers: (gameId) => invoke('discover_uninstallers', { gameId }),
+  runUninstallerCandidate: (gameId, candidateId) => invoke('run_uninstaller_candidate', { gameId, candidateId }),
 };
+/* Resolve an asset path to a plain URL without touching an <img>. */
+export function getSrcUrl(path) {
+  if (!path) return null;
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  try { return window.__TAURI__.core.convertFileSrc(path); } catch { return path; }
+}
+
 export function getFileSrc(path, imgElement) {
   if (!path) return;
   if (path.startsWith('http://') || path.startsWith('https://')) {

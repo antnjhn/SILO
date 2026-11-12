@@ -3,12 +3,13 @@ import {
   allGames, games, selectedIndex, searchQuery,
   setAllGames, setGames, setSelectedIndex, setSearchQuery,
 } from './state.js';
-import { showToast, esc, escJs, fmtTime, fmtDate } from './utils.js';
-import { getFileSrc } from './api.js';
+import { showToast, esc, escJs, fmtTime, fmtDate, fmtTrackedTime, trackedTimeTitle } from './utils.js';
+import { getFileSrc, getSrcUrl } from './api.js';
 import { onPageEnter, onPageLeave } from './pages.js';
 import { hideStatPopoverNow, refreshStatPopover } from './stats.js';
-import { vibrate, vibrateVertical } from './gamepad.js';
+import { vibrate } from './gamepad.js';
 import { openEditModal } from './modals.js';
+import { rememberUiState } from './uistate.js';
 
 /* Rail / list state owned here but read across modules. Variables read by other
    modules are exported as live bindings; the rest stay file-local. */
@@ -21,6 +22,7 @@ let selectedTags = new Set();
 let filterPanelOpen = false;
 let sortMode = 'name';               // 'name' | 'playtime' | 'recent'
 let lastHeroRenderedId = null;
+let detailsLogoGeneration = 0;
 
 // Wallpaper crossfade state
 let currentBgLayer = 'bg-wallpaper-1';
@@ -205,6 +207,7 @@ window.addEventListener('resize', () => {
     railResizeRaf = 0;
     layoutRail();
     layoutSearch();
+    measureLaunchArrowTravel();
     document.body.classList.add('rail-fx-instant');
     applyRailCarousel();
     centerActiveItem(false);
@@ -216,6 +219,10 @@ window.addEventListener('resize', () => {
 /* ── Render game list ─────────────────────────────────────────────────────*/
 export function applyCategoryFilter(resetIndex = true) {
   const q = searchQuery;
+  // The selection follows the game, not the array index: renaming or re-sorting
+  // moves a game, and index-based focus would silently point at its neighbour
+  // (the panel then showed one game while the rail focused another).
+  const anchorId = resetIndex ? null : games[selectedIndex]?.id;
   let filtered;
   if (currentCategory === 'ALL GAMES') {
     filtered = [...allGames];
@@ -273,7 +280,9 @@ export function applyCategoryFilter(resetIndex = true) {
   if (resetIndex) {
     setSelectedIndex(0);
   } else {
-    if (selectedIndex >= games.length) setSelectedIndex(Math.max(0, games.length - 1));
+    const anchored = anchorId ? filtered.findIndex(g => g.id === anchorId) : -1;
+    if (anchored !== -1) setSelectedIndex(anchored);
+    else if (selectedIndex >= games.length) setSelectedIndex(Math.max(0, games.length - 1));
   }
 
   renderGameList();
@@ -296,6 +305,9 @@ export function renderGameList() {
 
   empty.style.display = games.length === 0 ? 'flex' : 'none';
 
+  gifEligibilityObserver?.disconnect();
+  if (activeGifItem) parkGif(activeGifItem);
+  pruneParkedOncePaths();
   list.innerHTML = games.map((g, i) => {
     const dist = Math.abs(i - selectedIndex);
     let cls = 'game-item';
@@ -306,7 +318,7 @@ export function renderGameList() {
     // Sidebar is logos-only: no text titles, no tooltips. Games without a logo
     // asset fall back to the first letter styled with the game's font/color.
     // Install check: a missing game keeps its artwork, dimmed. No badge pill.
-    if (installStatus(g.id) !== 'installed') cls += ' install-missing';
+    if (installMissing(g.id)) cls += ' install-missing';
 
     return `
     <div class="${cls}" data-index="${i}" aria-label="${esc(g.name)}">
@@ -318,18 +330,24 @@ export function renderGameList() {
     </div>
   `}).join('');
 
-  // Load sidebar logos via base64
+  // Static logos load normally; GIFs only acquire a live source while eligible.
   list.querySelectorAll('.game-item img[data-logo-path]').forEach(img => {
-    getFileSrc(img.dataset.logoPath, img);
+    const path = img.dataset.logoPath;
+    if (!/\.gif(?:$|[?#])/i.test(path)) getFileSrc(path, img);
   });
 
   list.querySelectorAll('.game-item').forEach(el => {
+    gifEligibilityObserver?.observe(el);
     el.addEventListener('click', () => {
       const i = parseInt(el.dataset.index);
       if (i === selectedIndex) railEnterGame();   // clicking the focused logo steps in
       else selectGame(i);
     });
     el.addEventListener('dblclick', () => { selectGame(parseInt(el.dataset.index)); openDetails(); });
+    /* Hover plays the focused-content: a hovered non-active item runs its
+       gif; leaving parks it back on the first frame unless it is active. */
+    el.addEventListener('mouseenter', () => { if (!el.classList.contains('active')) playLogoGif(el); });
+    el.addEventListener('mouseleave', () => { if (!el.classList.contains('active')) stillLogoGif(el); });
   });
 
   // The list was rebuilt: reconcile the carousel with no animation so the
@@ -1001,6 +1019,8 @@ export function syncRailInstant() {
 export function selectGame(i) {
   if (i < 0 || i >= games.length || i === selectedIndex) return;
   setSelectedIndex(i);
+  // Route memory: the rebuilt WebView focuses the same game when it boots.
+  rememberUiState({ selectedGameId: games[i].id });
   updateGameListSelection();   // recalculates the visual state of every logo
   centerActiveItem(true);
   crossfadeWallpaper();
@@ -1030,6 +1050,9 @@ export function retriggerHeroAnimation() {
    focus. Nothing animates here — CSS transitions carry the change. */
 export function updateGameListSelection() {
   const items = document.querySelectorAll('#game-list .game-item');
+  /* Remember the previously focused item before the re-tag: it now loses the
+     spotlight, so its gif freezes. The new focus picks the animation up. */
+  const prevActive = document.querySelector('#game-list .game-item.active');
   items.forEach((el, i) => {
     const dist = Math.abs(i - selectedIndex);
     el.className = 'game-item'
@@ -1037,6 +1060,16 @@ export function updateGameListSelection() {
       + (el.classList.contains('uninstalled') ? ' uninstalled' : '')
       + (el.classList.contains('install-missing') ? ' install-missing' : '');
   });
+  const newActive = items[selectedIndex] || null;
+  if (prevActive && prevActive !== newActive) stillLogoGif(prevActive);
+  if (newActive) {
+    // Re-arm before playing so a mid-loop gif restarts from frame 1 on focus.
+    const path = newActive.querySelector('img[data-logo-path]')?.dataset.logoPath;
+    const game = games[Number(newActive.dataset.index)];
+    if (path && game) parkedOncePaths.delete(`${game.id}:${path}`);
+    stillLogoGif(newActive);
+    playLogoGif(newActive);
+  }
   applyRailCarousel();
 }
 
@@ -1046,9 +1079,42 @@ export function updateGameListSelection() {
    a neutral light gray when there is no wallpaper or nothing saturated enough.
    Published as CSS custom properties; every accent consumer reads var(--accent)
    (the legacy --green alias included), so one update re-themes the whole UI. */
-const ACCENT_FALLBACK = { r: 232, g: 232, b: 238 };   // #e8e8ee neutral
+/* 'Dynamic accent color' preference — same shape as the 'Always animate'
+   override above: applies instantly, lives in localStorage so it survives
+   restarts without a round-trip through the Rust settings struct. Default is
+   ON, i.e. the wallpaper-derived accent this launcher shipped with. */
+const ACCENT_PREF_KEY = 'silo.dynamicAccent';
+let dynamicAccent = true;
+try { dynamicAccent = localStorage.getItem(ACCENT_PREF_KEY) !== '0'; } catch { /* private mode */ }
+
+/* Turn the preference on/off live. Off: the accent (and the surface tint)
+   settles back to the neutral fallback and stops following game changes. On:
+   re-derive from the currently focused game right away. No flicker — the
+   registered @property transition in tokens.css carries the change. */
+export function setDynamicAccent(on) {
+  dynamicAccent = !!on;
+  try { localStorage.setItem(ACCENT_PREF_KEY, dynamicAccent ? '1' : '0'); } catch { /* ignore */ }
+  clearTimeout(accentApplyTimer);
+  if (!dynamicAccent) {
+    accentLastKey = null;
+    resetAccentColor();
+  } else {
+    updateAccentFromGame();
+  }
+  syncDynamicAccentToggle();
+}
+
+export function syncDynamicAccentToggle() {
+  const row = document.querySelector('label[for="input-dynamic-accent"]');
+  const cb = document.getElementById('input-dynamic-accent');
+  if (cb) cb.checked = dynamicAccent;
+  row?.querySelector('.toggle-track')?.classList.toggle('on', dynamicAccent);
+}
+
 let accentApplyTimer = 0;
 let accentLastKey = null;
+
+const ACCENT_FALLBACK = { r: 232, g: 232, b: 238 };   // #e8e8ee neutral
 
 /* WCAG relative luminance (sRGB). */
 function relLuminance(r, g, b) {
@@ -1065,12 +1131,49 @@ function inkForAccent(r, g, b) {
   return onBlack >= onWhite ? '#000000' : '#ffffff';
 }
 
+function hslToRgb(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const seg = Math.floor(h / 60) % 6;
+  const table = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]];
+  const [rr, gg, bb] = table[seg];
+  return [Math.round((rr + m) * 255), Math.round((gg + m) * 255), Math.round((bb + m) * 255)];
+}
+
+/* --accent-deep: the accent darkened in-place (hue and chroma untouched) until
+   it clears 3:1 against the ivory hover surface (#EDEDED, relative luminance
+   ≈ 0.847). Delete's triangle arrowheads fill with it on hover, so they stay
+   legible on the ivory flip without hardcoding any color. Same-shape HSL
+   lightness step-down used by normalizeAccent below. */
+function accentDeepFor(r, g, b) {
+  const [h, s, l] = rgbToHsl(r, g, b);
+  let deep = [r, g, b];
+  for (let v = Math.max(0.04, l - 0.05); v >= 0.04; v -= 0.05) {
+    deep = hslToRgb(h, s, v);
+    if (relLuminance(deep[0], deep[1], deep[2]) <= 0.30) break;   // 1.05/(0.30+0.05) = 3.0
+  }
+  return deep;
+}
+
+function surfaceTintFor(r, g, b) {
+  /* --surface-tint: the accent's hue washed down to a whisper. The color is
+     mixed ⅓ accent into its own luminance gray (strong desaturation) and laid
+     as a 4% layer, so large surfaces take on a breath of the theme while the
+     UI as a whole stays neutral-dark. */
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const mix = (c) => Math.round(lum + (c - lum) * 0.35);
+  return `rgba(${mix(r)}, ${mix(g)}, ${mix(b)}, 0.04)`;
+}
+
 function applyAccentColor(r, g, b) {
   const root = document.documentElement.style;
   root.setProperty('--accent', `rgb(${r}, ${g}, ${b})`);
   root.setProperty('--accent-strong', `rgb(${Math.round(r * 0.78)}, ${Math.round(g * 0.78)}, ${Math.round(b * 0.78)})`);
   root.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
   root.setProperty('--accent-ink', inkForAccent(r, g, b));
+  root.setProperty('--accent-deep', `rgb(${accentDeepFor(r, g, b).join(', ')})`);
+  root.setProperty('--surface-tint', surfaceTintFor(r, g, b));
 }
 
 function resetAccentColor() {
@@ -1141,7 +1244,10 @@ function extractDominantColor(img) {
     }
     if (!best) return null;
     const [h, s] = rgbToHsl(best.r, best.g, best.b);
-    if (s < 0.18) return null;                 // effectively grayscale art
+    if (s < 0.10) return null;                 // effectively grayscale art
+    /* Live measurements: SGDB hero art sits at s ≈ 0.10–0.14 (Cyberpunk hero s=0.122,
+       Sovereign Tower s=0.13) vs true monochrome below 0.08 — 0.18 rejected real art.
+       normalizeAccent lifts any passing color to lightness 0.6–0.78 / sat ≥ 0.35. */
     return [best.r, best.g, best.b];
   } catch { return null; }                     // tainted canvas, OOM, anything
 }
@@ -1180,23 +1286,229 @@ async function loadImageViaFetch(url) {
 const accentCache = new Map();   // wallpaper key -> [r,g,b] | null
 
 async function accentForWallpaper(url) {
-  if (accentCache.has(url)) return accentCache.get(url);
+  if (!url) return null;
+  /* Classify on the RAW input: `http://asset.localhost/…` is a *converted
+     local path* (the asset protocol), not remote art — routing it through
+     fetch_wallpaper_bytes would fail the host allowlist and sink the accent
+     to neutral forever. */
+  const isRemote = /^https?:\/\//.test(url) && !url.includes('asset.localhost');
+  const src = isRemote ? url : window.__TAURI__.core.convertFileSrc(url);
+  if (accentCache.has(src)) return accentCache.get(src);
+  /* Remote art: the webview CSP lets these URLs render but blocks every
+     in-page fetch(), so the bytes only reach us through the Rust command
+     fetch_wallpaper_bytes. Re-wrapped as a blob: URL — same-origin, so
+     loadImageCors loads untainted. */
+  if (isRemote) {
+    try {
+      const bytes = await window.__TAURI__.core.invoke('fetch_wallpaper_bytes', { url: src });
+      const mime = /\.jpe?g$/i.test(src) ? 'image/jpeg' : /\.webp$/i.test(src) ? 'image/webp' : 'image/png';
+      const blobUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mime }));
+      try {
+        const img = await loadImageCors(blobUrl);
+        const result = extractDominantColor(img);
+        accentCache.set(src, result);   // decode succeeded: definitive — cache even a null (grayscale art)
+        return result;
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    } catch { return null; }            // invoke/load failure: not cached — may be transient
+  }
   let result = null;
   try {
     let img;
-    try { img = await loadImageCors(url); }
-    catch { img = await loadImageViaFetch(url); }
+    let viaCors = true;
+    try { img = await loadImageCors(src); }
+    catch { img = await loadImageViaFetch(src); viaCors = false; }
     result = extractDominantColor(img);
+    /* CORS images can resolve tainted (the taint only surfaces at
+       getImageData), so a null result after a CORS load means the bytes were
+       unreachable — retry once via fetch, which yields an untainted blob URL. */
+    if (result === null && viaCors) {
+      img = await loadImageViaFetch(src);
+      result = extractDominantColor(img);
+    }
   } catch { result = null; }
   if (accentCache.size > 24) accentCache.clear();
-  accentCache.set(url, result);
+  accentCache.set(src, result);
   return result;
 }
 
 /* Debounced: fires on every rail scroll, but only the focused game's wallpaper
    matters and loads race through wallpaperGeneration, so cheap re-entries just
    reschedule. */
+/* ── Animated logo freeze — GIFs only play on hover / focus ────────────────
+   Rail logos come from getFileSrc (asset-protocol URLs). For .gif logos the
+   first frame is captured once onto a canvas and stored as a PNG data URL;
+   every other logo then sits on that still frame. The live gif is swapped
+   back in only while the item is hovered or focused, and swapped out again
+   on mouseleave / de-focus. Same <img>, src swap only — no layout shift,
+   no per-frame JS, no timers. Results are memoized per logo path, and the
+   gif is preload-warmed once so swaps don't flicker. */
+function gifPolicy(gameId, path) {
+  try { return JSON.parse(localStorage.getItem('silo.gifPolicies') || '{}')[`${gameId}:${path}`] || null; } catch { return null; }
+}
+let gifWindowFocused = document.hasFocus();
+let activeGifItem = null;
+let gifEligibilityObserver = null;
+let gifOnceTimer = 0;
+let gifOnceDeadline = 0;
+let gifOnceRemaining = 0;
+let gifGeneration = 0;
+const parkedOncePaths = new Set();
+const PARKED_ONCE_LIMIT = 256;
+const gifDurationCache = new Map();
+async function gifCycleDuration(path) {
+  if (gifDurationCache.has(path)) return gifDurationCache.get(path);
+  try {
+    const response = await fetch(getSrcUrl(path));
+    if (!response.ok) throw new Error('GIF unavailable');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let offset = 13;
+    if (bytes.length < offset || String.fromCharCode(...bytes.subarray(0, 3)) !== 'GIF') return null;
+    const packed = bytes[10];
+    if (packed & 0x80) offset += 3 * (1 << ((packed & 7) + 1));
+    let total = 0;
+    while (offset < bytes.length) {
+      const marker = bytes[offset++];
+      if (marker === 0x3b) break;
+      if (marker === 0x21) {
+        if (offset >= bytes.length) break;
+        const label = bytes[offset++];
+        if (label === 0xf9) {
+          const size = bytes[offset++];
+          if (size !== 4 || offset + size >= bytes.length) return null;
+          const delay = bytes[offset + 1] | (bytes[offset + 2] << 8);
+          total += delay * 10;
+          offset += size;
+          if (bytes[offset++] !== 0) return null;
+        } else {
+          while (offset < bytes.length) {
+            const size = bytes[offset++];
+            if (!size) break;
+            offset += size;
+          }
+        }
+        continue;
+      }
+      if (marker !== 0x2c || offset + 9 > bytes.length) return null;
+      const imagePacked = bytes[offset + 8];
+      offset += 9;
+      if (imagePacked & 0x80) offset += 3 * (1 << ((imagePacked & 7) + 1));
+      if (offset >= bytes.length) return null;
+      offset += 1;
+      while (offset < bytes.length) {
+        const size = bytes[offset++];
+        if (!size) break;
+        offset += size;
+      }
+    }
+    if (!Number.isFinite(total) || total <= 0) return null;
+    if (gifDurationCache.size >= 16) gifDurationCache.delete(gifDurationCache.keys().next().value);
+    gifDurationCache.set(path, total);
+    return total;
+  } catch { return null; }
+}
+function pruneParkedOncePaths() {
+  const validKeys = new Set(allGames.filter(game => game.logoPath)
+    .map(game => `${game.id}:${game.logoPath}`));
+  for (const key of parkedOncePaths) {
+    if (!validKeys.has(key)) parkedOncePaths.delete(key);
+  }
+  while (parkedOncePaths.size > PARKED_ONCE_LIMIT) {
+    parkedOncePaths.delete(parkedOncePaths.values().next().value);
+  }
+}
+function gifPlaybackEligible(item) {
+  return !!item && gifWindowFocused && !document.hidden
+    && Number(item.dataset.index) === selectedIndex
+    && item.classList.contains('active') && item.isConnected
+    && !!document.getElementById('page-home')?.getClientRects().length
+    && !!item.getClientRects().length;
+}
+function parkGif(item) {
+  if (!item) return;
+  gifGeneration += 1;
+  const image = item.querySelector('img[data-logo-path]');
+  const path = image?.dataset.logoPath || '';
+  if (image) {
+    image.onload = null;
+    // This path is also called for ordinary selection changes. Only park an
+    // animated asset; removing static logo sources left the rail's images blank
+    // because they are not otherwise reloaded until the list is rebuilt.
+    if (/\.gif(?:$|[?#])/i.test(path)) image.removeAttribute('src');
+  }
+  if (activeGifItem === item) activeGifItem = null;
+  clearTimeout(gifOnceTimer); gifOnceTimer = 0;
+  // Native img restarts at frame 1 when src is reattached. Discard elapsed time;
+  // each eligible activation gets one full estimated cycle, never a partial timer.
+  gifOnceRemaining = 0;
+}
+function playLogoGif(item) {
+  const image = item.querySelector('img[data-logo-path]');
+  const path = image?.dataset.logoPath;
+  const game = games[Number(item.dataset.index)];
+  if (!image || !path || !game || !gifPlaybackEligible(item) || games[Number(item.dataset.index)]?.id !== game.id || parkedOncePaths.has(`${game.id}:${path}`)) return;
+  const policy = gifPolicy(game.id, path);
+  if (!policy || activeGifItem === item) return;
+  if (activeGifItem) parkGif(activeGifItem);
+  const generation = ++gifGeneration;
+  activeGifItem = item;
+  const stillEligible = () => generation === gifGeneration && activeGifItem === item
+    && Number(item.dataset.index) === selectedIndex
+    && games[Number(item.dataset.index)]?.id === game.id && item.isConnected
+    && gifPlaybackEligible(item)
+    && !!document.getElementById('page-home')?.getClientRects().length
+    && !!item.getClientRects().length;
+  const attach = (duration) => {
+    if (!stillEligible()) return;
+    if (policy === 'once' && duration == null) { parkGif(item); return; }
+    const onLoad = () => {
+      image.onload = null;
+      if (!stillEligible() || policy !== 'once') return;
+      gifOnceTimer = setTimeout(() => {
+        if (!stillEligible()) return;
+        parkedOncePaths.delete(`${game.id}:${path}`);
+        parkedOncePaths.add(`${game.id}:${path}`);
+        pruneParkedOncePaths();
+        gifOnceTimer = 0;
+        parkGif(item);
+      }, duration);
+    };
+    image.onload = onLoad;
+    getFileSrc(path, image);
+    if (!stillEligible() && image.onload === onLoad) { image.onload = null; image.removeAttribute('src'); }
+  };
+  if (policy === 'once') {
+    void gifCycleDuration(path).then(duration => {
+      if (stillEligible()) attach(duration);
+    });
+  } else {
+    attach(null);
+  }
+}
+function stillLogoGif(item) { parkGif(item); }
+gifEligibilityObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (!entry.target.isConnected) continue;
+    if (!entry.isIntersecting && entry.target === activeGifItem) parkGif(entry.target);
+    else if (entry.isIntersecting && entry.target.classList.contains('active')) playLogoGif(entry.target);
+  }
+});
+function resumeEligibleGif() {
+  if (!gifWindowFocused || document.hidden) return;
+  const item = document.querySelector('#game-list .game-item.active');
+  if (item) playLogoGif(item);
+}
+window.addEventListener('blur', () => { gifWindowFocused = false; parkGif(activeGifItem); });
+window.addEventListener('focus', () => { gifWindowFocused = true; resumeEligibleGif(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) parkGif(activeGifItem);
+  else resumeEligibleGif();
+});
+
 function updateAccentFromGame() {
+  /* The accent setting is off: hold the neutral fallback, never sample. */
+  if (!dynamicAccent) return;
   const g = games[selectedIndex];
   const key = g?.wallpaper || '';
   if (key === accentLastKey) return;
@@ -1279,12 +1591,97 @@ export function openDetails() {
   details.classList.remove('is-preview');
   sidebar.classList.add('focused');
   sidebar.classList.remove('logos-mode');
+
+  // The panel is now visible: measure how far the launch arrow can travel.
+  measureLaunchArrowTravel();
+}
+
+/* Launch travel depends on live geometry. The label is hidden only while the
+   tile and label cross, then both settle visible at opposite ends. */
+function measureLaunchArrowTravel() {
+  const btn = document.getElementById('btn-launch');
+  const arrow = btn ? btn.querySelector('.dock-launch-arrow') : null;
+  const arrowIcon = btn ? btn.querySelector('.dock-launch-arrow-icon') : null;
+  const label = btn ? btn.querySelector('.action-label') : null;
+  if (!btn || !arrow || !arrowIcon || !label) return;
+  if (btn._launchMotionBound) return btn._launchEndpoints || null;
+  const abr = arrow.getBoundingClientRect();
+  const aibr = arrowIcon.getBoundingClientRect();
+  const lbr = label.getBoundingClientRect();
+  const bbr = btn.getBoundingClientRect();
+  const styles = getComputedStyle(btn);
+  const paddingLeft = parseFloat(styles.paddingLeft) || 0;
+  const paddingRight = parseFloat(styles.paddingRight) || 0;
+  const borderLeft = parseFloat(styles.borderLeftWidth) || 0;
+  const borderRight = parseFloat(styles.borderRightWidth) || 0;
+  const leftInset = bbr.left + borderLeft + paddingLeft;
+  const rightInset = bbr.right - borderRight - paddingRight;
+  const gap = 10;
+  const labelWidth = lbr.width;
+  const tileWidth = abr.width;
+  const restTileLeft = abr.left - bbr.left;
+  const restLabelLeft = lbr.left - bbr.left;
+  const innerLeft = leftInset - bbr.left;
+  const innerRight = rightInset - bbr.left;
+  const labelLeft = Math.max(innerLeft, Math.min(restTileLeft - labelWidth - gap, innerRight - labelWidth));
+  const tileLeft = Math.min(innerRight - tileWidth, Math.max(labelLeft + labelWidth + gap, innerLeft));
+  const endpoints = { tileTravel: Math.floor(tileLeft - restTileLeft), labelTravel: Math.floor(labelLeft - restLabelLeft), rotation: 45 };
+  btn._launchEndpoints = endpoints;
+
+  // One WAAPI controller owns each transform; cancelling samples the rendered
+  // transform, so rapid reversals continue from the current frame.
+  if (!btn._launchMotionBound) {
+    btn._launchMotionBound = true;
+    let animations = [];
+    let active = null;
+    const readTransform = (el) => getComputedStyle(el).transform;
+    const run = (next) => {
+      if (active === next) return;
+      active = next;
+      const tileTransform = readTransform(arrow);
+      const iconTransform = readTransform(arrowIcon);
+      animations.forEach((animation) => animation.cancel());
+      animations = [];
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches && !document.body.classList.contains('force-motion');
+      const duration = reduced ? 1 : 460;
+      const ease = 'cubic-bezier(0.22, 1, 0.36, 1)';
+      const tileFrom = tileTransform === 'none' ? 'translateX(0px)' : tileTransform;
+      const iconFrom = iconTransform === 'none' ? 'rotate(0deg)' : iconTransform;
+      const labelTransform = readTransform(label);
+      const labelFrom = labelTransform === 'none' ? 'translateX(0px)' : labelTransform;
+      const tileTo = `translateX(${next ? endpoints.tileTravel : 0}px)`;
+      const labelTo = `translateX(${next ? endpoints.labelTravel : 0}px)`;
+      const iconTo = `rotate(${next ? endpoints.rotation : 0}deg)`;
+      const labelOpacity = getComputedStyle(label).opacity;
+      animations = [
+        arrow.animate([{ transform: tileFrom, offset: 0 }, { transform: tileFrom, offset: 0.18 }, { transform: tileTo, offset: 0.82 }, { transform: tileTo, offset: 1 }], { duration, easing: ease, fill: 'forwards' }),
+        arrowIcon.animate([{ transform: iconFrom, offset: 0 }, { transform: iconFrom, offset: 0.18 }, { transform: iconTo, offset: 0.82 }, { transform: iconTo, offset: 1 }], { duration, easing: ease, fill: 'forwards' }),
+        label.animate([
+          { transform: labelFrom, opacity: labelOpacity, offset: 0 },
+          { transform: labelFrom, opacity: 0, offset: 0.18 },
+          { transform: labelTo, opacity: 0, offset: 0.82 },
+          { transform: labelTo, opacity: 1, offset: 1 }
+        ], { duration, easing: ease, fill: 'forwards' })
+      ];
+    };
+    btn.addEventListener('pointerenter', () => run(true));
+    btn.addEventListener('pointerleave', () => { if (!btn.matches(':focus-visible') && !btn.classList.contains('hold-midpoint')) run(false); });
+    btn.addEventListener('focusin', () => run(true));
+    btn.addEventListener('focusout', () => { if (!btn.matches(':hover') && !btn.classList.contains('hold-midpoint')) run(false); });
+    const motionObserver = new MutationObserver(() => {
+      const engaged = btn.matches(':hover, :focus-visible') || btn.classList.contains('hold-midpoint') || btn.classList.contains('dock-focus');
+      run(engaged);
+    });
+    motionObserver.observe(btn, { attributes: true, attributeFilter: ['class'] });
+  }
+  return endpoints;
 }
 
 export function closeDetails() {
   if (!detailsOpen) return;
   vibrate(true);
   detailsOpen = false;
+  clearDockFocus();
   // The statistics preview belongs to the details, so it goes with them.
   hideStatPopoverNow();
   const sidebar = document.getElementById('game-list-panel');
@@ -1302,20 +1699,127 @@ export function closeDetails() {
   syncRailInstant();
 }
 
+/* ── Action dock focus (controller / keyboard) ─────────────────────────────
+   The dock is the second level of the details view: Launch stays first in its
+   own block, and Edit / Restore / Backup / Favorite / Delete form the
+   row the d-pad walks along.
+
+   `.dock-focus` is deliberately NOT DOM focus. Moving real focus would keep the
+   top bar on screen for ever (a focused control counts as "in use") and would
+   steal the arrow keys from the library, so the indicator is a class on the
+   button while the DOM focus stays wherever the user left it. */
+
+/* Visible dock buttons in DOM order: the action pills, then Delete. */
+function dockButtons() {
+  const actions = document.getElementById('details-actions');
+  if (!actions) return [];
+  const list = [...actions.querySelectorAll('.action-dock-btn:not(#btn-delete-game)')]
+    .filter((el) => el.offsetParent !== null);
+  const del = document.getElementById('btn-delete-game');
+  if (del && del.offsetParent !== null) list.push(del);
+  return list;
+}
+
+/** The dock buttons the controller can currently reach, in DOM order. */
+export function dockActions() {
+  return dockButtons();
+}
+
+let dockFocusEl = null;
+
+function setDockFocus(el) {
+  if (dockFocusEl && dockFocusEl !== el) dockFocusEl.classList.remove('dock-focus');
+  dockFocusEl = el;
+  if (!el) return;
+  el.classList.add('dock-focus');
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+/** Moves the dock indicator by `delta`, wrapping. From nothing focused, +1
+ *  lands on the first action rather than the second. */
+export function focusDock(delta) {
+  const list = dockButtons();
+  if (!list.length) return;
+  const current = dockFocusEl ? list.indexOf(dockFocusEl) : -1;
+  const next = current < 0
+    ? (delta < 0 ? list.length - 1 : 0)
+    : (current + delta + list.length) % list.length;
+  setDockFocus(list[next]);
+}
+
+/** Drops the indicator (render, close, or a target that just disappeared). */
+export function clearDockFocus() {
+  if (dockFocusEl) dockFocusEl.classList.remove('dock-focus');
+  dockFocusEl = null;
+}
+
+/** Whether the dock currently shows its indicator. */
+export function hasDockFocus() {
+  if (!dockFocusEl) return false;
+  // The target may have been hidden (a pill the last render removed): drop the
+  // indicator instead of clicking a ghost.
+  if (!dockButtons().includes(dockFocusEl)) {
+    clearDockFocus();
+    return false;
+  }
+  return true;
+}
+
+/** Clicks the focused action; with nothing focused it only reveals the first. */
+export function activateDockFocus() {
+  const list = dockButtons();
+  if (!list.length) return;
+  if (!hasDockFocus()) {
+    setDockFocus(list[0]);
+    return;
+  }
+  dockFocusEl.click();
+}
+
+
+
 export function renderDetails(g) {
   const img = document.getElementById('details-logo-img');
   const fallback = document.getElementById('details-game-name-fallback');
-  if (g.logoPath) {
-    getFileSrc(g.logoPath, img);
-    img.classList.add('visible');
-    document.getElementById('details-panel').classList.add('has-logo');
-    img.onerror = () => {
-      img.classList.remove('visible');
-      document.getElementById('details-panel').classList.remove('has-logo');
+  const panel = document.getElementById('details-panel');
+  const generation = ++detailsLogoGeneration;
+  const logoPath = g.logoPath || '';
+  lastHeroRenderedId = g.id;
+  const isCurrentLogo = () => generation === detailsLogoGeneration
+    && lastHeroRenderedId === g.id
+    && img.dataset.logoGameId === String(g.id)
+    && img.dataset.logoPath === logoPath;
+
+  img.onload = null;
+  img.onerror = null;
+  img.dataset.logoGameId = String(g.id);
+  img.dataset.logoPath = logoPath;
+  img.removeAttribute('src');
+  img.classList.remove('visible');
+
+  // Only drop has-logo when the new game has no logo at all. Removing it
+  // while a new logo is loading briefly reveals the fallback title (a flicker
+  // on UP/DOWN navigation) because the fallback's display:none rule depends
+  // on has-logo being present.
+  if (!logoPath) {
+    panel.classList.remove('has-logo');
+  }
+
+  if (logoPath) {
+    img.onload = () => {
+      if (!isCurrentLogo()) return;
+      img.classList.add('visible');
+      panel.classList.add('has-logo');
     };
-  } else {
-    img.classList.remove('visible');
-    document.getElementById('details-panel').classList.remove('has-logo');
+    img.onerror = () => {
+      if (!isCurrentLogo()) return;
+      img.classList.remove('visible');
+      panel.classList.remove('has-logo');
+      console.warn(`[logo] Failed to load game logo for ${g.id}: ${logoPath}`);
+    };
+    // The hero must display the actual GIF/WebP asset too; only sidebar GIFs
+    // are parked while ineligible to save animation work.
+    getFileSrc(logoPath, img);
   }
 
   fallback.textContent = g.name;
@@ -1331,9 +1835,9 @@ export function renderDetails(g) {
     caption.style.fontFamily = g.fontFamily ? `'${g.fontFamily}', 'Inter', sans-serif` : 'inherit';
     caption.style.color = g.fontColor || '#fff';
   }
-  lastHeroRenderedId = g.id;
-
-  document.getElementById('stat-playtime').textContent = fmtTime(g.playtimeMinutes);
+  const playtimeStat = document.getElementById('stat-playtime');
+  playtimeStat.textContent = fmtTrackedTime(g.playtimeMinutes, g.uncertainPlaytimeMinutes);
+  playtimeStat.title = trackedTimeTitle(g.uncertainPlaytimeMinutes);
   document.getElementById('stat-sessions').textContent = g.sessionCount || 0;
   document.getElementById('stat-last-played').textContent = fmtDate(g.lastPlayed);
   renderSavePathStatus(g);
@@ -1355,21 +1859,37 @@ export function renderDetails(g) {
   const favBtn = document.getElementById('btn-toggle-favorite');
   if (favBtn) {
     const cur = allGames.find(x => x.id === g.id) || g;
-    favBtn.classList.toggle('fav-active', !!cur.favorite);
-    favBtn.title = cur.favorite ? 'Remove from Favorites' : 'Add to Favorites';
+    /* One source of truth for the visual state: class, aria-pressed and the
+       tooltip are all kept in sync here. Called once at render and again on
+       every toggle (optimistically, then reconciled on failure). */
+    const syncFav = (on, animate) => {
+      favBtn.classList.toggle('fav-active', !!on);
+      favBtn.setAttribute('aria-pressed', String(!!on));
+      const tip = on ? 'Remove from favorites' : 'Add to favorites';
+      favBtn.title = tip;
+      favBtn.setAttribute('aria-label', tip);
+      if (animate) {
+        favBtn.classList.remove('fav-anim');
+        void favBtn.offsetWidth;
+        favBtn.classList.add('fav-anim');
+      }
+    };
+    syncFav(!!cur.favorite, false);
+    favBtn.onanimationend = () => favBtn.classList.remove('fav-anim');
     favBtn.onclick = async () => {
       const current = allGames.find(x => x.id === g.id) || g;
       const next = !current.favorite;
+      syncFav(next, true);                  // optimistic: the star answers at once
       try {
         const updated = await window.vault.updateGame(g.id, { favorite: next });
-        if (updated) {
-          const idx = allGames.findIndex(x => x.id === g.id);
-          if (idx !== -1) allGames[idx] = updated;
-          applyCategoryFilter(false);
-          const sel = games.find(x => x.id === g.id) || games[selectedIndex];
-          if (detailsOpen && sel) renderDetails(sel);
-        }
+        if (!updated) throw new Error('The game record did not come back from the store.');
+        const idx = allGames.findIndex(x => x.id === g.id);
+        if (idx !== -1) allGames[idx] = updated;
+        applyCategoryFilter(false);
+        const sel = games.find(x => x.id === g.id) || games[selectedIndex];
+        if (detailsOpen && sel) renderDetails(sel);
       } catch (err) {
+        syncFav(!next, true);               // reconcile: roll the star back
         showToast('error', 'Update Failed', err);
       }
     };
@@ -1400,29 +1920,30 @@ export function renderDetails(g) {
         const isAuto = b.isAuto !== undefined ? b.isAuto : b.is_auto;
         const customName = b.customName !== undefined ? b.customName : b.custom_name;
         const sizeBytes = b.sizeBytes !== undefined ? b.sizeBytes : b.size_bytes;
-        const typeTag = isAuto ? '<span style="color: #a0a0a0; font-size: 10px; border: 1px solid #555; padding: 2px 4px; border-radius: 4px; margin-right: 6px;">AUTO</span>'
-                               : '<span style="color: #66ccff; font-size: 10px; border: 1px solid #3388aa; padding: 2px 4px; border-radius: 4px; margin-right: 6px;">MANUAL</span>';
-        const displayName = customName ? `<div style="font-size: 14px; font-weight: bold; color: #fff;">${esc(customName)}</div>` : '';
+        const head = customName ? customName : fmtBackupTime(b.timestamp);
+        const bytes = Number(sizeBytes || 0);
+        const size = bytes >= 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
 
         return `
-        <div class="restore-item" style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px;">
-          <div style="display: flex; flex-direction: column; gap: 4px;">
-            ${displayName}
-            <div style="display: flex; align-items: center;">
-              ${typeTag}
-              <span style="font-weight: bold; font-size: 12px;">${esc(b.timestamp)}</span>
+        <div class="restore-row" data-backup="${escJs(b.name)}">
+          <div class="restore-row-head" title="${esc(b.timestamp)}">${esc(head)}</div>
+            <div class="restore-row-meta">
+              <span class="restore-tag ${isAuto ? 'auto' : 'manual'}">${isAuto ? 'Auto' : 'Manual'}</span>
+              <span class="restore-size">${esc(size)}</span>
             </div>
-            <div style="font-size: 11px; color: rgba(255,255,255,0.5);">${((sizeBytes || 0) / 1024).toFixed(1)} KB</div>
-          </div>
-          <div style="display: flex; gap: 6px; align-items: center;">
-            <button class="glass-btn small" onclick="doRestore('${g.id}', '${escJs(b.name)}')">Restore</button>
-            <button class="glass-btn small" style="border-color: #ff4444; color: #ff4444; padding: 4px 8px;" onclick="doDeleteBackup('${g.id}', '${escJs(b.name)}')">🗑</button>
+          <div class="restore-row-actions">
+            <button class="glass-btn small restore-btn" onclick="doRestore('${g.id}', '${escJs(b.name)}')">Restore</button>
+            <button class="glass-btn small restore-del" aria-label="Delete backup" title="Delete backup" onclick="doDeleteBackup('${g.id}', '${escJs(b.name)}')">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
           </div>
         </div>
         `;
       }).join('');
       
       document.getElementById('restore-overlay').classList.remove('hidden');
+      const firstCtl = listEl.querySelector('button') || document.getElementById('btn-restore-cancel');
+      firstCtl?.focus();
     };
 
     backupBtn.onclick = async () => {
@@ -1464,30 +1985,20 @@ export function renderDetails(g) {
     };
   }
 
-  setupHoldButton('btn-launch', 5000, () => doLaunch(g.id));
-  setupHoldButton('btn-edit-game', 5000, () => openEditModal(g));
-  
+  setupHoldButton('btn-launch', 3000, () => doLaunch(g.id));
+  setupHoldButton('btn-edit-game', 3000, () => openEditModal(g));
 
-  
+  clearDockFocus();
+
   const deleteBtn = document.getElementById('btn-delete-game');
-  deleteBtn.onmousedown = null; deleteBtn.onmouseup = null; deleteBtn.onmouseleave = null;
-  deleteBtn._startGamepadHold = null; deleteBtn._resetGamepadHold = null;
-  deleteBtn.classList.remove('holding');
-  
   deleteBtn.onclick = async () => {
     // Check if uninstaller exists
-    const uninstaller = await window.__TAURI__.core.invoke('check_uninstaller', { gameId: g.id }).catch(() => null);
-    
     const uninstallOverlay = document.getElementById('uninstall-overlay');
-    const runBtn = document.getElementById('btn-uninstall-run');
     
-    if (uninstaller) {
-      runBtn.style.display = 'block';
-    } else {
-      runBtn.style.display = 'none';
-    }
+    const runRow = document.getElementById('uninstall-action-row-run');
+    if (runRow) runRow.hidden = false;
 
-    document.getElementById('btn-uninstall-delete').onclick = async () => {
+    document.getElementById('uninstall-action-row-delete').onclick = async () => {
       uninstallOverlay.classList.add('hidden');
       const { ask } = window.__TAURI__.dialog;
       const yes = await ask(`WARNING: This will permanently delete the entire game folder from your drive.\n\nAre you absolutely sure?`, { title: 'Delete Game Data', kind: 'warning' });
@@ -1510,46 +2021,147 @@ export function renderDetails(g) {
       }
     };
 
-    document.getElementById('btn-uninstall-remove').onclick = async () => {
+    document.getElementById('uninstall-action-row-remove').onclick = async () => {
       uninstallOverlay.classList.add('hidden');
-      await finishRemoval(g);
-      showToast('success', 'Removed', `${g.name} has been removed from Launcher.`);
+      if (await finishRemoval(g)) {
+        showToast('success', 'Removed', `${g.name} has been removed from Launcher.`);
+      }
     };
+
+    runRow.onclick = async () => {
+      const scanGeneration = (Number(uninstallOverlay.dataset.scanGeneration) || 0) + 1;
+      uninstallOverlay.dataset.scanGeneration = String(scanGeneration);
+      const cancelStage = () => {
+        uninstallOverlay.dataset.scanGeneration = String(scanGeneration + 1);
+        const stage = document.getElementById('uninstaller-stage');
+        stage?.replaceChildren();
+        runRow.focus();
+      };
+      let stage = document.getElementById('uninstaller-stage');
+      if (!stage) {
+        stage = document.createElement('section');
+        stage.id = 'uninstaller-stage';
+        stage.setAttribute('aria-live', 'polite');
+        document.querySelector('#uninstall-modal .uninstall-dialog-body').append(stage);
+      }
+      stage.replaceChildren();
+      const status = document.createElement('p');
+      status.tabIndex = -1;
+      status.textContent = 'Searching this game folder…';
+      stage.append(status);
+      const stageCancel = document.createElement('button');
+      stageCancel.type = 'button'; stageCancel.textContent = 'Cancel';
+      stageCancel.onclick = cancelStage;
+      stage.onkeydown = (event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancelStage();
+      };
+      stage.append(stageCancel);
+      status.focus();
+      try {
+        const candidates = await window.vault.discoverUninstallers(g.id);
+        if (Number(uninstallOverlay.dataset.scanGeneration) !== scanGeneration) return;
+        stage.replaceChildren();
+        if (!Array.isArray(candidates) || candidates.length === 0) {
+          status.textContent = 'No likely uninstallers were found in this game folder. You can still delete the folder or remove only the SILO entry.';
+          stage.append(status, stageCancel);
+          status.focus();
+          return;
+        }
+        const heading = document.createElement('h3');
+        heading.textContent = `Choose an uninstaller (${candidates.length} found)`;
+        stage.append(heading);
+        const list = document.createElement('div');
+        list.setAttribute('role', 'radiogroup');
+        list.setAttribute('aria-label', 'Discovered uninstallers');
+        candidates.forEach(candidate => {
+          const label = document.createElement('label');
+          const radio = document.createElement('input');
+          radio.type = 'radio'; radio.name = 'uninstaller-candidate';
+          const copy = document.createElement('span');
+          copy.textContent = `${candidate.fileName} — ${candidate.relativePath}`;
+          label.append(radio, copy);
+          list.append(label);
+          radio.addEventListener('change', () => { stage.dataset.candidate = candidate.candidateId; });
+        });
+        const confirm = document.createElement('button');
+        confirm.type = 'button'; confirm.textContent = 'Review selected uninstaller'; confirm.disabled = true;
+        list.addEventListener('change', () => { confirm.disabled = !stage.dataset.candidate; });
+        const cancel = document.createElement('button');
+        cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.onclick = cancelStage;
+        const review = document.createElement('button');
+        review.type = 'button'; review.textContent = 'Run selected uninstaller'; review.hidden = true;
+        confirm.onclick = () => {
+          const chosen = candidates.find(item => item.candidateId === stage.dataset.candidate);
+          if (!chosen) return;
+          const text = document.createElement('p');
+          text.textContent = `This launches ${chosen.fileName}, third-party software that may remove game files. SILO cannot guarantee what it changes.`;
+          stage.replaceChildren(text, review, cancel);
+          review.hidden = false;
+          review.onclick = async () => {
+            review.disabled = true;
+            try {
+              await window.vault.runUninstallerCandidate(g.id, chosen.candidateId);
+              stage.replaceChildren(); uninstallOverlay.classList.add('hidden');
+              showToast('success', 'Uninstaller opened', 'SILO has not deleted files or removed the library entry.');
+            } catch {
+              text.textContent = `Could not open ${chosen.fileName}. The game and its files were left unchanged.`;
+              stage.replaceChildren(text, review, cancel); review.disabled = false;
+            }
+          };
+        };
+        heading.tabIndex = -1;
+        stage.append(list, confirm, cancel);
+        heading.focus();
+      } catch {
+        if (Number(uninstallOverlay.dataset.scanGeneration) !== scanGeneration) return;
+        status.textContent = 'Could not search this game folder. Retry by choosing Run Uninstaller again, or Cancel.';
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.textContent = 'Retry'; retry.onclick = () => runRow.click();
+        status.tabIndex = -1;
+        stage.replaceChildren(status, retry, stageCancel);
+        status.focus();
+      }
+    };
+
+    [
+      document.getElementById('uninstall-action-row-run'),
+      document.getElementById('uninstall-action-row-delete'),
+      document.getElementById('uninstall-action-row-remove'),
+    ].forEach((row) => {
+      if (!row) return;
+      row.onkeydown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        row.click();
+      };
+    });
 
     document.getElementById('btn-uninstall-cancel').onclick = () => {
+      uninstallOverlay.dataset.scanGeneration = String((Number(uninstallOverlay.dataset.scanGeneration) || 0) + 1);
       uninstallOverlay.classList.add('hidden');
     };
-
-    if (uninstaller) {
-      runBtn.onclick = async () => {
-        uninstallOverlay.classList.add('hidden');
-        try {
-          await window.__TAURI__.core.invoke('run_uninstaller', { uninstallerPath: uninstaller });
-          const { ask } = window.__TAURI__.dialog;
-          const removeYes = await ask("The uninstaller has been launched. Do you also want to remove this game from your Silo library?", { title: 'Remove from Launcher?', kind: 'info' });
-          if (removeYes) {
-            await finishRemoval(g);
-          } else {
-            g.isInstalled = false;
-            renderGameList();
-            if (detailsOpen) renderDetails(g);
-          }
-        } catch (err) {
-          showToast('error', 'Uninstaller Failed', err);
-        }
-      };
-    }
 
     uninstallOverlay.classList.remove('hidden');
   };
 
   async function finishRemoval(game) {
     if (detailsOpen) closeDetails();
-    const removed = await window.vault.deleteGame(game.id);
-    if (removed) {
+    try {
+      const removed = await window.vault.deleteGame(game.id);
+      if (!removed) {
+        showToast('error', 'Removal Failed', `${game.name} could not be removed from Launcher.`);
+        return false;
+      }
       setGames(games.filter(x => x.id !== game.id));
       setAllGames(allGames.filter(x => x.id !== game.id));
       renderGameList();
+      return true;
+    } catch (err) {
+      showToast('error', 'Removal Failed', err || `${game.name} could not be removed from Launcher.`);
+      return false;
     }
   }
 }
@@ -1558,27 +2170,43 @@ let actionHoldStart = 0;
 export let actionHoldTarget = null;
 let actionHoldInterval = null;
 
+/* Backup timestamps arrive as ISO strings; the list shows a readable
+   "Nov 1, 3:40 AM" form here and keeps the exact ISO in the row tooltip. */
+function fmtBackupTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const h24 = d.getHours();
+  const ampm = h24 < 12 ? 'AM' : 'PM';
+  const h = h24 % 12 || 12;
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${months[d.getMonth()]} ${d.getDate()}, ${h}:${mm} ${ampm}`;
+}
+
 function setupHoldButton(id, duration, onComplete) {
   const btn = document.getElementById(id);
+  if (!btn) return;
   // Clear old listeners
   btn.onmousedown = null; btn.onmouseup = null; btn.onmouseleave = null; btn.onclick = null;
-  
-  const isDelete = id === 'btn-delete-game';
-  
-  if (!isDelete) {
-    btn.onclick = onComplete;
-  }
+
+  // The controller reads the real duration to tell a tap from a hold, so the
+  // two can never disagree about how long "hold" is.
+  btn._holdMs = duration;
+
+  btn.onclick = onComplete;
+  btn.classList.remove('hold-midpoint');
   
   const startHold = () => {
     if (actionHoldStart) return;
     actionHoldStart = Date.now();
     actionHoldTarget = id;
     btn.classList.add('holding');
-    if (isDelete) triggerDeletePrompt();
-    
+
     actionHoldInterval = setInterval(() => {
       const elapsed = Date.now() - actionHoldStart;
-      if (isDelete) updateDeleteProgress(elapsed);
+      if (id === 'btn-launch' && elapsed >= duration / 2) {
+        btn.classList.add('hold-midpoint');
+      }
       if (elapsed >= duration) {
         clearInterval(actionHoldInterval);
         resetHold();
@@ -1593,17 +2221,15 @@ function setupHoldButton(id, duration, onComplete) {
     actionHoldTarget = null;
     clearInterval(actionHoldInterval);
     btn.classList.remove('holding');
-    if (isDelete) resetDeleteButton();
+    if (id === 'btn-launch') btn.classList.remove('hold-midpoint');
   };
   
   btn._startGamepadHold = startHold;
   btn._resetGamepadHold = resetHold;
   
-  if (isDelete) {
-    btn.onmousedown = startHold;
-    btn.onmouseup = resetHold;
-    btn.onmouseleave = resetHold;
-  }
+  btn.onmousedown = startHold;
+  btn.onmouseup = resetHold;
+  btn.onmouseleave = resetHold;
 }
 
 /* ── Startup install check ────────────────────────────────────────────────
@@ -1622,6 +2248,15 @@ let lastInstallCheckAt = 0;
 
 function installStatus(gameId) {
   return installResults.get(gameId)?.status || 'unknown';
+}
+
+/* Only an explicit negative verdict dims a game or hides Launch. A game the
+   check has not reported on yet — one just added or edited — is unknown, not
+   missing; treating the two alike made every new game look broken until the
+   next focus-triggered rescan. */
+function installMissing(gameId) {
+  const status = installStatus(gameId);
+  return status === 'missing' || status === 'unavailable';
 }
 
 function installBadge(gameId, compact) {
@@ -1680,10 +2315,28 @@ function updateInstallIndicators() {
 }
 
 function focusFirstAffected() {
-  const g = games.find(x => installStatus(x.id) !== 'installed');
+  const g = games.find(x => installMissing(x.id));
   if (!g) return;
   selectGame(games.indexOf(g));
   openDetails();
+}
+
+/* Verify one game right after it is added or edited. The startup check only
+   runs at launch and on window focus, so a game added mid-session used to have
+   no entry at all until the user came back to the window. */
+export async function refreshInstallStatus(gameId) {
+  if (!gameId) return null;
+  try {
+    const result = await window.__TAURI__.core.invoke('verify_game_install', { gameId });
+    if (result && result.status) {
+      installResults.set(gameId, { status: result.status, checkedAt: Date.now() });
+      updateInstallIndicators();
+      return result.status;
+    }
+  } catch {
+    // A failed probe must never make a game look missing.
+  }
+  return null;
 }
 
 /* Before launching, re-verify just this game: a game can vanish between app
@@ -1727,12 +2380,12 @@ function applyLaunchAvailability(g) {
   const btn = document.getElementById('btn-launch');
   if (!btn) return;
   const status = installStatus(g.id);
-  const bad = status !== 'installed';
+  const bad = installMissing(g.id);
 
   // Hide launch entirely — never show a disabled button.
   btn.style.display = bad ? 'none' : '';
   btn.disabled = false;
-  btn.title = 'Launch';
+  btn.setAttribute('aria-label', 'Launch'); // no native `title` tooltip over the dock
   const label = btn.querySelector('.pill-label');
   if (label) label.textContent = 'LAUNCH';
 
@@ -1781,30 +2434,14 @@ export async function doLaunch(gameId) {
   showToast('info', 'Launching', `${g?.name || 'Game'}...`);
   try {
     await window.vault.launchGame(gameId);
-    showToast('success', 'Launched', `${g?.name || 'Game'} is running`);
+    // Do not show "Launched" here: launch_game returns Ok(()) as soon as the
+    // background monitor starts, before Windows confirms process creation.
+    // Success is confirmed through the gaming-session-launch-confirmed event.
   } catch (err) {
     showToast('error', 'Launch Failed', err);
   }
 }
 
-/* ── Delete ────────────────────────────────────────────────────────────────*/
-function triggerDeletePrompt() {
-  const btn = document.getElementById('btn-delete-game');
-  btn.innerHTML = `<span style="font-size:12px; font-weight:700; color:#fff;">HOLD 10s</span><div id="delete-progress"></div>`;
-}
-
-function updateDeleteProgress(ms) {
-  const prog = document.getElementById('delete-progress');
-  if (prog) {
-    const pct = Math.min(100, (ms / 10000) * 100);
-    prog.style.width = pct + '%';
-  }
-}
-
-function resetDeleteButton() {
-  const btn = document.getElementById('btn-delete-game');
-  btn.innerHTML = `<p>×</p><span></span><span></span><span></span><span></span>`;
-}
 
 document.getElementById('btn-close-details').addEventListener('click', closeDetails);
 

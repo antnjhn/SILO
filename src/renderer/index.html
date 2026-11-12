@@ -127,7 +127,7 @@
       <div id="details-panel" class="hidden">
         <div id="details-inner">
           <div id="details-logo-area">
-            <img id="details-logo-img" src="" alt="" />
+            <img id="details-logo-img" alt="" />
             <div id="details-logo-caption" aria-hidden="true"></div>
           </div>
           <div id="details-content">
@@ -171,80 +171,81 @@
             <div id="save-path-status"></div>
 
             <div id="details-actions">
-              <!-- Launch — the one filled accent pill -->
-              <button class="pill-btn launch-pill" id="btn-launch">
-                <div class="pill-inner">
-                  <div class="pill-spacer"></div>
-                  <div class="pill-circle">
-                    <div class="pill-circle-icon">
-                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 16 16">
-                        <path fill="currentColor" d="M12.175 9H0V7H12.175L6.575 1.4L8 0L16 8L8 16L6.575 14.6L12.175 9Z" />
-                      </svg>
-                    </div>
-                  </div>
-                </div>
-                <div class="pill-label">LAUNCH</div>
+              <!-- Launch — dark outer, wallpaper-accent tile, ink arrow -->
+              <button class="action-dock-btn dock-launch" id="btn-launch">
+                <span class="dock-launch-arrow action-icon-tile">
+                  <span class="dock-launch-arrow-icon">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="5" y1="12" x2="15" y2="12"></line>
+                    <polyline points="15 5 22 12 15 19"></polyline>
+                  </svg>
+                  </span>
+                </span>
+                <span class="action-label">Launch</span>
               </button>
 
-              <!-- Edit — match pill style -->
-              <button class="pill-btn edit-pill" id="btn-edit-game">
-                <div class="pill-inner">
-                  <div class="pill-spacer"></div>
-                  <div class="pill-circle">
-                    <div class="pill-circle-icon">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>
-                    </div>
-                  </div>
-                </div>
-                <div class="pill-label">EDIT</div>
+              <!-- Edit — dark button with pencil icon -->
+              <button class="action-dock-btn dock-edit" id="btn-edit-game">
+                <span class="action-icon-tile">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m14.5 5.5-9 9V19h4.5l9-9m-4.5-4.5 4.5 4.5M14.5 5.5l1.5-1.5a2.12 2.12 0 0 1 3 3l-1.5 1.5"/>
+                  </svg>
+                </span>
+                <span class="action-label">Edit</span>
               </button>
 
-              <!-- Restore Save — match pill style -->
-              <button class="pill-btn restore-pill" id="btn-restore-save" style="display:none;">
-                <div class="pill-inner">
-                  <div class="pill-spacer"></div>
-                  <div class="pill-circle">
-                    <div class="pill-circle-icon">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-                    </div>
-                  </div>
-                </div>
-                <div class="pill-label">RESTORE</div>
+              <!-- Restore — dark button with restore icon -->
+              <button class="action-dock-btn dock-restore" id="btn-restore-save" style="display:none;">
+                <span class="action-icon-tile">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                    <path d="M3 3v5h5"/>
+                  </svg>
+                </span>
+                <span class="action-label">Restore</span>
               </button>
 
-              <!-- Backup Save — match pill style -->
-              <button class="pill-btn backup-pill" id="btn-backup-save" style="display:none;">
-                <div class="pill-inner">
-                  <div class="pill-spacer"></div>
-                  <div class="pill-circle">
-                    <div class="pill-circle-icon">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>
-                    </div>
-                  </div>
-                </div>
-                <div class="pill-label">BACKUP</div>
+              <!-- Backup — dark button with backup icon -->
+              <button class="action-dock-btn dock-backup" id="btn-backup-save" style="display:none;">
+                <span class="action-icon-tile">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="20" height="5" x="2" y="3" rx="1"/>
+                    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/>
+                    <path d="M10 12h4"/>
+                  </svg>
+                </span>
+                <span class="action-label">Backup</span>
               </button>
 
-              <!-- Favorite toggle -->
-              <button class="pill-btn fav-pill" id="btn-toggle-favorite" title="Add to Favorites">
-                <div class="pill-inner">
-                  <div class="pill-spacer"></div>
-                  <div class="pill-circle">
-                    <div class="pill-circle-icon">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.013 18.582 6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.12 2.12 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.12 2.12 0 0 0 1.597-1.16l2.309-4.679a.53.53 0 0 1 .95 0l2.31 4.679a2.12 2.12 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904L20 11.5"/><path d="M15 18h6"/><path d="M18 15v6"/></svg>
-                    </div>
-                  </div>
-                </div>
-                <div class="pill-label">FAVORITE</div>
+              <!-- Favorite toggle — compact square button -->
+              <button class="action-dock-btn dock-fav" id="btn-toggle-favorite" type="button" aria-pressed="false" aria-label="Add to favorites" title="Add to Favorites">
+                <svg class="fav-star" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16l2.309-4.679a.53.53 0 0 1 .95 0l2.31 4.679a2.122 2.122 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904L20 11.5"/>
+                </svg>
               </button>
 
-              <!-- Custom Animated × remove button -->
-              <button class="new-remove-btn" id="btn-delete-game" title="Remove">
-                <p>×</p>
-                <span></span>
-                <span></span>
-                <span></span>
-                <span></span>
+              <!-- Delete — centered X with four inward-facing arrowheads -->
+              <button class="action-dock-btn dock-delete" id="btn-delete-game" title="Remove game" aria-label="Remove game">
+                <span class="dock-delete-symbol">
+                  <!-- Central X -->
+                  <svg class="delete-x" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="2" y1="2" x2="22" y2="22"></line>
+                    <line x1="22" y1="2" x2="2" y2="22"></line>
+                  </svg>
+                  <!-- Four independent, inward-facing triangular arrowheads -->
+                  <svg class="delete-arrow delete-arrow--top" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 10 3 2h18z" fill="var(--accent)"></path>
+                  </svg>
+                  <svg class="delete-arrow delete-arrow--bottom" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 14 3 22h18z" fill="var(--accent)"></path>
+                  </svg>
+                  <svg class="delete-arrow delete-arrow--left" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M10 12 2 3v18z" fill="var(--accent)"></path>
+                  </svg>
+                  <svg class="delete-arrow delete-arrow--right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 12 22 3v18z" fill="var(--accent)"></path>
+                  </svg>
+                </span>
               </button>
             </div>
           
@@ -424,6 +425,31 @@
           </div>
 
           <div class="settings-section">
+            <h3 class="settings-section-title">General</h3>
+            <div class="settings-card">
+              <label class="settings-field-label">When closing SILO</label>
+              <div class="close-behaviour-group">
+                <label class="settings-check close-behaviour-option">
+                  <input type="radio" name="closeBehaviour" id="close-behaviour-ask" value="askEveryTime" />
+                  <span>Ask every time</span>
+                  <span class="close-behaviour-desc">Show a confirmation dialog so you can choose to keep SILO running or exit each time you close the window.</span>
+                </label>
+                <label class="settings-check close-behaviour-option">
+                  <input type="radio" name="closeBehaviour" id="close-behaviour-tray" value="minimiseToTray" />
+                  <span>Minimise to system tray</span>
+                  <span class="close-behaviour-desc">Hide SILO in the tray and keep the native backend running; reopen through the tray icon.</span>
+                </label>
+                <label class="settings-check close-behaviour-option">
+                  <input type="radio" name="closeBehaviour" id="close-behaviour-exit" value="exitApplication" />
+                  <span>Exit application</span>
+                  <span class="close-behaviour-desc">Shut SILO down completely (WebView2 and all) when the window is closed.</span>
+                </label>
+              </div>
+              <p class="settings-hint">This applies to closing the launcher window. Quitting from the tray always shuts SILO down.</p>
+            </div>
+          </div>
+
+          <div class="settings-section">
             <h3 class="settings-section-title">Display</h3>
             <div class="settings-card">
               <label class="settings-toggle-row" for="input-show-game-titles">
@@ -478,6 +504,48 @@
         </div>
       </div>
     </section>
+
+    <!-- CLOSE CONFIRMATION MODAL — shown when the user closes SILO while the
+         "When closing SILO" behaviour is "Ask every time". The Rust backend
+         defers the close and emits close-confirm-requested; this panel lets the
+         user pick minimise-to-tray or a genuine exit, optionally remembered. -->
+    <div id="close-confirm-overlay" class="hidden">
+      <div id="close-confirm-dialog" class="glass-panel settings-modal close-confirm-modal">
+        <div class="settings-head">
+          <div class="settings-title" id="close-confirm-title">Close SILO?</div>
+          <p class="settings-desc" id="close-confirm-desc">How would you like SILO to behave?</p>
+        </div>
+
+        <div class="settings-body">
+          <div class="settings-section">
+            <div class="settings-card">
+              <button type="button" id="close-choice-tray" class="close-choice-btn close-choice-btn-tray">
+                <span class="close-choice-title">Keep running in the background</span>
+                <span class="close-choice-desc">Hide SILO in the Windows system tray. Keep the native backend and application running, and reopen SILO through its tray icon.</span>
+              </button>
+              <button type="button" id="close-choice-exit" class="close-choice-btn close-choice-btn-exit">
+                <span class="close-choice-title">Completely exit SILO</span>
+                <span class="close-choice-desc">Perform a genuine application shutdown: close WebView2 resources and terminate the application process cleanly.</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-card">
+              <label class="settings-check">
+                <input type="checkbox" id="close-confirm-remember" />
+                <span>Remember my choice</span>
+              </label>
+              <p class="settings-hint">Choosing this updates "When closing SILO" in Settings so you are not asked again.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <button type="button" id="close-confirm-cancel" class="settings-back">Cancel</button>
+        </div>
+      </div>
+    </div>
     </div>
   </div>
 
@@ -508,50 +576,133 @@
     </div>
   </div>
 
-  <!-- ONLINE ART PICKER MODAL -->
+  <!-- ONLINE ART PICKER MODAL — two stages (see js/artpicker.js):
+       stage A searches SteamGridDB for the game; stage B browses its artwork
+       catalogue with a preview panel and an Apply action. artpicker.js owns
+       every id below; the JS-driven ones must never be renamed. -->
   <div id="online-art-overlay" class="hidden">
-    <div id="online-art-modal" class="glass-panel" style="width: 560px; max-width: 95vw;">
-      <div id="online-art-title" class="panel-title">Find art</div>
-      <div id="online-art-sub" class="panel-desc">Search a game to pick its logo or wallpaper. Click an image to use it.</div>
-      <div style="display: flex; gap: 8px; margin-bottom: 15px;">
-        <input type="text" id="online-art-search" class="glass-input" placeholder="Search game title..." style="flex: 1;" autocomplete="off" />
-        <button class="glass-btn small highlight" id="btn-online-art-go">Search</button>
+    <div id="online-art-modal" class="glass-panel" role="dialog" aria-modal="true" aria-labelledby="online-art-title" aria-describedby="online-art-sub">
+      <div class="online-art-header">
+        <div id="online-art-title" class="panel-title">Find art</div>
+        <div id="online-art-sub" class="panel-desc">Search a game, then pick its logo.</div>
       </div>
-      <div id="online-art-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; margin-bottom: 16px;"></div>
-      <div id="online-art-notice" style="display: none; margin-bottom: 10px; font-size: 11px; color: rgba(255,200,120,0.9); text-align: center;"></div>
-      <div id="online-art-empty" style="display: none; text-align: center; color: rgba(255,255,255,0.5); font-size: 13px; padding: 20px 0;">No art found. Try another title, or Browse from disk.</div>
-      <div style="display: flex; justify-content: flex-end;">
-        <button class="glass-btn small" id="btn-online-art-cancel">Cancel</button>
+      <div class="online-art-search-row">
+        <input type="text" id="online-art-search" class="glass-input" placeholder="Search game title..." autocomplete="off" />
+        <button type="button" class="glass-btn small highlight" id="btn-online-art-go">Search</button>
+      </div>
+      <div class="online-art-stagebar">
+        <button type="button" class="glass-btn small" id="btn-online-art-back" hidden>Back to results</button>
+        <span id="online-art-stage" class="online-art-stage-label" aria-live="polite">1 · Choose the game</span>
+        <span id="online-art-monitor" class="online-art-monitor"></span>
+      </div>
+      <!-- Flexible middle: this region scrolls; header/search/footer never do. -->
+      <div id="online-art-results" class="online-art-results">
+        <div id="online-art-list" class="online-art-list"></div>
+        <div id="online-art-empty" hidden></div>
+        <div id="online-art-notice" hidden></div>
+        <div id="online-art-gallery" class="online-art-gallery" hidden></div>
+        <div id="online-art-pagination" class="online-art-pagination" hidden>
+          <span id="online-art-count" class="online-art-count"></span>
+          <button type="button" class="glass-btn small" id="art-show-more" hidden>Show more</button>
+        </div>
+      </div>
+      <!-- Reviewable decision panel + footer: fixed, outside the scroll region. -->
+      <div id="art-preview" hidden>
+        <div class="art-preview-frame">
+          <img id="art-preview-img" alt="" hidden />
+        </div>
+        <div class="art-preview-copy">
+          <div id="art-preview-meta" class="art-preview-meta"></div>
+          <div id="art-preview-note" class="art-preview-note" hidden></div>
+        </div>
+      </div>
+      <div class="online-art-footer">
+        <button type="button" class="glass-btn" id="btn-art-browse" hidden>Browse from disk</button>
+        <button type="button" class="glass-btn" id="btn-online-art-cancel">Cancel</button>
+        <button type="button" class="glass-btn highlight" id="btn-art-apply" disabled>Use this logo</button>
       </div>
     </div>
   </div>
 
   <!-- RESTORE MODAL -->
   <div id="restore-overlay" class="hidden">
-    <div id="restore-modal" class="glass-panel" style="width: 400px;">
-      <div id="restore-title" class="panel-title">Restore save</div>
-      <div id="restore-subtitle" class="panel-desc">Select a backup snapshot to restore. This overwrites your current save files.</div>
-      <div id="restore-list" style="display: flex; flex-direction: column; gap: 10px; max-height: 200px; overflow-y: auto; margin-bottom: 20px;">
+    <div id="restore-modal" class="glass-panel restore-dialog">
+      <div class="restore-dialog-header">
+        <h2 id="restore-title" class="panel-title">Restore Save</h2>
+        <p id="restore-subtitle" class="panel-desc">Select a backup snapshot to restore. This overwrites your current save files.</p>
+      </div>
+      <div id="restore-list" class="restore-snapshot-list">
         <!-- Backup items injected here -->
       </div>
-      <div id="restore-actions" style="display: flex; gap: 10px; justify-content: flex-end;">
+      <div class="restore-dialog-footer">
         <button class="glass-btn" id="btn-restore-cancel">Cancel</button>
       </div>
     </div>
   </div>
+  <!-- Animated-logo policy decision -->
+  <div id="gif-policy-overlay" class="modal-overlay hidden">
+    <section class="glass-panel gif-policy-dialog" role="dialog" aria-modal="true" aria-labelledby="gif-policy-title" aria-describedby="gif-policy-desc" tabindex="-1">
+      <h2 id="gif-policy-title" tabindex="-1">How should this animated logo play?</h2>
+      <p id="gif-policy-desc">Choose a playback policy. The current logo stays unchanged if you cancel.</p>
+      <div class="gif-policy-actions">
+        <button type="button" class="settings-btn" data-policy="once">Play once</button>
+        <button type="button" class="settings-btn" data-policy="loop">Loop indefinitely</button>
+        <button type="button" class="settings-back" data-policy="cancel">Cancel</button>
+      </div>
+    </section>
+  </div>
   <!-- UNINSTALL MODAL -->
   <div id="uninstall-overlay" class="hidden">
-    <div id="uninstall-modal" class="glass-panel">
-      <div id="uninstall-title" class="settings-title">Remove Game</div>
-      <p id="uninstall-subtitle" class="settings-desc">How would you like to remove this game?</p>
-
-      <div class="settings-stack">
-        <button class="settings-btn" id="btn-uninstall-run" style="display: none;">Run Uninstaller (unins000.exe)</button>
-        <button class="settings-btn settings-btn-danger" id="btn-uninstall-delete">Delete Game Folder Permanently</button>
-        <button class="settings-btn" id="btn-uninstall-remove">Just Remove from Launcher</button>
+    <div id="uninstall-modal" class="glass-panel uninstall-dialog">
+      <div class="uninstall-dialog-header">
+        <div class="uninstall-eyebrow">REMOVE GAME</div>
+        <h2 id="uninstall-title" class="settings-title">How would you like to remove this game?</h2>
+        <p id="uninstall-subtitle" class="settings-desc">Choose the removal option that best fits your needs.</p>
       </div>
-
-      <div class="settings-actions-row">
+      <div class="uninstall-dialog-body">
+        <button type="button" class="uninstall-action-row" id="uninstall-action-row-run" aria-label="Run Uninstaller — Launch the game's own uninstaller first; you'll confirm cleanup after.">
+          <div class="uninstall-action-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v14a9 9 0 0 1-9-9H5a7 7 0 0 0 14 0h-2"/>
+              <path d="M4 7h16"/>
+              <path d="M12 11v4"/>
+              <path d="M12 15v2"/>
+            </svg>
+          </div>
+          <div class="uninstall-action-content">
+            <div class="uninstall-action-title">Run Uninstaller</div>
+            <div class="uninstall-action-desc">Launch the game's own uninstaller first; you'll confirm cleanup after.</div>
+          </div>
+        </button>
+        <button type="button" class="uninstall-action-row" id="uninstall-action-row-delete" aria-label="Delete Game Folder Permanently — Permanently erase the game files from your computer.">
+          <div class="uninstall-action-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+              <line x1="10" y1="11" x2="10" y2="17"/>
+              <line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+          </div>
+          <div class="uninstall-action-content">
+            <div class="uninstall-action-title">Delete Game Folder Permanently</div>
+            <div class="uninstall-action-desc">Permanently erase the game files from your computer.</div>
+          </div>
+        </button>
+        <button type="button" class="uninstall-action-row" id="uninstall-action-row-remove" aria-label="Just Remove from Launcher — Remove the game from SILO while keeping its files untouched.">
+          <div class="uninstall-action-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <path d="M9 9l3 3 3-3"/>
+              <line x1="12" y1="6" x2="12" y2="10"/>
+            </svg>
+          </div>
+          <div class="uninstall-action-content">
+            <div class="uninstall-action-title">Just Remove from Launcher</div>
+            <div class="uninstall-action-desc">Remove the game from SILO while keeping its files untouched.</div>
+          </div>
+        </button>
+      </div>
+      <div class="uninstall-dialog-footer">
         <button class="settings-back" id="btn-uninstall-cancel">Cancel</button>
       </div>
     </div>

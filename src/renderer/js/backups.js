@@ -27,6 +27,10 @@ document.getElementById('btn-restore-cancel')?.addEventListener('click', () => {
 });
 
 window.doRestore = async (gameId, backupName) => {
+  // Restoring overwrites live save files — it always asks first.
+  const { ask } = window.__TAURI__.dialog;
+  const yes = await ask('Replace current saves with this backup?', { title: 'Restore save', kind: 'warning' });
+  if (!yes) return;
   showToast('info', 'Restoring', 'Restoring save file from backup...');
   document.getElementById('restore-overlay').classList.add('hidden');
   try {
@@ -36,6 +40,36 @@ window.doRestore = async (gameId, backupName) => {
     showToast('error', 'Restore Failed', err);
   }
 };
+
+/* ── Dialog keyboard: Esc closes each dialog; Tab stays inside. ─────────── */
+function trapFocus(overlayEl, e) {
+  const focusables = overlayEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+  if (!focusables.length) return;
+  const list = Array.from(focusables).filter(el => !el.hasAttribute('hidden'));
+  if (!list.length) return;
+  const first = list[0];
+  const last = list[list.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey) {
+    if (active === first || !overlayEl.contains(active)) { e.preventDefault(); last.focus(); }
+  } else if (active === last || !overlayEl.contains(active)) {
+    e.preventDefault(); first.focus();
+  }
+}
+document.addEventListener('keydown', (e) => {
+  const restoreOv = document.getElementById('restore-overlay');
+  if (restoreOv && !restoreOv.classList.contains('hidden')) {
+    if (e.key === 'Escape') { restoreOv.classList.add('hidden'); return; }
+    if (e.key === 'Tab') trapFocus(restoreOv, e);
+    return;
+  }
+  const backupOv = document.getElementById('backup-name-overlay');
+  if (backupOv && !backupOv.classList.contains('hidden')) {
+    if (e.key === 'Escape') { document.getElementById('btn-backup-name-cancel')?.click(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('btn-backup-name-ok')?.click(); return; }
+    if (e.key === 'Tab') trapFocus(backupOv, e);
+  }
+});
 
 /* ── Backup manager ─────────────────────────────────────────────────────────*/
 document.getElementById('btn-backup-manager').addEventListener('click', () => {

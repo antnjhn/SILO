@@ -1,7 +1,7 @@
 /* ── settings.js — settings modal + preferences plumbing ──────────────────── */
 import { showGameTitles, setShowGameTitles } from './state.js';
 import { showToast } from './utils.js';
-import { applyMotionPref, syncMotionToggle, setForceMotion } from './library.js';
+import { applyMotionPref, syncMotionToggle, setForceMotion, setDynamicAccent, syncDynamicAccentToggle } from './library.js';
 import { showPage } from './pages.js';
 
 /* ── Settings & Backup ─────────────────────────────────────────────────────*/
@@ -26,11 +26,20 @@ async function openSettingsModal() {
     setShowGameTitles(!!s.showGameTitles);
     document.getElementById('input-sgdb-key').value = s.sgdbApiKey || '';
     document.getElementById('input-check-updates').checked = !!s.checkUpdatesOnLaunch;
+    const closeBehaviourIds = { askEveryTime: 'ask', minimiseToTray: 'tray', exitApplication: 'exit' };
+    const radio = document.getElementById('close-behaviour-' + closeBehaviourIds[s.closeBehaviour]);
+    if (radio) radio.checked = true;
     applyShowGameTitles();
     syncMotionToggle();
+    syncDynamicAccentToggle();
   } catch (err) {
     console.error(err);
   }
+}
+
+function currentCloseBehaviour() {
+  const checked = document.querySelector('input[name="closeBehaviour"]:checked');
+  return checked ? checked.value : 'askEveryTime';
 }
 
 document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
@@ -43,25 +52,60 @@ document.getElementById('input-show-game-titles')?.addEventListener('change', as
   const base = cachedSettings || {
     sgdbApiKey: document.getElementById('input-sgdb-key').value.trim() || null,
     checkUpdatesOnLaunch: document.getElementById('input-check-updates').checked,
+    closeBehaviour: currentCloseBehaviour(),
   };
   base.showGameTitles = on;
+  base.closeBehaviour = currentCloseBehaviour();
   try {
     await window.vault.setSettings({
       settings: {
         sgdbApiKey: base.sgdbApiKey || null,
         checkUpdatesOnLaunch: !!base.checkUpdatesOnLaunch,
         showGameTitles: on,
+        closeBehaviour: base.closeBehaviour,
       },
     });
   } catch (err) {
     showToast('error', 'Save Failed', err);
   }
 });
+
+// Close behaviour radios apply immediately and persist the whole settings object.
+document.querySelectorAll('input[name="closeBehaviour"]').forEach((radio) => {
+  radio.addEventListener('change', async () => {
+    const base = cachedSettings || {
+      sgdbApiKey: document.getElementById('input-sgdb-key').value.trim() || null,
+      checkUpdatesOnLaunch: document.getElementById('input-check-updates').checked,
+      closeBehaviour: currentCloseBehaviour(),
+    };
+    base.closeBehaviour = currentCloseBehaviour();
+    try {
+      await window.vault.setSettings({
+        settings: {
+          sgdbApiKey: base.sgdbApiKey || null,
+          checkUpdatesOnLaunch: !!base.checkUpdatesOnLaunch,
+          showGameTitles: document.getElementById('input-show-game-titles').checked,
+          closeBehaviour: base.closeBehaviour,
+        },
+      });
+      showToast('success', 'Close Behaviour', 'Closing SILO will now: ' + base.closeBehaviour);
+    } catch (err) {
+      showToast('error', 'Save Failed', err);
+    }
+  });
+});
 // 'Always animate' — overrides the system reduce-motion setting for the launcher.
 // Applies instantly (no Save required); stored locally, not in the settings file.
 document.getElementById('input-force-motion')?.addEventListener('change', (e) => {
   setForceMotion(e.target.checked);
   applyMotionPref();
+});
+
+// 'Dynamic accent color' — same pattern as 'Always animate': applies instantly,
+// stored locally. The Rust Settings struct has no field for it (unknown keys
+// are dropped when serde deserializes), so settings.json can't persist it.
+document.getElementById('input-dynamic-accent')?.addEventListener('change', (e) => {
+  setDynamicAccent(e.target.checked);
 });
 
 document.getElementById('btn-settings-close').addEventListener('click', () => {
@@ -86,11 +130,12 @@ document.getElementById('settings-advanced-toggle')?.addEventListener('click', (
 document.getElementById('btn-save-settings').addEventListener('click', async () => {
   const sgdbApiKey = document.getElementById('input-sgdb-key').value.trim() || null;
   const checkUpdatesOnLaunch = document.getElementById('input-check-updates').checked;
+  const closeBehaviour = currentCloseBehaviour();
   setShowGameTitles(document.getElementById('input-show-game-titles').checked);
   applyShowGameTitles();
   try {
-    await window.vault.setSettings({ settings: { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles } });
-    cachedSettings = { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles };
+    await window.vault.setSettings({ settings: { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles, closeBehaviour } });
+    cachedSettings = { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles, closeBehaviour };
     showToast('success', 'Settings Saved', 'Settings have been saved.');
   } catch (err) {
     showToast('error', 'Save Failed', err);

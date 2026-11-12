@@ -28,14 +28,43 @@ let revealed = false;
 
 function navEl() { return document.getElementById('topnav'); }
 
+/* ── Navigation hover blur ────────────────────────────────────────────────────
+   One shared blur layer spans the whole top navigation bar while any icon is
+   hovered. The layer is clipped to the bar by the row's own overflow, and the
+   icons, labels and separators sit above it, so they stay sharp.
+
+   Settings, Statistics and Add Game are pages rather than overlays: their
+   panels have to stay sharp, so the effect is switched off entirely while any
+   of them is open. The CSS mirrors this rule, so the effect is off even if the
+   pointer is already over an icon when the page changes. */
+function navBlurBlocked() {
+  const page = currentPage();
+  return page === 'settings' || page === 'stats' || page === 'import';
+}
+
+const navRow = () => document.querySelector('#topnav .topnav-row');
+
+let hoveredNavItems = 0;
+
+function setNavBlur(on) {
+  const row = navRow();
+  if (!row) return;
+  if (on && navBlurBlocked()) {
+    row.classList.remove('nav-blur-active');
+    return;
+  }
+  row.classList.toggle('nav-blur-active', on);
+}
+
 /* ── Reveal / hide ─────────────────────────────────────────────────────────*/
 export function revealNav() {
   const nav = navEl();
   if (!nav) return;
-  // Idempotent: the class and the flag are always set together, so they can
-  // never drift apart.
+  // Idempotent: the class, the body flag and the module flag are always set
+  // together, so they can never drift apart.
   revealed = true;
   nav.classList.add('revealed');
+  document.body.classList.add('nav-open');
   scheduleHide();
 }
 
@@ -54,28 +83,55 @@ export function hideNav() {
 
 /* Hides the bar immediately, with no idle wait. Hiding always hands the
    keyboard back to the library: otherwise the arrow keys would stay captured
-   by a bar that is no longer on screen. */
+   by a bar that is no longer on screen. It is the one place that decides where
+   focus goes, so every hide path agrees. */
 export function hideNavNow() {
   const nav = navEl();
   revealed = false;
   if (nav) nav.classList.remove('revealed');
-  releaseNavKeyboard();
+  document.body.classList.remove('nav-open');
   clearTimeout(idleTimer);
+  releaseNavKeyboard();
+  focusInside = false;
+  restoreFocusFromNav();
 }
 
-/* Escape closes the bar even though the focus is inside it: the focus is
-   handed back to the page that is on screen, so the bar is not "in use" any
-   more and the page keeps the keyboard. */
-export function dismissNav() {
+/* The bar is an overlay: when it goes away the focus it borrowed comes back to
+   whatever is on screen. Focus is only moved when the bar actually owns it —
+   taking it from anywhere else would close whatever the user is using.
+   preventScroll keeps the rail exactly where it was left, and no game, page or
+   selection is touched. */
+function restoreFocusFromNav() {
   const nav = navEl();
+  const active = document.activeElement;
+  if (!nav || !active || !nav.contains(active)) return;
+  const details = document.getElementById('details-panel');
+  const detailsOnScreen = !!(details && !details.classList.contains('hidden'));
   const page = document.querySelector('#page-host .page:not(.hidden)');
-  if (nav && nav.contains(document.activeElement)) {
-    if (page) page.focus({ preventScroll: true });
-    else document.activeElement.blur();
+  const target = detailsOnScreen ? details : page;
+  if (!target) {
+    if (typeof active.blur === 'function') active.blur();
+    return;
   }
+  // The details panel is not in the tab order; -1 makes it focusable without
+  // adding it to it.
+  if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+  target.focus({ preventScroll: true });
+}
+
+/* Escape closes the bar even though the focus is inside it. */
+export function dismissNav() {
   focusInside = false;
   pointerInside = false;
   hideNavNow();
+}
+
+/* One toggle for the controller's START button: show if hidden, hide if shown.
+   The selected game is never touched, so the bar comes and goes over exactly
+   the same focus. */
+export function toggleNav() {
+  if (revealed) hideNavNow();
+  else revealNavAndFocus();
 }
 
 /* The bar stays up while something that lives inside it is in use. */
@@ -163,13 +219,20 @@ export function activateNavItem() {
   el?.click();
 }
 
-/* Reveals the bar and puts the keyboard cursor on its active item, so the
-   arrow keys can go straight on to drive it. */
+/* Reveals the bar and puts the keyboard cursor on its active item, so the arrow
+   keys (and the controller's d-pad) can go straight on to drive it. Idempotent:
+   calling it again never reloads anything, never resets the selected game and
+   never changes the page — it only re-asserts that the bar is up. */
 export function revealNavAndFocus() {
+  const hadCursor = navKeyboardMode
+    && !!document.querySelector('#topnav .topnav-item.cursor');
   revealNav();
   const items = navItems();
-  const active = items.findIndex((el) => el.classList.contains('active'));
+  if (!items.length) return;
   navKeyboardMode = true;
+  // The cursor is already where the user left it: do not snap it back.
+  if (hadCursor) return;
+  const active = items.findIndex((el) => el.classList.contains('active'));
   setNavCursor(active < 0 ? 0 : active);
 }
 
@@ -181,6 +244,9 @@ export function releaseNavKeyboard() {
 
 function syncActiveNav() {
   const page = currentPage();
+  // Opening Settings or Statistics drops the hover blur: their panels must
+  // stay sharp, and the pointer may already be over a nav icon.
+  if (navBlurBlocked()) setNavBlur(false);
   if (page === 'stats') return setActiveNav('stats');
   if (page === 'settings') return setActiveNav('settings');
   if (page === 'import') return setActiveNav('import');
@@ -244,6 +310,22 @@ export function initNav() {
   // Other parts of the app can ask for the bar (the search shortcut uses it).
   document.addEventListener('silo:reveal-nav', () => revealNav());
 
+  // Global top-nav hover blur: activate a shared blur layer across the whole
+  // bar when any icon is hovered, keep it active while moving between icons,
+  // and remove it when the pointer leaves the nav region. The blur layer sits
+  // behind the icons (z-index -1) so they stay sharp, and it is switched off
+  // entirely on the Settings and Statistics pages.
+  document.querySelectorAll('#topnav .topnav-item').forEach((item) => {
+    item.addEventListener('mouseenter', () => {
+      hoveredNavItems += 1;
+      if (hoveredNavItems === 1) setNavBlur(true);
+    });
+    item.addEventListener('mouseleave', () => {
+      hoveredNavItems = Math.max(0, hoveredNavItems - 1);
+      if (hoveredNavItems === 0) setNavBlur(false);
+    });
+  });
+
   // The bar can be hidden through the same code path the UI uses, so its
   // internal state can never drift out of sync with the class list.
   window.__hideNavNow = hideNavNow;
@@ -257,14 +339,15 @@ export function initNav() {
   syncActiveNav();
 }
 
-/* The controller reveals the bar with an upward push. It lives here so the
-   gamepad handler stays a thin input mapping. */
+/* The controller reveals the bar with START. It lands with the cursor already
+   on the active item, so the focus indicator is visible the moment it appears.
+   The gamepad handler stays a thin input mapping. */
 export function revealNavFromController() {
-  revealNav();
+  revealNavAndFocus();
 }
 
-/* Whether the bar is currently on screen. The controller uses it so an
-   upward push reveals the bar first and only browses the rail afterwards. */
+/* Whether the bar is currently on screen. While it is up the controller gives
+   it the d-pad and nothing else runs, so the rail never scrolls underneath. */
 export function isNavRevealed() {
   return revealed;
 }

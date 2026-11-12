@@ -3,6 +3,7 @@ import { allGames, games, selectedIndex, findGameById } from './state.js';
 import { showPage, onPageEnter, onPageLeave } from './pages.js';
 import {
   esc, fmtTime, fmtDate, fmtShort, fmtDayTitle, fmtAxisLabel, fmtSessionWhen,
+  fmtTrackedTime, trackedTimeTitle,
   startOfLocalDay, addDaysLocal, localDayKey, parseSessionDate,
 } from './utils.js';
 
@@ -370,7 +371,7 @@ function renderStatsOverall() {
         <span class="rank-pos">${i + 1}</span>
         <span class="rank-name" title="${esc(g.name)}">${esc(g.name)}</span>
         <span class="rank-track"><span class="rank-fill" style="width:${Math.max(0, Math.min(100, ((g.playtimeMinutes || 0) / maxMin) * 100))}%;"></span></span>
-        <span class="rank-time">${fmtTime(g.playtimeMinutes)}</span>
+        <span class="rank-time" title="${esc(trackedTimeTitle(g.uncertainPlaytimeMinutes))}">${fmtTrackedTime(g.playtimeMinutes, g.uncertainPlaytimeMinutes)}</span>
       </div>`).join('');
   } else {
     rankWrap.innerHTML = '<div class="stats-empty">No playtime yet - launch a game to get started.</div>';
@@ -413,7 +414,7 @@ function renderStatsGames() {
     listCol.innerHTML = list.map(g => `
       <button type="button" class="stats-game-btn${g.id === statsGameId ? ' active' : ''}" data-game="${esc(g.id)}">
         <span class="gb-name" title="${esc(g.name)}">${esc(g.name)}</span>
-        <span class="gb-sub">${fmtTime(g.playtimeMinutes)} · ${g.sessionCount || 0} sessions</span>
+        <span class="gb-sub">${fmtTrackedTime(g.playtimeMinutes, g.uncertainPlaytimeMinutes)} · ${g.sessionCount || 0} sessions</span>
       </button>`).join('');
     listCol.querySelectorAll('.stats-game-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -437,7 +438,7 @@ function renderStatsGames() {
     const cards = document.createElement('div');
     cards.className = 'stats-cards';
     cards.innerHTML =
-      statCardHtml(fmtTime(game.playtimeMinutes), 'PLAYTIME') +
+      statCardHtml(fmtTrackedTime(game.playtimeMinutes, game.uncertainPlaytimeMinutes), 'PLAYTIME') +
       statCardHtml(game.sessionCount || 0, 'SESSIONS') +
       statCardHtml(fmtDate(game.lastPlayed), 'LAST PLAYED');
     detailCol.appendChild(cards);
@@ -455,7 +456,7 @@ function renderStatsGames() {
       listEl.innerHTML = recent.map(s => `
         <div class="recent-row">
           <span class="rr-time">${esc(fmtSessionWhen(s.startedAt))}</span>
-          <span class="rr-dur">${fmtShort(s.minutes)}</span>
+          <span class="rr-dur"${s.durationKind === 'uncertain' ? ' title="Lower bound: SILO was closed for part of this session."' : ''}>${s.durationKind === 'uncertain' ? '\u2265 ' : ''}${fmtShort(s.minutes)}</span>
         </div>`).join('');
       sec.appendChild(listEl);
       detailCol.appendChild(sec);
@@ -695,7 +696,7 @@ async function openStatPopover(metric, gameId, source = 'hover') {
   document.getElementById('sp-title').textContent =
     `${metric === 'sessions' ? 'SESSIONS' : 'PLAYTIME'} · ${g ? g.name : ''}`;
   document.getElementById('sp-total').textContent =
-    metric === 'sessions' ? String(g ? (g.sessionCount || 0) : 0) : fmtTime(g ? g.playtimeMinutes : 0);
+    metric === 'sessions' ? String(g ? (g.sessionCount || 0) : 0) : fmtTrackedTime(g ? g.playtimeMinutes : 0, g ? g.uncertainPlaytimeMinutes : 0);
 
   let sessions = [];
   try {

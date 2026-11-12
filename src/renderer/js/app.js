@@ -3,15 +3,15 @@ import {
   allGames, games, selectedIndex, setAllGames, setShowGameTitles, setSearchQuery, gameNameById,
 } from './state.js';
 import { listen } from './api.js';
-import { showToast, backupTimestampLabel } from './utils.js';
+import { showToast, backupTimestampLabel, esc } from './utils.js';
 import {
   layoutRail, syncMotionToggle, applyCategoryFilter, renderDetails,
   retriggerHeroAnimation, runInstallCheck, toggleSearch,
   changeCategorySelection, closeCategories, openCategories,
   selectGame, railEnterGame, railExitGame,
   toggleFilterPanel, isFilterPanelOpen,
-  closeDetails, openDetails, doLaunch, detailsOpen, railEntered, categoriesOpen,
-  forceMotion,
+  closeDetails, openDetails, detailsOpen, railEntered, categoriesOpen,
+  forceMotion, focusDock, activateDockFocus,
 } from './library.js';
 import { closeMetadataPicker, closeOnlineArtPicker } from './modals.js';
 // Side-effect module: binds Backup Manager and the library export / restore
@@ -20,10 +20,12 @@ import './backups.js';
 import { bindStatPopoverHover, hideStatPopoverNow, isStatPopoverOpen } from './stats.js';
 import { applyShowGameTitles } from './settings.js';
 import { offerSetupIfPending } from './migrate.js';
-import { pollGamepad } from './gamepad.js';
+import { initGamepadPolling } from './gamepad.js';
+import { initDisplayMonitoring } from './display.js';
 import { showPage, currentPage } from './pages.js';
+import { rememberedGameId, rememberedPage } from './uistate.js';
 import {
-  initNav, revealNav, revealNavAndFocus, hideNav, dismissNav, isNavRevealed,
+  initNav, revealNavAndFocus, dismissNav, isNavRevealed,
   isNavKeyboardActive, moveNavFocus, activateNavItem,
 } from './nav.js';
 
@@ -43,7 +45,7 @@ async function init() {
   applyShowGameTitles(false);
   applyCategoryFilter();
   initNav();
-  requestAnimationFrame(pollGamepad);
+  initGamepadPolling();
 
   // Verify the library only once the UI is on screen, so the app opens
   // instantly; badges appear when the backend answers. requestIdleCallback keeps
@@ -126,6 +128,34 @@ async function init() {
     if (detailsOpen && games[selectedIndex]) renderDetails(games[selectedIndex]);
   });
 
+  // ── Gaming Mode lifecycle ──
+  // The opt-in launch returns as soon as the monitor accepts it, so an outcome
+  // discovered later (untrackable process, refused concurrent launch, failed
+  // spawn) reaches the user here. The launcher is visible again by the time
+  // these arrive: the monitor restores it before reporting.
+  listen('gaming-session-uncertain', (event) => {
+    const p = event.payload || {};
+    showToast('info', 'Gaming Mode', p.message || 'This session could not be tracked.');
+  });
+  listen('gaming-session-rejected', (event) => {
+    const p = event.payload || {};
+    showToast('warning', 'Gaming Mode', p.message || 'Another game is already running under Gaming Mode.');
+  });
+  listen('gaming-session-launch-failed', (event) => {
+    const p = event.payload || {};
+    showToast('error', 'Gaming Mode', p.message || 'The game could not be started.');
+  });
+  listen('gaming-session-launch-confirmed', (event) => {
+    const p = event.payload || {};
+    showToast('success', 'Launched', p.gameName || 'Game is running');
+  });
+
+  // The backend defers the close and asks the user when the close behaviour is
+  // "Ask every time". Show the confirmation panel and wait for their choice.
+  listen('close-confirm-requested', () => {
+    showCloseConfirm();
+  });
+
   // ── Hover mini-charts over PLAYTIME / SESSIONS ──
   bindStatPopoverHover();
 
@@ -145,6 +175,27 @@ async function init() {
   // A library restored from another PC is offered the setup step once, on the
   // boot after the restore. It can be reopened later from Advanced.
   offerSetupIfPending();
+
+  // Route memory: this boot may be the renderer that replaced the one Stage 6
+  // destroyed while a game was running. The library itself already came back
+  // from Rust above, so this only puts the launcher back where the user left it
+  // (a game that no longer exists, or a stale hint, simply does nothing).
+  restoreRouteMemory();
+}
+
+/* Puts the launcher back on the page and game it was last showing. Called after
+   the library is loaded, so both are applied to a UI that is already usable. */
+function restoreRouteMemory() {
+  const rememberedId = rememberedGameId();
+  if (rememberedId) {
+    const index = allGames.findIndex(game => game.id === rememberedId);
+    if (index !== -1) selectGame(index);
+  }
+  const page = rememberedPage();
+  if (page && page !== 'home' && page === currentPage()) {
+    return;
+  }
+  if (page && page !== 'home') showPage(page, { instant: true });
 }
 
 /* ── Window controls ───────────────────────────────────────────────────────*/
@@ -155,6 +206,46 @@ document.getElementById('btn-close').addEventListener('click', () => window.vaul
 document.getElementById('titlebar').addEventListener('mousedown', (e) => {
   if (e.target.closest('#titlebar-controls')) return;
   if (e.button === 0) window.vault.windowStartDragging();
+});
+
+/* ── Close confirmation — "When closing SILO" = Ask every time ───────────────
+   The backend defers the window close and emits close-confirm-requested. This
+   panel lets the user pick minimise-to-tray or a genuine exit, and optionally
+   remember the choice so they are not asked again. The window stays open until
+   the user answers or cancels. ─────────────────────────────────────────────*/
+
+function showCloseConfirm() {
+  const overlay = document.getElementById('close-confirm-overlay');
+  const remember = document.getElementById('close-confirm-remember');
+  if (!overlay) return;
+  if (remember) remember.checked = false;
+  overlay.classList.remove('hidden');
+  requestAnimationFrame(() => overlay.classList.add('open'));
+}
+
+function hideCloseConfirm() {
+  const overlay = document.getElementById('close-confirm-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('open');
+  setTimeout(() => overlay.classList.add('hidden'), 240);
+}
+
+function handleCloseConfirm(choice) {
+  const remember = document.getElementById('close-confirm-remember');
+  hideCloseConfirm();
+  window.vault
+    .confirmClose(choice, Boolean(remember && remember.checked))
+    .catch((err) => {
+      console.error('Close SILO failed:', err);
+      showToast('error', 'Close Failed', String(err));
+    });
+}
+
+document.getElementById('close-choice-tray')?.addEventListener('click', () => handleCloseConfirm('tray'));
+document.getElementById('close-choice-exit')?.addEventListener('click', () => handleCloseConfirm('exit'));
+document.getElementById('close-confirm-cancel')?.addEventListener('click', hideCloseConfirm);
+document.getElementById('close-confirm-overlay')?.addEventListener('click', (e) => {
+  if (e.target.id === 'close-confirm-overlay') hideCloseConfirm();
 });
 
 /* ── Keyboard ──────────────────────────────────────────────────────────────*/
@@ -183,6 +274,11 @@ document.addEventListener('keydown', e => {
     }
     if (!document.getElementById('backup-manager-overlay').classList.contains('hidden')) {
       e.preventDefault(); document.getElementById('btn-backup-manager-close').click(); return;
+    }
+    // Canceling the close confirmation keeps the window open (the close is
+    // deferred) and never exits SILO.
+    if (!document.getElementById('close-confirm-overlay').classList.contains('hidden')) {
+      e.preventDefault(); hideCloseConfirm(); return;
     }
     // The statistics preview is a preview: it steps aside before anything
     // else happens, and it never leaves the application.
@@ -289,9 +385,11 @@ document.addEventListener('keydown', e => {
   if (isNavKeyboardActive()) {
     switch (e.key) {
       // The bar is a horizontal row, so only the horizontal arrows drive it.
-      // Up and down keep browsing the game rail, as they always have.
+      // DOWN dismisses it (it must not fall through and scroll the rail);
+      // UP keeps browsing the rail, as it always has.
       case 'ArrowLeft': e.preventDefault(); moveNavFocus(-1); return;
       case 'ArrowRight': e.preventDefault(); moveNavFocus(1); return;
+      case 'ArrowDown': e.preventDefault(); dismissNav(); return;
       case 'Enter': e.preventDefault(); activateNavItem(); return;
       case 'Escape': e.preventDefault(); dismissNav(); return;
     }
@@ -303,12 +401,17 @@ document.addEventListener('keydown', e => {
     // back out. A / Enter still opens the full details view.
     case 'ArrowUp':
       e.preventDefault();
-      // Up brings the navigation down when it is hidden. It only shows the
-      // bar: the keyboard stays with the library, so the focused game can
-      // still be opened and stepped into. Once the bar is up the rail is
-      // browsed as before.
-      if (!isNavRevealed()) revealNav();
-      else if (!detailsOpen && selectedIndex > 0) selectGame(selectedIndex - 1);
+      // Up from the topmost game reveals navigation and focuses it; from any
+      // other game it moves to the previous game without touching the nav.
+      if (!isNavRevealed()) {
+        if (selectedIndex === 0) {
+          revealNavAndFocus();
+        } else {
+          selectGame(selectedIndex - 1);
+        }
+      } else if (!detailsOpen && selectedIndex > 0) {
+        selectGame(selectedIndex - 1);
+      }
       break;
     case 'ArrowDown':
       e.preventDefault();
@@ -316,18 +419,21 @@ document.addEventListener('keydown', e => {
       break;
     case 'ArrowRight':
       e.preventDefault();
-      if (!detailsOpen) railEnterGame();
+      // Inside the details the dock owns the horizontal arrows; browsing, RIGHT
+      // steps into the focused game.
+      if (detailsOpen) focusDock(1);
+      else railEnterGame();
       break;
     case 'ArrowLeft':
       e.preventDefault();
-      if (detailsOpen) closeDetails();          // LEFT from full details returns
+      if (detailsOpen) focusDock(-1);           // LEFT walks the action dock
       else if (railEntered) railExitGame();     // LEFT steps back out first...
       else if (isFilterPanelOpen()) toggleFilterPanel(false);
-      else openCategories();                    // ...then LEFT reveals the category wheel
+      else openCategories();                    // ...then reveals the category wheel
       break;
     case 'Enter':      e.preventDefault();
-      if (!detailsOpen && games.length) openDetails();
-      else if (detailsOpen && games[selectedIndex]) doLaunch(games[selectedIndex].id);
+      if (detailsOpen) activateDockFocus();
+      else if (games.length) openDetails();
       break;
     // C opens the category wheel too, matching the controller's LB.
     case 'c': case 'C':
@@ -341,3 +447,4 @@ document.addEventListener('keydown', e => {
 
 /* ── Go ────────────────────────────────────────────────────────────────────*/
 init();
+initDisplayMonitoring();

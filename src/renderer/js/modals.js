@@ -2,17 +2,37 @@
 import { allGames, games, selectedIndex, setSelectedIndex } from './state.js';
 import { showToast, esc, parseTags } from './utils.js';
 import { getFileSrc } from './api.js';
+import { initArtPicker, openArtPicker, closeArtPicker } from './artpicker.js';
 import { showPage } from './pages.js';
 import {
   applyCategoryFilter, renderGameList, renderDetails, updateGameListSelection,
   centerActiveItem, syncRailInstant, crossfadeWallpaper, detailsOpen,
+  refreshInstallStatus,
 } from './library.js';
 
 // ── Modal-local state ──
 let editingGameId = null;
 let modalWallpaperPath = null;
 let modalLogoPath = null;
+let stagedGifPolicy = null;
 let pendingLaunchTarget = null;   // Edit-modal selection: 'auto' | 'launcher' | 'game'
+
+/* The one way an artwork preview is set. `.shown` is the reveal rule in
+   style.css; no inline display is written, so opening a different modal can
+   never inherit the previous game's image (and a cleared field clears both the
+   class and the source). */
+function setAssetPreview(img, path) {
+  if (!img) return;
+  img.style.display = '';
+  if (!path) {
+    img.removeAttribute('src');
+    img.classList.remove('shown');
+    return;
+  }
+  if (/\.gif(?:$|[?#])/i.test(path)) img.removeAttribute('src');
+  else getFileSrc(path, img);
+  img.classList.add('shown');
+}
 
 /* ── Add / Edit modal ──────────────────────────────────────────────────────*/
 // Launch Target segmented control: 'auto' | 'launcher' | 'game'. SILO inspects
@@ -68,11 +88,12 @@ function bindLaunchTargetButtons() {
 bindLaunchTargetButtons();
 
 export function openAddModal() {
+  stagedGifPolicy = null;
   showPage('import');
   editingGameId = null; modalWallpaperPath = null; modalLogoPath = null;
   document.getElementById('modal-title').textContent = 'Add game';
-  document.getElementById('scan-folder-container').style.display = 'flex';
-  document.getElementById('import-container').style.display = 'flex';
+  document.getElementById('scan-folder-container').hidden = false;
+  document.getElementById('import-container').hidden = false;
   document.getElementById('input-name').value = '';
   document.getElementById('input-font').value = '';
   document.getElementById('input-color').value = '#ffffff';
@@ -80,7 +101,7 @@ export function openAddModal() {
   document.getElementById('input-exe').value = '';
   document.getElementById('input-save-path').value = '';
   // No game to look up yet, so the per-game save lookup has nothing to ask about.
-  document.getElementById('btn-find-save-path').style.display = 'none';
+  document.getElementById('btn-find-save-path').hidden = true;
   setSaveFolderHint(SAVE_FOLDER_HINT);
   document.getElementById('input-tags').value = '';
   document.getElementById('backup-count-group').style.display = 'none';
@@ -88,8 +109,8 @@ export function openAddModal() {
   pendingLaunchTarget = 'auto';
   setLaunchTargetUI('auto', '');
 
-  document.getElementById('edit-wallpaper-preview-img').style.display = 'none';
-  document.getElementById('edit-logo-preview-img').style.display = 'none';
+  setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), null);
+  setAssetPreview(document.getElementById('edit-logo-preview-img'), null);
   updateTitlePreview();
 
   showPage('import');
@@ -97,19 +118,20 @@ export function openAddModal() {
 }
 
 export function openEditModal(g) {
+  stagedGifPolicy = null;
   editingGameId = g.id;
   modalWallpaperPath = g.wallpaper || null;
   modalLogoPath = g.logoPath || null;
   document.getElementById('modal-title').textContent = 'Edit game';
-  document.getElementById('scan-folder-container').style.display = 'none';
-  document.getElementById('import-container').style.display = 'none';
+  document.getElementById('scan-folder-container').hidden = true;
+  document.getElementById('import-container').hidden = true;
   document.getElementById('input-name').value = g.name;
   document.getElementById('input-font').value = g.fontFamily || '';
   document.getElementById('input-color').value = g.fontColor || '#ffffff';
   document.getElementById('color-preview-text').textContent = g.fontColor || '#ffffff';
   document.getElementById('input-exe').value = g.exePath || '';
   document.getElementById('input-save-path').value = g.savePath || '';
-  document.getElementById('btn-find-save-path').style.display = '';
+  document.getElementById('btn-find-save-path').hidden = false;
   setSaveFolderHint(SAVE_FOLDER_HINT);
   document.getElementById('input-tags').value = (g.tags || []).join(', ');
   document.getElementById('backup-count-group').style.display = 'block';
@@ -118,17 +140,10 @@ export function openEditModal(g) {
   setLaunchTargetUI(pendingLaunchTarget, '');
   refreshLaunchTargetHint();
 
-  const wImg = document.getElementById('edit-wallpaper-preview-img');
-  if (modalWallpaperPath) {
-    getFileSrc(modalWallpaperPath, wImg);
-    wImg.style.display = 'block';
-  } else { wImg.style.display = 'none'; }
-  
-  const lImg = document.getElementById('edit-logo-preview-img');
-  if (modalLogoPath) {
-    getFileSrc(modalLogoPath, lImg);
-    lImg.style.display = 'block';
-  } else { lImg.style.display = 'none'; }
+  // Both boxes are set from this game's own paths, so an empty field is empty
+  // and a stored logo/wallpaper is visible.
+  setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), modalWallpaperPath);
+  setAssetPreview(document.getElementById('edit-logo-preview-img'), modalLogoPath);
   updateTitlePreview();
 
   showPage('import');
@@ -160,7 +175,7 @@ document.getElementById('btn-add-game').addEventListener('click', openAddModal);
 
 document.getElementById('input-name').addEventListener('input', (e) => {
   const val = e.target.value.trim();
-  document.getElementById('btn-autofill').style.display = val.length > 2 ? 'inline-block' : 'none';
+  document.getElementById('btn-autofill').hidden = val.length <= 2;
 });
 
 document.getElementById('btn-autofill').addEventListener('click', async () => {
@@ -193,17 +208,13 @@ document.getElementById('btn-autofill').addEventListener('click', async () => {
 /* ── Metadata picker overlay ────────────────────────────────────────────────*/
 function applyMetadata(c) {
   document.getElementById('input-name').value = c.name;
-  const lImg = document.getElementById('edit-logo-preview-img');
   if (c.logo) {
     modalLogoPath = c.logo;
-    getFileSrc(modalLogoPath, lImg);
-    lImg.style.display = 'block';
+    setAssetPreview(document.getElementById('edit-logo-preview-img'), modalLogoPath);
   }
-  const wImg = document.getElementById('edit-wallpaper-preview-img');
   if (c.wallpaper) {
     modalWallpaperPath = c.wallpaper;
-    getFileSrc(modalWallpaperPath, wImg);
-    wImg.style.display = 'block';
+    setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), modalWallpaperPath);
   }
   showToast('success', 'Metadata Applied', `Applied ${c.source || 'metadata'} metadata for ${c.name}`);
 }
@@ -257,122 +268,41 @@ export function closeMetadataPicker() {
 
 document.getElementById('btn-metadata-cancel').addEventListener('click', closeMetadataPicker);
 
-/* ── Online art picker overlay (logo / wallpaper from Steam + SteamGridDB) ──*/
+/* ── Online art picker overlay (SteamGridDB browse, see artpicker.js) ───────*/
+// The picker owns its own state and rendering; this module only owns the form
+// fields an applied image lands in.
 let onlineArtMode = 'logo'; // 'logo' | 'wallpaper'
 
-function showArtNotice(msg) {
-  const el = document.getElementById('online-art-notice');
-  if (!el) return;
-  if (msg) { el.textContent = msg; el.style.display = 'block'; }
-  else { el.style.display = 'none'; }
-}
-
-function openOnlineArtPicker(mode) {
-  onlineArtMode = mode;
-  const sub = document.getElementById('online-art-sub');
-  const searchInput = document.getElementById('online-art-search');
-  if (sub) {
-    sub.textContent = mode === 'logo'
-      ? 'Search a game to pick its logo. Click an image to use it.'
-      : 'Search a game to pick its wallpaper. Click an image to use it.';
-  }
-  searchInput.value = document.getElementById('input-name').value.trim() || '';
-  document.getElementById('online-art-list').innerHTML = '';
-  document.getElementById('online-art-empty').style.display = 'none';
-  showArtNotice(null);
-  document.getElementById('online-art-overlay').classList.remove('hidden');
-  searchInput.focus();
-  if (searchInput.value.length >= 2) runOnlineArtSearch();
-}
-
-async function runOnlineArtSearch() {
-  const query = document.getElementById('online-art-search').value.trim();
-  const listEl = document.getElementById('online-art-list');
-  const emptyEl = document.getElementById('online-art-empty');
-  if (!query) return;
-  listEl.innerHTML = '<div style="text-align:center; padding:20px; color:rgba(255,255,255,0.5);">Searching…</div>';
-  emptyEl.style.display = 'none';
-  showArtNotice(null);
-
-  let res;
-  try {
-    res = await window.vault.fetchMetadata(query);
-  } catch (err) {
-    listEl.innerHTML = '';
-    emptyEl.style.display = 'block';
-    showToast('error', 'Search Failed', 'Could not reach the art service. Check your connection.');
-    return;
-  }
-
-  const candidates = (res && res.candidates) || [];
-  if (!candidates.length) {
-    listEl.innerHTML = '';
-    emptyEl.style.display = 'block';
-    return;
-  }
-
-  listEl.innerHTML = candidates.map((c) => {
-    const arts = onlineArtMode === 'logo' ? (c.logos || []) : (c.wallpapers || []);
-    const badge = `<span style="flex-shrink:0; font-size:9px; font-weight:700; letter-spacing:1px; color:#66ccff; border:1px solid #3388aa; padding:2px 6px; border-radius:4px;">${esc(c.source)}</span>`;
-    const thumbs = arts.length
-      ? arts.map((u) => `<img class="online-art-thumb" data-url="${esc(u)}" alt="" title="${esc(u)}" />`).join('')
-      : (onlineArtMode === 'logo'
-          ? '<div style="font-size:11px; color:rgba(255,255,255,0.35); padding:8px 0;">No logo available</div>'
-          : '<div style="font-size:11px; color:rgba(255,255,255,0.35); padding:8px 0;">No wallpaper available</div>');
-    return `
-    <div style="display:flex; align-items:center; gap:12px; padding:10px; background:rgba(0,0,0,0.2); border-radius:8px;">
-      <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:6px;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-weight:bold; font-size:14px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(c.name)}</span>
-          ${badge}
-        </div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">${thumbs}</div>
-      </div>
-    </div>`;
-  }).join('');
-
-  listEl.querySelectorAll('.online-art-thumb').forEach(img => {
-    getFileSrc(img.dataset.url, img);
-    img.addEventListener('click', () => applyOnlineArt(img.dataset.url));
-  });
-
-  // Surface SteamGridDB status so a missing source is never a silent mystery.
-  if (res.hasSgdb && res.sgdbCount === 0) {
-    showArtNotice('SteamGridDB is enabled but returned no art for this search. Check Settings → Open Logs Folder.');
-  } else if (!res.hasSgdb) {
-    showArtNotice('SteamGridDB off - add your free key in Settings to see custom art.');
-  }
-}
-
-function applyOnlineArt(url) {
+async function applyOnlineArt(url, art) {
   if (!url) return;
   if (onlineArtMode === 'logo') {
-    modalLogoPath = url;
-    const lImg = document.getElementById('edit-logo-preview-img');
-    getFileSrc(url, lImg);
-    lImg.style.display = 'block';
-    showToast('success', 'Logo Applied', 'This image will be used as the game logo.');
+    const applied = await chooseLogo(url, Boolean(art?.animated) || /\.gif(?:$|[?#])/i.test(url));
+    if (applied) {
+      showToast('success', 'Logo Applied', 'This image will be used as the game logo.');
+    }
   } else {
     modalWallpaperPath = url;
-    const wImg = document.getElementById('edit-wallpaper-preview-img');
-    getFileSrc(url, wImg);
-    wImg.style.display = 'block';
+    setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), url);
     showToast('success', 'Wallpaper Applied', 'This image will be used as the background.');
   }
   closeOnlineArtPicker();
 }
 
 export function closeOnlineArtPicker() {
-  document.getElementById('online-art-overlay').classList.add('hidden');
+  closeArtPicker();
 }
 
-document.getElementById('btn-online-logo').addEventListener('click', () => openOnlineArtPicker('logo'));
-document.getElementById('btn-online-wallpaper').addEventListener('click', () => openOnlineArtPicker('wallpaper'));
-document.getElementById('btn-online-art-go').addEventListener('click', runOnlineArtSearch);
-document.getElementById('btn-online-art-cancel').addEventListener('click', closeOnlineArtPicker);
-document.getElementById('online-art-search').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); runOnlineArtSearch(); }
+document.getElementById('btn-online-logo').addEventListener('click', () => {
+  onlineArtMode = 'logo';
+  openArtPicker('logo', { apply: applyOnlineArt });
 });
+document.getElementById('btn-online-wallpaper').addEventListener('click', () => {
+  onlineArtMode = 'wallpaper';
+  openArtPicker('wallpaper', { apply: applyOnlineArt });
+});
+document.getElementById('btn-online-art-cancel').addEventListener('click', closeOnlineArtPicker);
+
+initArtPicker();
 
 // Browse for .exe — pick a single file and auto-fill the form
 document.getElementById('btn-browse-exe').addEventListener('click', async () => {
@@ -662,28 +592,71 @@ document.getElementById('btn-pick-exe').addEventListener('click', async () => {
 document.getElementById('input-exe')?.addEventListener('change', () => refreshLaunchTargetHint());
 
 document.getElementById('btn-pick-logo').addEventListener('click', async () => {
-  if (!editingGameId) return;
   try {
-    const p = await window.vault.pickLogo(editingGameId);
-    if (p) {
-      modalLogoPath = p;
-      const img = document.getElementById('edit-logo-preview-img');
-      getFileSrc(modalLogoPath, img);
-      img.style.display = 'block';
-    }
+    // While adding there is no id yet; the backend files artwork by folder name,
+    // exactly as the wallpaper picker already does for a new game.
+    const p = await window.vault.pickLogo(editingGameId || 'new_' + Date.now());
+    if (p) await chooseLogo(p);
   } catch (err) {
     showToast('error', 'Logo Error', err);
   }
 });
 
+function setGifPolicy(gameId, path, policy) {
+  try {
+    const key = `${gameId || 'new'}:${path}`;
+    const policies = JSON.parse(localStorage.getItem('silo.gifPolicies') || '{}');
+    if (policy) policies[key] = policy;
+    else delete policies[key];
+    localStorage.setItem('silo.gifPolicies', JSON.stringify(policies));
+  } catch { /* storage may be disabled */ }
+}
+
+async function chooseLogo(path, animated = /\.gif(?:$|[?#])/i.test(path)) {
+  let policy = null;
+  if (animated) {
+    const decision = await new Promise((resolve) => {
+      const prior = document.getElementById('btn-pick-logo');
+      const overlay = document.getElementById('gif-policy-overlay');
+      const dialog = overlay.querySelector('[role="dialog"]') || overlay;
+      overlay.classList.remove('hidden');
+      dialog.setAttribute('aria-modal', 'true');
+      const close = (value) => {
+        overlay.classList.add('hidden');
+        document.removeEventListener('keydown', onKey);
+        prior?.focus?.();
+        resolve(value);
+      };
+      const onKey = (event) => {
+        if (event.key === 'Escape') { event.preventDefault(); close(null); return; }
+        if (event.key !== 'Tab') return;
+        const controls = [...dialog.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter(el => el.getClientRects().length);
+        if (!controls.length) { event.preventDefault(); dialog.focus(); return; }
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+      };
+      document.addEventListener('keydown', onKey);
+      overlay.querySelector('[data-policy="once"]').onclick = () => close('once');
+      overlay.querySelector('[data-policy="loop"]').onclick = () => close('loop');
+      overlay.querySelector('[data-policy="cancel"]').onclick = () => close(null);
+      overlay.querySelector('[data-policy="once"]').focus();
+    });
+    if (!decision) return false;
+    policy = decision;
+  }
+  modalLogoPath = path;
+  stagedGifPolicy = { path, policy };
+  setAssetPreview(document.getElementById('edit-logo-preview-img'), path);
+  return true;
+}
+
 document.getElementById('btn-pick-wallpaper-modal').addEventListener('click', async () => {
   try {
     const p = await window.vault.pickWallpaper(editingGameId || 'new_' + Date.now());
-    if (p) { 
-      modalWallpaperPath = p; 
-      const img = document.getElementById('edit-wallpaper-preview-img');
-      getFileSrc(modalWallpaperPath, img);
-      img.style.display = 'block';
+    if (p) {
+      modalWallpaperPath = p;
+      setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), modalWallpaperPath);
     }
   } catch (err) {
     showToast('error', 'Wallpaper Error', err);
@@ -691,6 +664,7 @@ document.getElementById('btn-pick-wallpaper-modal').addEventListener('click', as
 });
 
 document.getElementById('btn-modal-cancel').addEventListener('click', () => {
+  stagedGifPolicy = null;
   showPage('home');
 });
 
@@ -720,12 +694,25 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
       if (!isNaN(backupCount) && backupCount >= 1 && backupCount <= 50) updates.backupCount = backupCount;
       const u = await window.vault.updateGame(editingGameId, updates);
       const idx = allGames.findIndex(g => g.id === editingGameId);
-      if (idx !== -1 && u) allGames[idx] = u;
+      const priorLogo = idx === -1 ? null : allGames[idx].logoPath;
+      if (priorLogo && priorLogo !== modalLogoPath) setGifPolicy(editingGameId, priorLogo, null);
+      if (stagedGifPolicy?.path === modalLogoPath) setGifPolicy(editingGameId, stagedGifPolicy.path, stagedGifPolicy.policy);
+      stagedGifPolicy = null;
+      if (!u) throw new Error('The game record was not found, so nothing was changed.');
+      if (idx !== -1) allGames[idx] = u;
       applyCategoryFilter(false);
-      if (detailsOpen && games[selectedIndex]?.id === editingGameId) renderDetails(u);
+      // Repaint the panel from the stored record. The dock buttons and the Edit
+      // modal read the object they were rendered with, so leaving the old one
+      // in place made the next Edit start from the pre-edit values.
+      const fresh = games.find(x => x.id === editingGameId) || u;
+      if (detailsOpen && fresh) renderDetails(fresh);
+      void refreshInstallStatus(editingGameId);
       showToast('success', 'Updated', `${name} saved`);
     } else {
       const g = await window.vault.addGame({ name, exePath, wallpaper: modalWallpaperPath, logoPath: modalLogoPath, fontFamily: fontFamily || undefined, fontColor: fontColor || undefined, savePath: savePath || null, launchTarget: pendingLaunchTarget || null });
+      if (!g) throw new Error('Game was not added');
+      if (stagedGifPolicy?.path === modalLogoPath) setGifPolicy(g.id, stagedGifPolicy.path, stagedGifPolicy.policy);
+      stagedGifPolicy = null;
       if (g && tags.length) {
         try {
           const updated = await window.vault.updateGame(g.id, { tags });
@@ -734,7 +721,13 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
       }
       allGames.push(g);
       applyCategoryFilter(false);
-      setSelectedIndex(games.length - 1);
+      const addedIndex = games.findIndex(x => x.id === g.id);
+      setSelectedIndex(addedIndex !== -1 ? addedIndex : Math.max(0, games.length - 1));
+      // The new game is the focused one, so the panel must be rendered from it:
+      // otherwise it keeps the previously selected game (and editing from it
+      // would rename that game instead).
+      if (detailsOpen && games[selectedIndex]) renderDetails(games[selectedIndex]);
+      void refreshInstallStatus(g.id);
       showToast('success', 'Added', `${name} added to SILO`);
     }
 
@@ -747,4 +740,3 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
     showToast('error', 'Save Failed', err);
   }
 });
-
