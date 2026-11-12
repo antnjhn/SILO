@@ -1,4 +1,5 @@
 mod commands;
+pub mod discovery;
 pub mod display;
 pub mod game_launch;
 pub mod gaming_lifecycle;
@@ -85,6 +86,16 @@ pub fn run() {
             metadata::fetch_metadata,
             metadata::sgdb_search_games,
             metadata::sgdb_art,
+            metadata::auto_art_for_game,
+            metadata::preview_art,
+            discovery::get_discovery_state,
+            discovery::discovery_add_folder,
+            discovery::discovery_remove_folder,
+            discovery::discovery_set_enabled,
+            discovery::discover_games,
+            discovery::record_discovery_decision,
+            discovery::clear_discovery_decision,
+            discovery::reset_ignored_discoveries,
             library_import::import_steam_library,
             library_import::import_epic_library,
             library_import::import_gog_library

@@ -21,6 +21,7 @@ import { bindStatPopoverHover, hideStatPopoverNow, isStatPopoverOpen } from './s
 import { applyShowGameTitles } from './settings.js';
 import { offerSetupIfPending } from './migrate.js';
 import { initGamepadPolling } from './gamepad.js';
+import { initDiscovery } from './discovery.js';
 import { initDisplayMonitoring } from './display.js';
 import { showPage, currentPage } from './pages.js';
 import { rememberedGameId, rememberedPage } from './uistate.js';
@@ -46,6 +47,9 @@ async function init() {
   applyCategoryFilter();
   initNav();
   initGamepadPolling();
+  // Folders the user registered in Settings are scanned in the background; any
+  // genuinely new game is offered one prompt at a time, long after first paint.
+  initDiscovery();
 
   // Verify the library only once the UI is on screen, so the app opens
   // instantly; badges appear when the backend answers. requestIdleCallback keeps

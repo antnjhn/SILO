@@ -618,9 +618,353 @@ pub async fn sgdb_art(
     Ok(art_page)
 }
 
+/* ── Automatic artwork for a new game ───────────────────────────────────────
+After a game is created, SILO asks SteamGridDB for its catalogue and takes
+the first logo and the first hero, in the API's own order. Two rules keep
+this honest:
+
+* the autocomplete hit has to be a confident match for the title, otherwise
+  no art is applied at all (sequels and remasters share too many words for
+  "first result" to be safe);
+* each image is downloaded into the same wallpapers folder the manual logo /
+  wallpaper pickers write to, so the game record holds a local file exactly
+  as if the user had chosen it — the remote URL is never stored.
+
+Every failure is reported in `reason` and leaves the field empty; adding a
+game never fails because artwork could not be fetched.
+───────────────────────────────────────────────────────────────────────── */
+
+/// Token-overlap score a candidate title needs before its artwork is used. At
+/// 60 a sequel still qualifies only when it really is the same words; a hit
+/// that merely shares one word does not.
+pub const AUTO_ART_MIN_CONFIDENCE: u8 = 60;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoArtResult {
+    /// Local path now stored on the game, when one was applied.
+    pub logo: Option<String>,
+    pub wallpaper: Option<String>,
+    /// The updated game record so the renderer can refresh its list entry.
+    pub game: Option<serde_json::Value>,
+    /// Why artwork was not applied, for the log and the modal hint.
+    pub reason: Option<String>,
+}
+
+impl AutoArtResult {
+    fn skipped(reason: impl Into<String>) -> Self {
+        AutoArtResult {
+            logo: None,
+            wallpaper: None,
+            game: None,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtPreview {
+    pub logo: Option<String>,
+    pub wallpaper: Option<String>,
+}
+
+/// Drops bracketed segments (`(1993)`, `[Remastered]`): SteamGridDB titles often
+/// carry a year or edition there, and that is metadata, not the title.
+fn without_bracketed(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0i32;
+    for ch in text.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Number tokens in a title, which is what separates a game from its sequel.
+/// Arabic and Roman numerals both count: "Hades II" is not "Hades".
+fn number_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    const ROMAN: [&str; 10] = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"];
+    without_bracketed(&text.to_lowercase())
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .filter(|token| token.chars().all(|c| c.is_ascii_digit()) || ROMAN.contains(token))
+        .map(str::to_string)
+        .collect()
+}
+
+/// True when the autocomplete hit is close enough to the title being added.
+///
+/// Word overlap alone is not enough: "Portal" against "Portal 2" scores 67, and
+/// applying the sequel's art to the first game is exactly the wrong result. A
+/// title whose numbers differ is never a confident match, so sequels,
+/// remasters numbered differently, and year suffixes are left for the user.
+pub fn is_confident_title_match(query: &str, candidate: &str) -> bool {
+    name_similarity(query, candidate) >= AUTO_ART_MIN_CONFIDENCE && number_tokens(query) == number_tokens(candidate)
+}
+
+/// The first art in API order. SteamGridDB returns its relevance ordering, so
+/// "first" is a decision of the API, never of ours.
+pub fn first_art(arts: Vec<SgdbArt>) -> Option<SgdbArt> {
+    arts.into_iter().next()
+}
+
+/// File extension for a downloaded asset: the URL's own extension when it has
+/// a usable one, else what the API said the bytes are, else png.
+pub fn art_extension(url: &str, mime: &str) -> &'static str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let from_url = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match from_url.as_str() {
+        "png" => return "png",
+        "jpg" | "jpeg" => return "jpg",
+        "webp" => return "webp",
+        "gif" => return "gif",
+        _ => {}
+    }
+    match mime.to_ascii_lowercase().as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    }
+}
+
+// One automatic attempt per game per app run: reopening the Edit modal must not
+// spend another API request on a game whose artwork is already settled.
+static AUTO_ART_ATTEMPTED: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+
+fn claim_auto_art_attempt(game_id: &str) -> bool {
+    let seen = AUTO_ART_ATTEMPTED.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    match seen.lock() {
+        Ok(mut guard) => guard.insert(game_id.to_string()),
+        Err(poisoned) => poisoned.into_inner().insert(game_id.to_string()),
+    }
+}
+
+// Preview lookups for the discovery prompt are cached per title: the prompt can
+// be re-shown (dismissed candidate) without asking SteamGridDB again.
+static PREVIEW_CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, ArtPreview>>> = OnceLock::new();
+
+async fn search_best_match(client: &reqwest::Client, key: &str, title: &str) -> Option<SgdbGame> {
+    let games = sgdb_games(client, key, title).await;
+    let best = order_sgdb_games(title, games).into_iter().next()?;
+    if is_confident_title_match(title, &best.name) {
+        Some(best)
+    } else {
+        log::info!(
+            "auto-art: '{}' matched '{}' ({}) which is not close enough to use",
+            title,
+            best.name,
+            name_similarity(title, &best.name)
+        );
+        None
+    }
+}
+
+async fn fetch_first_art(client: &reqwest::Client, key: &str, game_id: &str, kind: &str) -> Option<SgdbArt> {
+    let url = sgdb_art_url(kind, game_id, 0, 10);
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", key))
+        .send()
+        .await
+        .map_err(|error| log::warn!("auto-art: {} request failed: {}", kind, error))
+        .ok()?;
+    if !response.status().is_success() {
+        log::warn!("auto-art: {} -> HTTP {}", kind, response.status());
+        return None;
+    }
+    let json = response.json::<serde_json::Value>().await.ok()?;
+    first_art(parse_sgdb_art_page(&json, 0, 10).arts)
+}
+
+async fn download_art(app: &AppHandle, game_id: &str, kind: &str, art: &SgdbArt) -> Result<String, String> {
+    let bytes = crate::commands::fetch_wallpaper_bytes(art.url.clone()).await?;
+    let dir = crate::commands::get_wallpapers_dir(app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create the artwork folder: {}", e))?;
+    let ext = art_extension(&art.url, &art.mime);
+    let file_name = if kind == "logo" {
+        format!("logo_{}.{}", game_id, ext)
+    } else {
+        format!("{}.{}", game_id, ext)
+    };
+    let dest = dir.join(file_name);
+    std::fs::write(&dest, bytes).map_err(|e| format!("Could not save the artwork: {}", e))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Fetches and stores the first logo and the first hero for a game that has no
+/// artwork yet. Only empty fields are filled (`set_game_artwork` refuses to
+/// replace an existing image), so a manual choice is never overwritten.
+#[tauri::command]
+pub async fn auto_art_for_game(app: AppHandle, game_id: String) -> AutoArtResult {
+    let games = crate::commands::get_games(app.clone());
+    let Some(game) = games.iter().find(|g| g.id == game_id).cloned() else {
+        return AutoArtResult::skipped("That game is no longer in the library.");
+    };
+
+    let has_logo = game.logo_path.as_deref().is_some_and(|p| !p.trim().is_empty());
+    let has_wallpaper = game.wallpaper.as_deref().is_some_and(|p| !p.trim().is_empty());
+    if has_logo && has_wallpaper {
+        return AutoArtResult {
+            logo: game.logo_path.clone(),
+            wallpaper: game.wallpaper.clone(),
+            game: serde_json::to_value(&game).ok(),
+            reason: None,
+        };
+    }
+
+    // A missing key is not an attempt: adding the key later in this same run
+    // must still let the next game fetch its artwork.
+    let key = match sgdb_api_key(&app) {
+        Ok(key) => key,
+        Err(reason) => return AutoArtResult::skipped(reason),
+    };
+    if !claim_auto_art_attempt(&game_id) {
+        return AutoArtResult::skipped("Artwork for this game was already looked up in this session.");
+    }
+
+    let client = match sgdb_client() {
+        Ok(client) => client,
+        Err(reason) => return AutoArtResult::skipped(reason),
+    };
+    let Some(match_game) = search_best_match(&client, &key, &game.name).await else {
+        return AutoArtResult::skipped(format!(
+            "SteamGridDB has no confident match for \"{}\". Pick the art manually.",
+            game.name
+        ));
+    };
+
+    let mut notes: Vec<String> = Vec::new();
+    let mut logo_path = None;
+    let mut wallpaper_path = None;
+
+    if !has_logo {
+        match fetch_first_art(&client, &key, &match_game.id, "logos").await {
+            Some(art) => match download_art(&app, &game_id, "logo", &art).await {
+                Ok(path) => logo_path = Some(path),
+                Err(error) => notes.push(format!("logo: {}", error)),
+            },
+            None => notes.push("no logo found".to_string()),
+        }
+    }
+    if !has_wallpaper {
+        match fetch_first_art(&client, &key, &match_game.id, "heroes").await {
+            Some(art) => match download_art(&app, &game_id, "wallpaper", &art).await {
+                Ok(path) => wallpaper_path = Some(path),
+                Err(error) => notes.push(format!("hero: {}", error)),
+            },
+            None => notes.push("no hero found".to_string()),
+        }
+    }
+
+    let updated = crate::commands::set_game_artwork(&app, &game_id, logo_path.clone(), wallpaper_path.clone())
+        .ok()
+        .flatten();
+
+    AutoArtResult {
+        logo: updated.as_ref().and_then(|g| g.logo_path.clone()).or(logo_path),
+        wallpaper: updated.as_ref().and_then(|g| g.wallpaper.clone()).or(wallpaper_path),
+        game: updated.as_ref().and_then(|g| serde_json::to_value(g).ok()),
+        reason: if notes.is_empty() { None } else { Some(notes.join("; ")) },
+    }
+}
+
+/// First logo and first hero for a name, as remote thumbnails only. Used by the
+/// discovery prompt so a candidate can show what it will look like; nothing is
+/// downloaded or stored here.
+#[tauri::command]
+pub async fn preview_art(app: AppHandle, name: String) -> ArtPreview {
+    let cache_key = name.trim().to_ascii_lowercase();
+    if let Some(hit) = PREVIEW_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+    {
+        return hit;
+    }
+
+    let empty = ArtPreview {
+        logo: None,
+        wallpaper: None,
+    };
+    let Ok(key) = sgdb_api_key(&app) else {
+        return empty;
+    };
+    let Ok(client) = sgdb_client() else {
+        return empty;
+    };
+    let Some(match_game) = search_best_match(&client, &key, &name).await else {
+        return empty;
+    };
+    let logo = fetch_first_art(&client, &key, &match_game.id, "logos")
+        .await
+        .map(|art| art.thumb);
+    let wallpaper = fetch_first_art(&client, &key, &match_game.id, "heroes")
+        .await
+        .map(|art| art.thumb);
+    let preview = ArtPreview { logo, wallpaper };
+    if preview.logo.is_some() || preview.wallpaper.is_some() {
+        if let Ok(mut cache) = PREVIEW_CACHE
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+        {
+            cache.insert(cache_key, preview.clone());
+        }
+    }
+    preview
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_art_takes_the_first_result_in_api_order() {
+        let json = serde_json::json!({
+            "data": [
+                { "id": 1, "url": "https://cdn2.steamgriddb.com/logo/first.png", "thumb": "t1", "width": 512, "height": 512 },
+                { "id": 2, "url": "https://cdn2.steamgriddb.com/logo/second.png", "thumb": "t2", "width": 1024, "height": 1024 },
+                { "id": 3, "url": "https://cdn2.steamgriddb.com/logo/third.png", "thumb": "t3", "width": 2048, "height": 2048 }
+            ],
+            "total": 3
+        });
+        let page = parse_sgdb_art_page(&json, 0, 10);
+        let chosen = first_art(page.arts).expect("one art");
+        assert_eq!(chosen.id, 1, "the API's first result must win, never a random one");
+        assert!(chosen.url.ends_with("first.png"));
+    }
+
+    #[test]
+    fn automatic_art_needs_a_confident_title_match() {
+        assert!(is_confident_title_match("Hades", "Hades"));
+        assert!(is_confident_title_match("hades", "HADES"));
+        // A subtitle is still the same game…
+        assert!(is_confident_title_match("The Witcher 3", "The Witcher 3: Wild Hunt"));
+        // …but a different number is always a different game.
+        assert!(!is_confident_title_match("Portal", "Portal 2"));
+        assert!(!is_confident_title_match("Hades II", "Hades"));
+        assert!(!is_confident_title_match("Grand Theft Auto V", "Grand Theft Auto IV"));
+        assert!(!is_confident_title_match("The Witcher 3", "Cyberpunk 2077"));
+        // A bracketed year is edition metadata, not a different game.
+        assert!(is_confident_title_match("Doom", "DOOM (1993)"));
+        assert!(is_confident_title_match("The Witcher 3", "The Witcher 3 (2015)"));
+    }
+
+    #[test]
+    fn art_extension_prefers_the_url_and_falls_back_to_the_mime() {
+        assert_eq!(art_extension("https://x/y/logo.png", "image/webp"), "png");
+        assert_eq!(art_extension("https://x/y/hero.webp?t=1", ""), "webp");
+        assert_eq!(art_extension("https://x/y/asset", "image/jpeg"), "jpg");
+        assert_eq!(art_extension("https://x/y/asset", "image/gif"), "gif");
+        assert_eq!(art_extension("https://x/y/asset", ""), "png");
+    }
 
     #[test]
     fn name_similarity_identical_is_100() {

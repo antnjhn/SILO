@@ -35,6 +35,7 @@ async function openSettingsModal() {
   } catch (err) {
     console.error(err);
   }
+  await loadDiscovery();
 }
 
 function currentCloseBehaviour() {
@@ -110,6 +111,120 @@ document.getElementById('input-dynamic-accent')?.addEventListener('change', (e) 
 
 document.getElementById('btn-settings-close').addEventListener('click', () => {
   showPage('home');
+});
+
+/* ── Automatic Game Discovery ───────────────────────────────────────────────
+   Configured folders live in discovery.json (never in games.json). The section
+   only ever writes that file, so saving settings cannot disturb the library. */
+
+function discoveryRow(label, title, actionLabel, onAction) {
+  const row = document.createElement('li');
+  row.className = 'discovery-folder';
+  const text = document.createElement('span');
+  text.className = 'discovery-folder-path';
+  text.textContent = label;
+  text.title = title || label;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'settings-ghost';
+  button.textContent = actionLabel;
+  button.addEventListener('click', onAction);
+  row.append(text, button);
+  return row;
+}
+
+function renderDiscovery(state) {
+  if (!state) return;
+  const enabled = document.getElementById('input-discovery-enabled');
+  if (enabled) enabled.checked = !!state.enabled;
+
+  const list = document.getElementById('discovery-folder-list');
+  if (list) {
+    list.replaceChildren();
+    for (const folder of state.folders || []) {
+      list.append(discoveryRow(folder, folder, 'Remove', async () => {
+        try {
+          renderDiscovery(await window.vault.discoveryRemoveFolder(folder));
+          showToast('success', 'Folder Removed', 'SILO will not scan that folder again.');
+        } catch (err) {
+          showToast('error', 'Remove Failed', err);
+        }
+      }));
+    }
+    const empty = document.getElementById('discovery-empty');
+    if (empty) empty.hidden = (state.folders || []).length > 0;
+  }
+
+  const ignoredWrap = document.getElementById('discovery-ignored-wrap');
+  const ignoredList = document.getElementById('discovery-ignored-list');
+  const ignored = state.ignored || [];
+  if (ignoredWrap) ignoredWrap.hidden = ignored.length === 0;
+  if (ignoredList) {
+    ignoredList.replaceChildren();
+    for (const entry of ignored) {
+      const label = entry.name || entry.exePath || entry.key;
+      ignoredList.append(discoveryRow(label, entry.exePath, 'Reconsider', async () => {
+        try {
+          renderDiscovery(await window.vault.clearDiscoveryDecision(entry.key));
+          showToast('info', 'Reconsidered', 'SILO can offer that game again on the next start.');
+        } catch (err) {
+          showToast('error', 'Update Failed', err);
+        }
+      }));
+    }
+  }
+
+  const sub = document.getElementById('discovery-status-sub');
+  if (sub) {
+    const count = (state.folders || []).length;
+    sub.textContent = !state.enabled
+      ? 'Scanning is off. Registered folders are kept but never scanned.'
+      : count === 0
+        ? 'SILO looks for installed games in the folders below and always asks before adding one.'
+        : `Scanning ${count} folder${count === 1 ? '' : 's'} at startup. SILO always asks before adding a game.`;
+  }
+}
+
+async function loadDiscovery() {
+  try {
+    renderDiscovery(await window.vault.getDiscoveryState());
+  } catch (err) {
+    console.warn('Could not load discovery settings', err);
+  }
+}
+
+document.getElementById('input-discovery-enabled')?.addEventListener('change', async (e) => {
+  try {
+    renderDiscovery(await window.vault.discoverySetEnabled(e.target.checked));
+  } catch (err) {
+    showToast('error', 'Save Failed', err);
+  }
+});
+
+document.getElementById('btn-discovery-add-folder')?.addEventListener('click', async () => {
+  let folder = null;
+  try {
+    folder = await window.vault.pickSaveFolder();
+  } catch (err) {
+    showToast('error', 'Folder Error', err);
+    return;
+  }
+  if (!folder) return;
+  try {
+    renderDiscovery(await window.vault.discoveryAddFolder(folder));
+    showToast('success', 'Folder Added', 'SILO will look for new games there on the next start.');
+  } catch (err) {
+    showToast('error', 'Folder Not Added', err);
+  }
+});
+
+document.getElementById('btn-discovery-reset-ignored')?.addEventListener('click', async () => {
+  try {
+    renderDiscovery(await window.vault.resetIgnoredDiscoveries());
+    showToast('success', 'Ignored Games Reset', 'Every rejected game can be offered again.');
+  } catch (err) {
+    showToast('error', 'Reset Failed', err);
+  }
 });
 // API key show/hide — visible eye-toggle instead of a permanently masked field.
 document.getElementById('btn-toggle-key-visibility')?.addEventListener('click', () => {

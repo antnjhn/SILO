@@ -45,6 +45,16 @@ window.vault = {
   sgdbArt: (gameId, kind, page, limit) => invoke('sgdb_art', { gameId, kind, page, limit }),
   discoverUninstallers: (gameId) => invoke('discover_uninstallers', { gameId }),
   runUninstallerCandidate: (gameId, candidateId) => invoke('run_uninstaller_candidate', { gameId, candidateId }),
+  autoArtForGame: (gameId) => invoke('auto_art_for_game', { gameId }),
+  previewArt: (name) => invoke('preview_art', { name }),
+  getDiscoveryState: () => invoke('get_discovery_state'),
+  discoveryAddFolder: (path) => invoke('discovery_add_folder', { path }),
+  discoveryRemoveFolder: (path) => invoke('discovery_remove_folder', { path }),
+  discoverySetEnabled: (enabled) => invoke('discovery_set_enabled', { enabled }),
+  discoverGames: () => invoke('discover_games'),
+  recordDiscoveryDecision: (candidate, state) => invoke('record_discovery_decision', { candidate, state }),
+  clearDiscoveryDecision: (key) => invoke('clear_discovery_decision', { key }),
+  resetIgnoredDiscoveries: () => invoke('reset_ignored_discoveries'),
 };
 /* Resolve an asset path to a plain URL without touching an <img>. */
 export function getSrcUrl(path) {

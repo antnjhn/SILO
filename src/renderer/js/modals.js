@@ -3,7 +3,7 @@ import { allGames, games, selectedIndex, setSelectedIndex } from './state.js';
 import { showToast, esc, parseTags } from './utils.js';
 import { getFileSrc } from './api.js';
 import { initArtPicker, openArtPicker, closeArtPicker } from './artpicker.js';
-import { showPage } from './pages.js';
+import { showPage, currentPage } from './pages.js';
 import {
   applyCategoryFilter, renderGameList, renderDetails, updateGameListSelection,
   centerActiveItem, syncRailInstant, crossfadeWallpaper, detailsOpen,
@@ -21,6 +21,16 @@ let pendingLaunchTarget = null;   // Edit-modal selection: 'auto' | 'launcher' |
    style.css; no inline display is written, so opening a different modal can
    never inherit the previous game's image (and a cleared field clears both the
    class and the source). */
+/* Small status line under the artwork boxes: says what SILO is doing while it
+   fetches artwork for a brand-new game, and why nothing arrived when it could
+   not find any. */
+function setArtworkHint(text) {
+  const hint = document.getElementById('artwork-hint');
+  if (!hint) return;
+  hint.textContent = text || '';
+  hint.hidden = !text;
+}
+
 function setAssetPreview(img, path) {
   if (!img) return;
   img.style.display = '';
@@ -111,6 +121,7 @@ export function openAddModal() {
 
   setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), null);
   setAssetPreview(document.getElementById('edit-logo-preview-img'), null);
+  setArtworkHint(null);
   updateTitlePreview();
 
   showPage('import');
@@ -144,6 +155,7 @@ export function openEditModal(g) {
   // and a stored logo/wallpaper is visible.
   setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), modalWallpaperPath);
   setAssetPreview(document.getElementById('edit-logo-preview-img'), modalLogoPath);
+  setArtworkHint(null);
   updateTitlePreview();
 
   showPage('import');
@@ -679,6 +691,7 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
   const inp = document.getElementById('input-name');
   if (!name) { inp.style.borderColor = 'rgba(255,100,100,0.6)'; setTimeout(() => inp.style.borderColor = '', 1500); inp.focus(); return; }
 
+  let created = null;
   try {
     if (editingGameId) {
       const updates = {
@@ -729,14 +742,79 @@ document.getElementById('btn-modal-save').addEventListener('click', async () => 
       if (detailsOpen && games[selectedIndex]) renderDetails(games[selectedIndex]);
       void refreshInstallStatus(g.id);
       showToast('success', 'Added', `${name} added to SILO`);
+      created = g;
     }
 
     updateGameListSelection();
     centerActiveItem(true);
     syncRailInstant();
     crossfadeWallpaper();
-    showPage('home');
+    // A brand-new game goes straight into Edit so its artwork and details can be
+    // finished in one pass; an edit closes back to the library as before.
+    if (created) startGameOnboarding(created);
+    else showPage('home');
   } catch (err) {
     showToast('error', 'Save Failed', err);
   }
 });
+
+/* ── New-game onboarding ────────────────────────────────────────────────────
+   Add Game → the record is saved → Edit opens for that exact game → its first
+   SteamGridDB logo and hero are fetched and shown in place. Fetching is best
+   effort: a missing key, no match or a failed download leaves the field empty,
+   shows the reason, and never undoes the newly created game.
+   ───────────────────────────────────────────────────────────────────────── */
+export async function startGameOnboarding(game) {
+  if (!game) {
+    showPage('home');
+    return;
+  }
+  openEditModal(game);
+  await applyAutomaticArtwork(game.id);
+}
+
+async function applyAutomaticArtwork(gameId) {
+  setArtworkHint('Looking for a logo and wallpaper on SteamGridDB…');
+  let result = null;
+  try {
+    result = await window.vault.autoArtForGame(gameId);
+  } catch (err) {
+    // The game exists either way: artwork is an extra, never a condition.
+    console.warn('Automatic artwork failed', err);
+    setArtworkHint(
+      editingGameId === gameId && currentPage() === 'import'
+        ? 'SteamGridDB could not be reached. Pick artwork manually below.'
+        : null,
+    );
+    return;
+  }
+
+  // The record may have gained artwork on disk: keep the list entry identical
+  // to what a restart would load, so the rail logo matches the Edit preview.
+  if (result && result.game) {
+    const idx = allGames.findIndex(g => g.id === gameId);
+    if (idx !== -1) allGames[idx] = result.game;
+    renderGameList();
+    updateGameListSelection();
+    syncRailInstant();
+  }
+
+  // The user may have cancelled or moved to another game while this ran; in
+  // that case nothing is written into the modal they are now looking at.
+  const stillEditingThisGame = editingGameId === gameId && currentPage() === 'import';
+  if (!stillEditingThisGame) {
+    setArtworkHint(null);
+    return;
+  }
+
+  if (result?.logo) {
+    modalLogoPath = result.logo;
+    setAssetPreview(document.getElementById('edit-logo-preview-img'), result.logo);
+  }
+  if (result?.wallpaper) {
+    modalWallpaperPath = result.wallpaper;
+    setAssetPreview(document.getElementById('edit-wallpaper-preview-img'), result.wallpaper);
+  }
+  // What arrived is already on screen; the hint only explains what did not.
+  setArtworkHint(result?.reason || null);
+}

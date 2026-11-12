@@ -78,7 +78,7 @@ fn get_data_path(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap().join("games.json")
 }
 
-fn get_wallpapers_dir(app: &AppHandle) -> PathBuf {
+pub(crate) fn get_wallpapers_dir(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap().join("wallpapers")
 }
 
@@ -105,7 +105,7 @@ fn normalize_save_path(path: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(canonical.to_string_lossy().into_owned()))
 }
 
-fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), String> {
+pub(crate) fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), String> {
     let data_path = get_data_path(app);
     if let Some(parent) = data_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -534,6 +534,67 @@ pub fn update_game(app: AppHandle, id: String, updates: serde_json::Value) -> Re
     } else {
         Ok(None)
     }
+}
+
+/// Fill in artwork that is still missing on a game. Used by automatic artwork
+/// selection: a field that already holds an image (a manual choice, or one the
+/// user picked in the Edit modal) is never replaced, so opening this for an
+/// existing game cannot overwrite artwork.
+/// Fills only the artwork slots that are still empty and reports whether
+/// anything changed. An existing path — a manual pick, an earlier automatic
+/// download, the same art already stored — is never replaced.
+pub(crate) fn fill_missing_art(
+    logo_path: &mut Option<String>,
+    wallpaper: &mut Option<String>,
+    new_logo: Option<String>,
+    new_wallpaper: Option<String>,
+) -> bool {
+    fn is_blank(value: &Option<String>) -> bool {
+        value.as_deref().unwrap_or("").trim().is_empty()
+    }
+    let mut changed = false;
+    if let Some(logo) = new_logo.filter(|path| !path.trim().is_empty()) {
+        if is_blank(logo_path) {
+            *logo_path = Some(logo);
+            changed = true;
+        }
+    }
+    if let Some(wall) = new_wallpaper.filter(|path| !path.trim().is_empty()) {
+        if is_blank(wallpaper) {
+            *wallpaper = Some(wall);
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub(crate) fn set_game_artwork(
+    app: &AppHandle,
+    game_id: &str,
+    logo_path: Option<String>,
+    wallpaper: Option<String>,
+) -> Result<Option<Game>, String> {
+    let mut games = get_games(app.clone());
+    let Some(game) = games.iter_mut().find(|game| game.id == game_id) else {
+        return Ok(None);
+    };
+
+    let changed = {
+        let mut logo = game.logo_path.clone();
+        let mut wall = game.wallpaper.clone();
+        let changed = fill_missing_art(&mut logo, &mut wall, logo_path, wallpaper);
+        if changed {
+            game.logo_path = logo;
+            game.wallpaper = wall;
+        }
+        changed
+    };
+
+    let updated = game.clone();
+    if changed {
+        save_games_atomic(app, &games)?;
+    }
+    Ok(Some(updated))
 }
 
 /// Inspect the configured exe and report whether it looks like a launcher and
@@ -3561,10 +3622,16 @@ pub struct ScannedGame {
 
 #[tauri::command]
 pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String> {
+    scan_folder_core(&folder_path)
+}
+
+/// The scan itself, callable off the command thread. Automatic discovery reuses
+/// this so "what counts as a game executable" has exactly one definition.
+pub fn scan_folder_core(folder_path: &str) -> Result<Vec<ScannedGame>, String> {
     use std::collections::HashMap;
     use walkdir::WalkDir;
 
-    let folder = std::path::Path::new(&folder_path);
+    let folder = std::path::Path::new(folder_path);
 
     if !folder.exists() || !folder.is_dir() {
         return Err("Invalid folder path".into());
@@ -3580,11 +3647,7 @@ pub async fn scan_folder(folder_path: String) -> Result<Vec<ScannedGame>, String
 
     let mut candidates: Vec<ExeCandidate> = Vec::new();
 
-    for entry in WalkDir::new(&folder_path)
-        .max_depth(5)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(folder).max_depth(5).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -7817,5 +7880,40 @@ mod tests {
             parse_art_host("https://CDN2.SteamGridDB.com/a.jpg?next=https://evil.com"),
             Ok("cdn2.steamgriddb.com".to_string())
         );
+    }
+
+    #[test]
+    fn automatic_art_never_replaces_manual_artwork() {
+        let mut logo = Some("C:/chosen/logo.png".to_string());
+        let mut wallpaper = Some("C:/chosen/bg.jpg".to_string());
+        let changed = fill_missing_art(
+            &mut logo,
+            &mut wallpaper,
+            Some("C:/auto/logo.png".to_string()),
+            Some("C:/auto/bg.webp".to_string()),
+        );
+        assert!(!changed, "a full game must not be rewritten");
+        assert_eq!(logo.as_deref(), Some("C:/chosen/logo.png"));
+        assert_eq!(wallpaper.as_deref(), Some("C:/chosen/bg.jpg"));
+    }
+
+    #[test]
+    fn automatic_art_fills_only_the_empty_slots() {
+        let mut logo: Option<String> = None;
+        let mut wallpaper = Some("   ".to_string());
+        let changed = fill_missing_art(
+            &mut logo,
+            &mut wallpaper,
+            Some("C:/auto/logo.png".to_string()),
+            Some("C:/auto/bg.webp".to_string()),
+        );
+        assert!(changed);
+        assert_eq!(logo.as_deref(), Some("C:/auto/logo.png"));
+        assert_eq!(wallpaper.as_deref(), Some("C:/auto/bg.webp"));
+
+        // Nothing new to offer, and nothing to erase.
+        assert!(!fill_missing_art(&mut logo, &mut wallpaper, None, None));
+        assert_eq!(logo.as_deref(), Some("C:/auto/logo.png"));
+        assert_eq!(wallpaper.as_deref(), Some("C:/auto/bg.webp"));
     }
 }
