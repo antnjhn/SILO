@@ -195,4 +195,14 @@ SaveGuard watches these locations for save files:
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
-MIT. Do whatever you want with it.
+### Original Software
+
+The original SILO source code and project documentation are licensed under the [MIT License](LICENSE) (Copyright (c) 2026 Anton John).
+
+### Branding
+
+The name "SILO", the SILO logo, and all associated branding are **all rights reserved** and are **not** covered by the MIT License. See [TRADEMARKS.md](TRADEMARKS.md) for brand exclusions and usage guidelines.
+
+### Third-Party Assets
+
+Third-party dependencies, fonts, and artwork are distributed under their respective licenses. The Inter font is licensed under the SIL Open Font License 1.1. All other third-party licenses are listed in `Cargo.lock` and `package-lock.json`.

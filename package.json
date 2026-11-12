@@ -1,7 +1,8 @@
 {
   "name": "silo-launcher",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A fast, aesthetic game launcher with controller support",
+  "license": "MIT",
   "main": "src/main/main.js",
   "scripts": {
     "start": "tauri dev",
