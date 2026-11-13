@@ -45,3 +45,63 @@ halo-dfd/
 .opencode/
 __pycache__/
 *.pyc
+
+# Personal reference images & design docs (kept locally, not published)
+/PIC/
+/docs/*.png
+/DESIGN.md
+/PRODUCT.md
+/MEASUREMENT_REPORT.md
+/installer/mockup.html
+
+# Debug screenshots
+/silo-*-screenshot*.png
+/verify-*.png
+/verify-shots/
+
+# Logs & temporary build output
+/tauri-dev-*.txt
+/tauri-dev.err
+/src-tauri/build-output.txt
+/src-tauri/test-output.txt
+
+# Local agent tooling
+/.agents/
+/.cloud-attachments/
+/unslop/
+/unslop-tmp/
+/skills-lock.json
+.freebuff/
+
+# Dev/installer scratch (preserved locally; not part of the build)
+/append_*.py
+/build_nsi.py
+/build-installer.ps1
+/finalize.ps1
+/query_playnite.py
+/three_game_search.py
+/three_game_search_report.json
+/extract_litedb*.py
+/measure_memory.ps1
+/diag_*.exe
+/diag_*.nsi
+/test_*.exe
+/test_*.nsi
+/test_minimal_install/
+/test_mui_install/
+/test_mui_install2/
+/final-test/
+
+# Unfinished custom-uninstaller track (preserved locally, not part of the build)
+/src-tauri/installer-template.nsi
+/src-tauri/icons/installer-*.png
+/src-tauri/icons/installer-*.bmp
+/src-tauri/icons/uninstaller-*
+/src-tauri/icons/bg_*.bmp
+/src-tauri/icons/sidebar_*.bmp
+/src-tauri/icons/sidebar_*.png
+/src-tauri/icons/inter-*.woff2
+
+# Mangled one-off checkpoint artifacts
+*checkpoint-2026-11-04*
+/tatus*
