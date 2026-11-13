@@ -326,6 +326,11 @@ mod tests {
         let _ = fs::remove_file(outside);
     }
 
+    // Windows identity (volume serial + file index) reliably distinguishes a
+    // replaced file. Unix identity is (device, inode), and a filesystem may
+    // legitimately hand the freed inode straight back to the replacement, so
+    // replacement detection cannot be asserted deterministically there.
+    #[cfg(windows)]
     #[test]
     fn identity_detects_replacement_even_when_size_and_timestamp_match() {
         let dir = std::env::temp_dir().join(format!("silo-identity-{}", uuid::Uuid::new_v4()));
