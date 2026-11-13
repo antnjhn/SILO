@@ -341,6 +341,11 @@ mod tests {
         let first = identity(&file, &root).expect("first identity");
         fs::remove_file(&file).expect("remove first file");
         fs::write(&file, b"same contents").expect("replacement");
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("mark executable again");
+        }
         let second = identity(&file, &root).expect("replacement identity");
         assert_ne!(first.3, second.3);
         let _ = fs::remove_dir_all(dir);
