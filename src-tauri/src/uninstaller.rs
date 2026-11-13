@@ -304,13 +304,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("silo-uninstaller-{}", uuid::Uuid::new_v4()));
         let outside = dir.with_extension("outside");
         fs::create_dir_all(&dir).expect("test dir");
-        fs::write(dir.join("remove.exe"), b"MZ").expect("test exe");
+        // The candidate name must look executable on the current platform.
+        #[cfg(windows)]
+        let candidate = dir.join("remove.exe");
+        #[cfg(not(windows))]
+        let candidate = dir.join("remove.bin");
+        fs::write(&candidate, b"MZ").expect("test exe");
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).expect("mark executable");
+        }
         fs::write(&outside, b"MZ").expect("outside file");
-        assert!(identity(&dir.join("remove.exe"), &dir.canonicalize().expect("canonical root")).is_ok());
+        assert!(identity(&candidate, &dir.canonicalize().expect("canonical root")).is_ok());
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&outside, dir.join("escape.exe")).expect("symlink");
-            assert!(identity(&dir.join("escape.exe"), &dir.canonicalize().expect("canonical root")).is_err());
+            std::os::unix::fs::symlink(&outside, dir.join("escape.bin")).expect("symlink");
+            assert!(identity(&dir.join("escape.bin"), &dir.canonicalize().expect("canonical root")).is_err());
         }
         let _ = fs::remove_dir_all(dir);
         let _ = fs::remove_file(outside);
@@ -322,6 +332,11 @@ mod tests {
         fs::create_dir_all(&dir).expect("test dir");
         let file = dir.join(if cfg!(windows) { "remove.exe" } else { "remove.bin" });
         fs::write(&file, b"same contents").expect("first file");
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("mark executable");
+        }
         let root = dir.canonicalize().expect("canonical root");
         let first = identity(&file, &root).expect("first identity");
         fs::remove_file(&file).expect("remove first file");
