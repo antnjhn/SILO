@@ -111,11 +111,11 @@ pub fn run() {
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = tauri::Manager::app_handle(window);
-                let behaviour = crate::settings::load_settings(&app).close_behaviour;
+                let behaviour = crate::settings::load_settings(app).close_behaviour;
                 match tray::close_decision(tray::is_installed(), gaming_lifecycle::is_exiting(), behaviour) {
                     tray::CloseDecision::StepAside => {
                         api.prevent_close();
-                        tray::hide_to_tray(&app);
+                        tray::hide_to_tray(app);
                     }
                     tray::CloseDecision::AllowClose => {
                         // Let the close proceed. If a gaming session owns the app,

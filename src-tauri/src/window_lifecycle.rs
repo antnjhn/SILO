@@ -915,6 +915,9 @@ mod tests {
         );
     }
 
+    // Windows requires both observations before a release; other platforms
+    // deliberately collapse destruction_observed to the registry check.
+    #[cfg(target_os = "windows")]
     #[test]
     fn a_release_is_accepted_only_when_both_observations_agree() {
         // The documented requirement: IsWindow(hwnd) == false AND the label is
@@ -974,6 +977,7 @@ mod tests {
         assert_eq!(no_handle, "no native handle was available to verify with");
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn a_partially_destroyed_window_is_never_reported_as_released() {
         // The failure branch carries the diagnostics, and RELEASED is only ever

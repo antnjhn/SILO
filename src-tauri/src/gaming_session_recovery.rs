@@ -187,6 +187,10 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    // The reopen step proves identity through Windows process tracking; on
+    // other platforms reopen_persisted deliberately reports Unsupported, so
+    // this Windows-only finalize path has no equivalent to assert.
+    #[cfg(target_os = "windows")]
     #[test]
     fn an_interrupted_session_commits_only_uncertain_minutes_and_never_twice() {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();

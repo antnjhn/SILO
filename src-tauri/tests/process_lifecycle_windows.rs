@@ -93,11 +93,16 @@ fn tracked(result: Result<DirectSpawnOutcome, app_lib::game_launch::DirectSpawnE
 }
 
 fn assert_same_windows_path(actual: &str, expected: &Path) {
-    fn strip_extended_prefix(path: &str) -> &str {
-        path.strip_prefix("\\\\?\\").unwrap_or(path)
-    }
+    // QueryFullProcessImageNameW may report an 8.3 short path (e.g. RUNNER~1 on
+    // CI), while the test builds its expectation from the long form. Canonicalize
+    // both sides so short-name and extended-prefix differences never matter.
+    let actual = std::fs::canonicalize(actual).expect("actual process image path should canonicalize");
+    let expected = std::fs::canonicalize(expected).expect("expected path should canonicalize");
     assert!(
-        strip_extended_prefix(actual).eq_ignore_ascii_case(strip_extended_prefix(expected.to_str().unwrap())),
+        actual
+            .to_str()
+            .unwrap()
+            .eq_ignore_ascii_case(expected.to_str().unwrap()),
         "path mismatch: {actual:?} != {expected:?}"
     );
 }
@@ -131,7 +136,7 @@ fn direct_spawn_round_trips_unicode_arguments_cwd_identity_priority_and_exit_cod
     args.extend(expected_args.iter().map(OsString::from));
 
     let process = tracked(spawn_direct_game(&executable, &cwd, &args, true));
-    assert_eq!(process.identity.pid != 0, true);
+    assert!(process.identity.pid != 0);
     assert_same_windows_path(
         process.identity.executable.as_deref().unwrap(),
         &executable.canonicalize().unwrap(),

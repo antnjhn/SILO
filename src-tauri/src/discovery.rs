@@ -503,6 +503,9 @@ mod tests {
         assert_eq!(normalize_path("C:\\Games\\"), "c:/games");
     }
 
+    // Windows drive-letter paths: the grouping key is built from the path
+    // components, so the cross-drive same-folder-name case only exists there.
+    #[cfg(target_os = "windows")]
     #[test]
     fn candidate_key_groups_the_same_game_in_two_roots() {
         let a = candidate_key(Path::new("C:\\Games\\Hades"), Path::new("C:\\Games\\Hades\\Hades.exe"));
@@ -520,12 +523,14 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn install_dir_is_the_folder_under_the_scan_root() {
         let dir = install_dir_for(Path::new("C:\\Games"), Path::new("C:\\Games\\Hades\\Win64\\Hades.exe"));
         assert_eq!(normalize_path(&dir.to_string_lossy()), "c:/games/hades");
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn install_dir_falls_back_to_the_root_for_a_loose_exe() {
         let dir = install_dir_for(Path::new("C:\\Games"), Path::new("C:\\Games\\Hades.exe"));

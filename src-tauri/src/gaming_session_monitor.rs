@@ -93,7 +93,12 @@ pub fn monitor_session(
     }
 
     let spawn_args = Vec::<OsString>::new();
-    let root = match crate::game_launch::spawn_direct_game(&cfg.executable, &cfg.cwd, &spawn_args, true) {
+    // The elevation-fallback argument exists only in the Windows spawn adapter.
+    #[cfg(windows)]
+    let spawn_result = crate::game_launch::spawn_direct_game(&cfg.executable, &cfg.cwd, &spawn_args, true);
+    #[cfg(not(windows))]
+    let spawn_result = crate::game_launch::spawn_direct_game(&cfg.executable, &cfg.cwd, &spawn_args);
+    let root = match spawn_result {
         Ok(crate::game_launch::DirectSpawnOutcome::Tracked(process)) => {
             on_spawn_confirmed(process.identity.pid);
             process

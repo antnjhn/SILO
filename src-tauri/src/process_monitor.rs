@@ -176,7 +176,12 @@ mod platform {
 pub use platform::{reopen_persisted, PlatformTrackedProcess as TrackedProcess};
 
 #[cfg(not(windows))]
-pub struct TrackedProcess;
+pub struct TrackedProcess {
+    /// Present only so shared call sites compile. Process tracking is not
+    /// implemented on this platform: `open` always fails, so no value of this
+    /// type can ever exist and this identity is never populated or observed.
+    pub identity: ProcessIdentity,
+}
 
 #[cfg(not(windows))]
 impl TrackedProcess {
@@ -186,6 +191,12 @@ impl TrackedProcess {
 
     pub fn poll(&self) -> ProcessStatus {
         ProcessStatus::Unknown(UnknownReason::Unsupported)
+    }
+
+    /// Unsupported platform: no process can be tracked, so no exit code can
+    /// ever be observed.
+    pub fn exit_code(&self) -> Result<Option<u32>, ProcessStatus> {
+        Err(ProcessStatus::Unknown(UnknownReason::Unsupported))
     }
 }
 
