@@ -3205,16 +3205,15 @@ pub async fn launch_game(app: AppHandle, game_id: String) -> Result<(), String> 
         // with elevation fallback for executables that require administrator rights.
         // The window stays visible until a valid tracking target is established.
         let spawn_args: Vec<std::ffi::OsString> = Vec::new();
-        let spawn_result =
-            crate::game_launch::spawn_direct_game(Path::new(&exe_path), &working_dir, &spawn_args, true);
+        // The elevation-fallback argument exists only in the Windows spawn adapter.
+        #[cfg(windows)]
+        let spawn_result = crate::game_launch::spawn_direct_game(Path::new(&exe_path), working_dir, &spawn_args, true);
+        #[cfg(not(windows))]
+        let spawn_result = crate::game_launch::spawn_direct_game(Path::new(&exe_path), working_dir, &spawn_args);
 
         let (game_pid, _tracked_process) = match spawn_result {
-            Ok(crate::game_launch::DirectSpawnOutcome::Tracked(process)) => {
-                (Some(process.identity.pid), Some(process))
-            }
-            Ok(crate::game_launch::DirectSpawnOutcome::LaunchedButTrackingUncertain {
-                pid, ..
-            }) => (pid, None),
+            Ok(crate::game_launch::DirectSpawnOutcome::Tracked(process)) => (Some(process.identity.pid), Some(process)),
+            Ok(crate::game_launch::DirectSpawnOutcome::LaunchedButTrackingUncertain { pid, .. }) => (pid, None),
             Err(error) => {
                 log::error!("Game launch failed for {}: {:?}", game_id_clone, error);
                 return;
@@ -3520,10 +3519,14 @@ pub fn window_maximize(window: tauri::Window) {
 #[tauri::command]
 pub fn window_close(window: tauri::Window) {
     let app = window.app_handle();
-    let behaviour = crate::settings::load_settings(&app).close_behaviour;
-    match crate::tray::close_decision(crate::tray::is_installed(), crate::gaming_lifecycle::is_exiting(), behaviour) {
+    let behaviour = crate::settings::load_settings(app).close_behaviour;
+    match crate::tray::close_decision(
+        crate::tray::is_installed(),
+        crate::gaming_lifecycle::is_exiting(),
+        behaviour,
+    ) {
         crate::tray::CloseDecision::StepAside => {
-            crate::tray::hide_to_tray(&app);
+            crate::tray::hide_to_tray(app);
         }
         crate::tray::CloseDecision::AllowClose => {
             let _ = window.close();

@@ -189,7 +189,7 @@ pub fn discover_uninstallers(app: AppHandle, game_id: String) -> Result<Vec<Unin
             },
         ));
     }
-    found.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    found.sort_by_key(|(name, ..)| name.to_lowercase());
     found.truncate(MAX_CANDIDATES);
     let mut candidates = store().lock().map_err(|_| "Candidate store unavailable".to_string())?;
     candidates.retain(|_, (created, _)| created.elapsed() < TTL);

@@ -131,7 +131,7 @@ fn direct_spawn_round_trips_unicode_arguments_cwd_identity_priority_and_exit_cod
     args.extend(expected_args.iter().map(OsString::from));
 
     let process = tracked(spawn_direct_game(&executable, &cwd, &args, true));
-    assert_eq!(process.identity.pid != 0, true);
+    assert!(process.identity.pid != 0);
     assert_same_windows_path(
         process.identity.executable.as_deref().unwrap(),
         &executable.canonicalize().unwrap(),

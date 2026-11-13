@@ -2,6 +2,7 @@
 //!
 //! The direct-spawn adapter is used only by the opt-in Windows Gaming Mode path.
 
+#[cfg(windows)]
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -41,7 +42,7 @@ pub fn spawn_direct_game(
     let command_line = make_windows_command_line(executable.as_os_str(), args);
     let mut command_line: Vec<u16> = command_line.encode_wide().chain(Some(0)).collect();
     let mut dir: Vec<u16> = cwd.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut startup = STARTUPINFOW {
+    let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
     };
@@ -58,7 +59,7 @@ pub fn spawn_direct_game(
             CREATE_NO_WINDOW | HIGH_PRIORITY_CLASS,
             None,
             windows::core::PCWSTR(dir.as_mut_ptr()),
-            &mut startup,
+            &startup,
             &mut info,
         )
     };
@@ -114,13 +115,14 @@ fn spawn_with_elevation(executable: &Path, cwd: &Path) -> Result<DirectSpawnOutc
 
     let result = unsafe { ShellExecuteExW(&mut info) };
     if result.is_err() {
-        return Err(DirectSpawnError::Spawn(std::io::Error::last_os_error().into()));
+        return Err(DirectSpawnError::Spawn(std::io::Error::last_os_error()));
     }
 
     if info.hProcess == HANDLE::default() {
-        return Err(DirectSpawnError::Spawn(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "elevated process handle missing").into(),
-        ));
+        return Err(DirectSpawnError::Spawn(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "elevated process handle missing",
+        )));
     }
     let h_process = info.hProcess;
     let pid = unsafe { GetProcessId(h_process) };
@@ -339,7 +341,7 @@ pub fn classify_launch(inputs: LaunchInputs<'_>) -> LaunchClassification {
                     let configured_name = configured.file_name().map(|n| n.to_string_lossy().to_lowercase());
                     let is_launcher = configured_name
                         .as_deref()
-                        .map_or(false, crate::commands::is_launcher_like);
+                        .is_some_and(crate::commands::is_launcher_like);
                     if !is_launcher {
                         LaunchClassification::DirectGame {
                             executable: configured.to_path_buf(),
@@ -392,7 +394,11 @@ pub fn find_target_descendant<'a>(
         let Some(depth) = ancestor_depth(candidate.pid, root_pid, processes) else {
             continue;
         };
-        if best.is_none_or(|(best_depth, _)| depth < best_depth) {
+        let improves_best = match best {
+            Some((best_depth, _)) => depth < best_depth,
+            None => true,
+        };
+        if improves_best {
             best = Some((depth, candidate));
         }
     }
