@@ -56,15 +56,15 @@ SILO turns your PC into a console dashboard. Kick back with a gamepad, browse a 
 
 ## Install
 
-**Windows:** Download `SILO_0.2.3_x64-setup.exe` (NSIS installer) from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page and run it.
+**Windows:** Download `SILO_0.5.1_x64-setup.exe` (NSIS installer) from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page and run it.
 
-**Linux:** Download `SILO_0.2.3_amd64.deb` or `SILO_0.2.3_amd64.AppImage` from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page.
+**Linux:** Download `SILO_0.5.1_amd64.deb` or `SILO_0.5.1_amd64.AppImage` from the [Releases](https://github.com/antnjhn/SILO/releases/latest) page.
 
 | File | Type | Platform |
 |------|------|----------|
-| `SILO_0.2.3_x64-setup.exe` | NSIS installer | Windows |
-| `SILO_0.2.3_amd64.deb` | Debian package | Ubuntu, Debian, Mint, etc. |
-| `SILO_0.2.3_amd64.AppImage` | AppImage | Any Linux distro |
+| `SILO_0.5.1_x64-setup.exe` | NSIS installer | Windows |
+| `SILO_0.5.1_amd64.deb` | Debian package | Ubuntu, Debian, Mint, etc. |
+| `SILO_0.5.1_amd64.AppImage` | AppImage | Any Linux distro |
 
 > Windows may show a SmartScreen warning because the binary is unsigned. Click **More info** then **Run anyway**. That's expected for indie software without a code-signing certificate.
 
