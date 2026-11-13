@@ -97,6 +97,7 @@ Page custom ProgressPage
 Page custom FinishPage
 
 UninstPage custom un.IntroPage
+UninstPage custom un.ConfirmPage
 UninstPage custom un.ProgressPage
 UninstPage custom un.DonePage
 
@@ -376,6 +377,13 @@ FunctionEnd
 
 Function un.GoNext
   GetDlgItem $0 $HWNDPARENT 1
+  ${If} $0 != 0
+    SendMessage $0 0x00F5 0 0
+  ${EndIf}
+FunctionEnd
+
+Function un.GoBack
+  GetDlgItem $0 $HWNDPARENT 2
   ${If} $0 != 0
     SendMessage $0 0x00F5 0 0
   ${EndIf}
@@ -696,23 +704,23 @@ Section "Uninstall"
 SectionEnd
 
 ; --- Uninstaller: intro ----------------------------------------------------
+; Mockup page 6: "Leaving already?" with Keep SILO / Continue.
 Function un.IntroPage
   Call un.PageFrame
 
   Call un.RailLogo
 
   Call un.Backdrop
-  Call un.RailText
 
-  !insertmacro HEAD "UNINSTALL" "Remove SILO?" "This removes the SILO application from your computer."
+  !insertmacro HEAD "UNINSTALL" "Leaving already?" "This will remove SILO from your computer."
 
-  !insertmacro BODY "Your library, artwork, saves, backups and settings are kept." ${CX} 186 ${CW}
-  !insertmacro BODY "You can reinstall at any time and pick up where you left off." ${CX} 206 ${CW}
+  !insertmacro BODY "Continue only if you're sure you want to uninstall the" ${CX} 186 ${CW}
+  !insertmacro BODY "application." ${CX} 206 ${CW}
 
-  !insertmacro FOOT "UNINSTALL   VERSION ${APP_VERSION}"
+  !insertmacro FOOT "SILO   VERSION ${APP_VERSION}"
 
-  !insertmacro FLATBTN $SecX $BtnY 112 ${BTN_H} "Cancel" ${TEXT_SUB} ${BTN_DARK} un.CancelUninstall
-  !insertmacro FLATBTN $PriX $BtnY 124 ${BTN_H} "Uninstall" ${ACCENT_INK} ${ACCENT} un.IntroNext
+  !insertmacro FLATBTN $SecX $BtnY 112 ${BTN_H} "Keep SILO" ${TEXT_SUB} ${BTN_DARK} un.CancelUninstall
+  !insertmacro FLATBTN $PriX $BtnY 124 ${BTN_H} "Continue" ${ACCENT_INK} ${ACCENT} un.IntroNext
 
   nsDialogs::Show
 FunctionEnd
@@ -725,16 +733,46 @@ Function un.CancelUninstall
   Call un.GoCancel
 FunctionEnd
 
+; --- Uninstaller: confirm --------------------------------------------------
+; Mockup page 7: "One last thing." with Go Back / Uninstall.
+Function un.ConfirmPage
+  Call un.PageFrame
+
+  Call un.RailLogo
+
+  Call un.Backdrop
+
+  !insertmacro HEAD "UNINSTALL" "One last thing." "Make sure you're ready to remove SILO."
+
+  !insertmacro BODY "Your library, artwork, saves, backups and settings are kept." ${CX} 186 ${CW}
+  !insertmacro BODY "Only the application itself is removed." ${CX} 206 ${CW}
+
+  !insertmacro FOOT "YOUR LIBRARY AND SAVES ARE NOT TOUCHED"
+
+  !insertmacro FLATBTN $SecX $BtnY 112 ${BTN_H} "Go Back" ${TEXT_SUB} ${BTN_DARK} un.ConfirmBack
+  !insertmacro FLATBTN $PriX $BtnY 124 ${BTN_H} "Uninstall" ${ACCENT_INK} ${ACCENT} un.ConfirmNext
+
+  nsDialogs::Show
+FunctionEnd
+
+Function un.ConfirmBack
+  Call un.GoBack
+FunctionEnd
+
+Function un.ConfirmNext
+  Call un.GoNext
+FunctionEnd
+
 ; --- Uninstaller: work -----------------------------------------------------
+; Mockup page 8: "Removing SILO." with a progress bar.
 Function un.ProgressPage
   Call un.PageFrame
 
   Call un.RailLogo
 
   Call un.Backdrop
-  Call un.RailText
 
-  !insertmacro HEAD "REMOVING" "Taking SILO out." "Cleaning up the application files."
+  !insertmacro HEAD "UNINSTALLING" "Removing SILO." "Removing application components from your system…"
 
   !insertmacro BODY "Removing application files..." ${CX} 232 ${CW}
 
@@ -802,20 +840,20 @@ Function un.ProgressTick
 FunctionEnd
 
 ; --- Uninstaller: done -----------------------------------------------------
+; Mockup page 9: "Until next time." with Close.
 Function un.DonePage
   Call un.PageFrame
 
   Call un.RailLogo
 
   Call un.Backdrop
-  Call un.RailText
 
-  !insertmacro HEAD "UNINSTALLED" "SILO has been removed." "Your library is still where you left it."
+  !insertmacro HEAD "UNINSTALLED" "Until next time." "SILO has been uninstalled."
 
-  !insertmacro BODY "Games, artwork, saves, backups and settings are untouched." ${CX} 186 ${CW}
-  !insertmacro BODY "Reinstall any time and everything will pick up where it left off." ${CX} 206 ${CW}
+  !insertmacro BODY "Thanks for giving your game library a home with us." ${CX} 186 ${CW}
+  !insertmacro BODY "Your library data was kept and can be picked up on reinstall." ${CX} 206 ${CW}
 
-  !insertmacro FOOT "THANK YOU FOR USING SILO"
+  !insertmacro FOOT "SILO   VERSION ${APP_VERSION}"
 
   !insertmacro FLATBTN $PriX $BtnY 124 ${BTN_H} "Close" ${ACCENT_INK} ${ACCENT} un.DoneClose
 
@@ -930,38 +968,14 @@ Function un.Backdrop
 FunctionEnd
 
 Function un.RailBackground
-  ${NSD_CreateBitmap} 0 0 250 560 ""
+  ${NSD_CreateBitmap} 0 0 250 520 ""
   Pop $0
-  ${NSD_SetImage} $0 "$PLUGINSDIR\rail.bmp" $ImageHandle
+  ${NSD_SetImage} $0 "$PLUGINSDIR\unrail.bmp" $ImageHandle
   System::Call 'user32::SetWindowPos(p $0, p 1, i 0, i 0, i 0, i 0, i 0x0013)'
 FunctionEnd
 
 Function un.RailLogo
   Call un.RailBackground
-FunctionEnd
-
-Function un.RailText
-  !insertmacro RAILRULE
-
-  ${NSD_CreateLabel} 16 268 218 18 "Every game."
-  Pop $0
-  ${NSD_AddStyle} $0 ${SS_CENTER}
-  SendMessage $0 0x0030 $FontTag 1
-  SetCtlColors $0 ${FAINT} 0x0E0C16
-  System::Call 'user32::GetWindowLongW(p $0, i -20) i.r1'
-  IntOp $1 $1 & 0xFFFFFFDF
-  System::Call 'user32::SetWindowLongW(p $0, i -20, i r1)'
-  System::Call 'user32::SetWindowPos(p $0, p 0, i 0, i 0, i 0, i 0, i 0x0013)'
-
-  ${NSD_CreateLabel} 16 288 218 18 "Its own place."
-  Pop $0
-  ${NSD_AddStyle} $0 ${SS_CENTER}
-  SendMessage $0 0x0030 $FontTag 1
-  SetCtlColors $0 ${FAINT} 0x0E0C16
-  System::Call 'user32::GetWindowLongW(p $0, i -20) i.r1'
-  IntOp $1 $1 & 0xFFFFFFDF
-  System::Call 'user32::SetWindowLongW(p $0, i -20, i r1)'
-  System::Call 'user32::SetWindowPos(p $0, p 0, i 0, i 0, i 0, i 0, i 0x0013)'
 FunctionEnd
 
 Function un.SetPct
@@ -977,6 +991,7 @@ FunctionEnd
 
 Function un.onInit
   InitPluginsDir
+  File /oname=$PLUGINSDIR\unrail.bmp "gen\uninstall_rail.bmp"
 
   !insertmacro MKFONT $FontH1    32 400
   !insertmacro MKFONT $FontSub   14 400

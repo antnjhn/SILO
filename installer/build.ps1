@@ -160,6 +160,28 @@ function New-RailBmp {
 }
 New-RailBmp -Out (Join-Path $gen 'rail_bg.bmp') -Icon $icon
 
+# Uninstall rail: the mockup's uninstall sidebar (246x471 PNG) scaled to cover
+# the uninstaller's 250x520 rail area, centre-cropped so the aspect is kept.
+function New-UninstallRailBmp {
+    param([string]$Source, [string]$Out, [int]$W = 250, [int]$H = 520)
+    if (-not (Test-Path $Source)) { throw "Uninstall sidebar not found at $Source." }
+    $img = [System.Drawing.Image]::FromFile($Source)
+    $bmp = New-Object System.Drawing.Bitmap($W, $H, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.Clear([System.Drawing.Color]::FromArgb(255, 6, 6, 7))
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $scale = [Math]::Max($W / $img.Width, $H / $img.Height)
+    $dw = [int][Math]::Ceiling($img.Width * $scale)
+    $dh = [int][Math]::Ceiling($img.Height * $scale)
+    $g.DrawImage($img, [int](($W - $dw) / 2), [int](($H - $dh) / 2), $dw, $dh)
+    $g.Dispose()
+    $img.Dispose()
+    $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Bmp)
+    $bmp.Dispose()
+}
+New-UninstallRailBmp -Source (Join-Path $here 'assets\uninstall\sidebar-uninstall.png') -Out (Join-Path $gen 'uninstall_rail.bmp')
+
 New-CheckBmp -Out (Join-Path $gen 'check_on.bmp')  -Checked $true
 New-CheckBmp -Out (Join-Path $gen 'check_off.bmp') -Checked $false
 Write-Host "  logo bmps: $gen"
