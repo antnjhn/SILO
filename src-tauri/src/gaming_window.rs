@@ -25,6 +25,7 @@
 //! The Tauri API is still called, but only to keep tao's internal flag
 //! bookkeeping in sync with the OS. The authoritative change is the Win32 one.
 
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]

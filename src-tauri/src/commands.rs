@@ -5,8 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
-#[cfg(not(target_os = "windows"))]
-use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
