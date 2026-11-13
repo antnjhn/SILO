@@ -31,6 +31,7 @@ use std::time::Duration;
 use tauri::Manager;
 
 /// How long a caller waits for the UI thread to run a visibility change.
+#[cfg(target_os = "windows")]
 const UI_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the OS reports about a window's visibility.
