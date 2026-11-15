@@ -85,6 +85,46 @@ export function showToast(type, title, msg, opts = {}) {
   return toast;
 }
 
+/* A determinate progress toast, for work the app is doing rather than a
+   timeout: it wears the same shell as every other notification, but its bottom
+   bar is driven by real counts instead of a countdown. Returns a handle so the
+   caller can move the bar and close it when the work ends. */
+export function showProgressToast(title, msg) {
+  const toast = showToast('info', title, msg, { persistent: true });
+  if (!toast) return { update() {}, finish() {} };
+  toast.classList.add('progress-toast');
+  toast.setAttribute('aria-live', 'polite');
+  const bar = document.createElement('div');
+  bar.className = 'toast-progress';
+  toast.appendChild(bar);
+  toast.style.setProperty('--art-progress', '0');
+  const msgEl = toast.querySelector('.toast-msg');
+  let closed = false;
+
+  const close = () => {
+    if (closed || !toast.isConnected) return;
+    closed = true;
+    toast.classList.add('leaving');
+    const kill = () => toast.remove();
+    toast.addEventListener('animationend', kill, { once: true });
+    setTimeout(kill, 400);
+  };
+
+  return {
+    update(done, total, text) {
+      if (closed || !toast.isConnected) return;
+      const share = total > 0 ? Math.min(1, Math.max(0, done / total)) : 0;
+      toast.style.setProperty('--art-progress', String(share));
+      if (text && msgEl) msgEl.textContent = text;
+    },
+    finish(text) {
+      if (text && msgEl) msgEl.textContent = text;
+      toast.style.setProperty('--art-progress', '1');
+      setTimeout(close, text ? 2600 : 400);
+    },
+  };
+}
+
 /* ── Helpers ───────────────────────────────────────────────────────────────*/
 export function fmtTime(min) {
   if (!min || min < 1) return '0h 0m';

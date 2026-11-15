@@ -47,6 +47,7 @@ function promptSlotFree() {
     'scan-results-overlay',
     'restore-overlay',
   ];
+  if (el('onboarding-overlay') && !el('onboarding-overlay').classList.contains('hidden')) return false;
   return !busyOverlays.some((id) => {
     const node = document.getElementById(id);
     return node && !node.classList.contains('hidden');
@@ -65,13 +66,26 @@ async function runDiscoveryScan() {
     candidates = await window.vault.discoverGames();
   } catch (error) {
     console.warn('Discovery scan failed', error);
-    return;
+    return [];
   }
-  state.queue = (Array.isArray(candidates) ? candidates : [])
+  const fresh = (Array.isArray(candidates) ? candidates : [])
     .filter((candidate) => candidate && candidate.key && candidate.exePath);
+  queueCandidates(fresh);
+  return fresh;
+}
+
+function queueCandidates(candidates) {
+  state.queue = candidates;
   state.index = 0;
   state.retries = 0;
   scheduleNext();
+}
+
+/* First-run setup scans while its own overlay is up, so the prompts must wait
+   for the answer. It hands the candidates over here when it closes. */
+export function startDiscoveryWith(candidates) {
+  queueCandidates((Array.isArray(candidates) ? candidates : [])
+    .filter((candidate) => candidate && candidate.key && candidate.exePath));
 }
 
 function scheduleNext() {
@@ -119,6 +133,19 @@ async function showCandidate(candidate) {
   }
   try {
     const preview = await window.vault.previewArt(candidate.name);
+    // The card wears the game's own artwork: the hero (or the capsule grid when
+    // there is no hero) fills the surface, the transparent logo sits in the
+    // thumb. Nothing is downloaded; both are remote thumbnails.
+    const card = el('discovery-card');
+    if (card) {
+      if (preview && preview.wallpaper) {
+        card.style.setProperty('--discovery-art', `url("${preview.wallpaper}")`);
+        card.classList.add('has-art');
+      } else {
+        card.style.removeProperty('--discovery-art');
+        card.classList.remove('has-art');
+      }
+    }
     const src = preview && (preview.logo || preview.wallpaper);
     if (src && art && state.queue[state.index] === candidate) {
       art.onload = () => {
@@ -184,6 +211,9 @@ async function addCandidate(candidate) {
   }
   await remember(candidate, 'added');
   await refreshLibrary();
+  // The Edit modal's lookup is best effort; if it came back empty this closes
+  // the gap instead of leaving the game as a letter until the next launch.
+  try { window.vault.sweepArt(); } catch { /* artwork is optional */ }
   hidePrompt();
   state.busy = false;
   showToast('success', 'Added', `${added.name} added to SILO`);

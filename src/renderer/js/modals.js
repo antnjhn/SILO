@@ -526,9 +526,10 @@ async function runImport(source) {
   document.getElementById('scan-results-overlay').classList.remove('hidden');
 }
 
-document.getElementById('btn-import-steam').addEventListener('click', () => runImport('Steam'));
-document.getElementById('btn-import-epic').addEventListener('click', () => runImport('Epic'));
-document.getElementById('btn-import-gog').addEventListener('click', () => runImport('GOG'));
+/* Store imports live in Settings now, so these are nil in the add/edit panel. */
+document.getElementById('btn-import-steam')?.addEventListener('click', () => runImport('Steam'));
+document.getElementById('btn-import-epic')?.addEventListener('click', () => runImport('Epic'));
+document.getElementById('btn-import-gog')?.addEventListener('click', () => runImport('GOG'));
 
 /* ── Save folder pickers in add/edit modal ──────────────────────────────────*/
 // The default line, restored every time the dialog opens so a previous lookup's
@@ -678,6 +679,11 @@ document.getElementById('btn-pick-wallpaper-modal').addEventListener('click', as
 document.getElementById('btn-modal-cancel').addEventListener('click', () => {
   stagedGifPolicy = null;
   showPage('home');
+});
+
+// The round close control in the panel head is the same dismissal as Cancel.
+document.getElementById('btn-modal-close')?.addEventListener('click', () => {
+  document.getElementById('btn-modal-cancel').click();
 });
 
 document.getElementById('btn-modal-save').addEventListener('click', async () => {

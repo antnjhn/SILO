@@ -289,6 +289,21 @@ export function applyCategoryFilter(resetIndex = true) {
   centerActiveItem(false);
   crossfadeWallpaper();
 
+  // The panel is hidden at boot when the library is empty (see init). Setup and
+  // discovery add games after that check, and until now nothing brought the
+  // panel back: the library showed tiles only, with no stats and no buttons,
+  // until the next launch. Tying its visibility to the library itself makes it
+  // appear the moment a game does.
+  const panel = document.getElementById('details-panel');
+  if (panel) {
+    if (games.length && !detailsOpen) {
+      panel.classList.remove('hidden');
+      panel.classList.add('is-preview');
+    } else if (!games.length && !detailsOpen) {
+      panel.classList.add('hidden');
+    }
+  }
+
   // Keep the preview hero in sync with the newly focused game (category/search changes).
   if (!detailsOpen && games.length) {
     const cur = games[selectedIndex];
@@ -1545,6 +1560,8 @@ export function crossfadeWallpaper() {
       if (thisGen !== wallpaperGeneration) return;
       bg1.style.opacity = '0';
       bg2.style.opacity = '0';
+      // No art on screen: the animated backdrop is the only thing left to paint.
+      document.body.classList.remove('has-wallpaper');
     }, 100);
     return;
   }
@@ -1557,6 +1574,8 @@ export function crossfadeWallpaper() {
     activeLayer.style.opacity = '0';
     
     currentBgLayer = nextLayerId;
+    // The game's own art owns the window now, so the navy halo steps aside.
+    document.body.classList.add('has-wallpaper');
     
     const staleLayer = activeLayer;
     const staleGen = thisGen;

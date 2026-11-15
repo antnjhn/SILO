@@ -159,6 +159,11 @@ function New-RailBmp {
     $bmp.Dispose()
 }
 New-RailBmp -Out (Join-Path $gen 'rail_bg.bmp') -Icon $icon
+# The uninstaller has its own mark: same rail, different tile.
+$unIcon = Join-Path $here 'assets\uninstaller-icon.png'
+if (Test-Path $unIcon) {
+    New-RailBmp -Out (Join-Path $gen 'rail_un.bmp') -Icon $unIcon
+}
 
 # Uninstall rail: the mockup's uninstall sidebar (246x471 PNG) scaled to cover
 # the uninstaller's 250x520 rail area, centre-cropped so the aspect is kept.

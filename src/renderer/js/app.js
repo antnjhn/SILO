@@ -3,7 +3,7 @@ import {
   allGames, games, selectedIndex, setAllGames, setShowGameTitles, setSearchQuery, gameNameById,
 } from './state.js';
 import { listen } from './api.js';
-import { showToast, backupTimestampLabel, esc } from './utils.js';
+import { showToast, showProgressToast, backupTimestampLabel, esc } from './utils.js';
 import {
   layoutRail, syncMotionToggle, applyCategoryFilter, renderDetails,
   retriggerHeroAnimation, runInstallCheck, toggleSearch,
@@ -22,6 +22,8 @@ import { applyShowGameTitles } from './settings.js';
 import { offerSetupIfPending } from './migrate.js';
 import { initGamepadPolling } from './gamepad.js';
 import { initDiscovery } from './discovery.js';
+import { initOnboarding } from './onboarding.js';
+import { initBackgroundMotion } from './background.js';
 import { initDisplayMonitoring } from './display.js';
 import { showPage, currentPage } from './pages.js';
 import { rememberedGameId, rememberedPage } from './uistate.js';
@@ -47,9 +49,14 @@ async function init() {
   applyCategoryFilter();
   initNav();
   initGamepadPolling();
+  // First run asks where the games live and for the SteamGridDB key before any
+  // scanning: the setup owns the screen, and only when it is not shown does the
+  // usual startup scan run here. After it closes, the setup starts discovery
+  // itself with the games it already found.
+  const onboardingShown = await initOnboarding();
   // Folders the user registered in Settings are scanned in the background; any
   // genuinely new game is offered one prompt at a time, long after first paint.
-  initDiscovery();
+  if (!onboardingShown) initDiscovery();
 
   // Verify the library only once the UI is on screen, so the app opens
   // instantly; badges appear when the backend answers. requestIdleCallback keeps
@@ -86,6 +93,60 @@ async function init() {
       if (detailsOpen && games[selectedIndex]?.id === updated.id) renderDetails(updated);
     }
     hideStatPopoverNow();
+  });
+
+  // Artwork fetched in the background after launch: swap the record in place so
+  // the rail logo, the tile and the hero pick up the new images without a
+  // restart (and without losing the current selection).
+  listen('art-updated', (event) => {
+    const updated = event.payload;
+    if (!updated || !updated.id) return;
+    const idx = allGames.findIndex(g => g.id === updated.id);
+    if (idx === -1) return;
+    allGames[idx] = updated;
+    applyCategoryFilter(false);
+    if (detailsOpen && games[selectedIndex]?.id === updated.id) renderDetails(updated);
+  });
+
+  // Artwork being fetched in the background: a notification with a bar that
+  // fills as each game is done, so a library of letter tiles is explained while
+  // it is being fixed instead of looking stuck.
+  let artProgress = null;
+  listen('art-progress', (event) => {
+    const p = event.payload || {};
+    if (p.kind === 'start') {
+      artProgress?.finish();
+      artProgress = showProgressToast(
+        'Getting artwork',
+        `0 of ${p.total} ${p.total === 1 ? 'game' : 'games'}`,
+      );
+      artProgress.update(0, p.total);
+      return;
+    }
+    // The sweep starts a few seconds after launch: its first event can land
+    // before this listener exists. Joining on the first step keeps the bar
+    // instead of dropping the whole run.
+    if (!artProgress && p.kind === 'step') {
+      artProgress = showProgressToast(
+        'Getting artwork',
+        `${p.done || 0} of ${p.total} ${p.total === 1 ? 'game' : 'games'}`,
+      );
+      artProgress.update(p.done || 0, p.total || 0);
+    }
+    if (!artProgress) return;
+    if (p.kind === 'step') {
+      artProgress.update(p.done, p.total, `${p.done} of ${p.total} ${p.total === 1 ? 'game' : 'games'}`);
+      return;
+    }
+    if (p.kind === 'done') {
+      const found = Number(p.filled) || 0;
+      artProgress.finish(
+        found
+          ? `Artwork added to ${found} of ${p.total} ${p.total === 1 ? 'game' : 'games'}`
+          : 'No artwork found for the remaining games. Pick it in Edit.',
+      );
+      artProgress = null;
+    }
   });
 
   // ── SaveGuard status events (backed by Rust launch_game) ──
@@ -263,6 +324,11 @@ function isTextField(el) {
 }
 
 document.addEventListener('keydown', e => {
+  // First-run setup owns the keyboard while it is on screen: nothing behind it
+  // should scroll, select or close.
+  const onboarding = document.getElementById('onboarding-overlay');
+  if (onboarding && !onboarding.classList.contains('hidden')) return;
+
   const isEscape = e.key === 'Escape';
 
   // ── The back hierarchy ───────────────────────────────────────────────────
@@ -452,3 +518,4 @@ document.addEventListener('keydown', e => {
 /* ── Go ────────────────────────────────────────────────────────────────────*/
 init();
 initDisplayMonitoring();
+initBackgroundMotion();

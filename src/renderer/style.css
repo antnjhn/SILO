@@ -13,12 +13,65 @@
 html, body {
   width: 100%; height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  background: #05060A;
   color: var(--text);
   font-family: var(--font-ui);
   font-size: var(--fs-body);
   user-select: none;
   -webkit-font-smoothing: antialiased;
+}
+
+/* The base colour lives on <html>, not <body>: a negative-z-index child paints
+   before its parent's own background, so an opaque <body> would hide the
+   backdrop entirely. */
+html { background: #05060A; }
+body { background: transparent; }
+
+/* ── Animated backdrop ─────────────────────────────────────────────────────
+   The one gradient in the app. A fixed base layer behind every other element
+   (the wallpaper crossfade sits on top of it once a game has artwork): one navy
+   halo around a near-black centre, breathing on a 24s alternate loop.
+
+   Only transform animates — never background-position, filter or blur, since
+   those repaint the whole window each frame. `bg-motion-paused` is set by
+   js/background.js whenever the window is hidden or unfocused, and
+   prefers-reduced-motion renders the static frame. ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -30%;
+  z-index: -1;
+  pointer-events: none;
+  transform-origin: 50% 20%;
+  background: radial-gradient(
+    58% 58% at 50% 20%,
+    #05060A 0%,
+    #05060A 20%,
+    #0B1E4A 42%,
+    #12215A 58%,
+    #1A1656 74%,
+    #0A1030 88%,
+    #05060A 100%
+  );
+  animation: siloBackgroundBreathe 24s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
+  will-change: transform;
+  transition: opacity 400ms ease;
+}
+body.bg-motion-paused::before { animation-play-state: paused; }
+/* A game with artwork owns the window: the halo is behind a photo, where it only
+   reads as a blue cast, so it is hidden until the library is empty or the
+   selected game has no wallpaper. */
+body.has-wallpaper::before { opacity: 0; }
+/* Breathing, not a pan: the halo around the centre grows and settles, which is
+   what the reference component does with a rewritten radial-gradient every
+   frame. Scaling the painted layer reaches the same look as one composited
+   transform instead of a full-window repaint per frame. */
+@keyframes siloBackgroundBreathe {
+  from { transform: scale(1); }
+  to   { transform: scale(1.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
 }
 
 /* ── Background ───────────────────────────────────────────────────────────── */
@@ -303,6 +356,10 @@ html, body {
   z-index: 999;
   pointer-events: none;
 }
+
+/* The bar sits above every overlay, so a pinned (empty library) bar would float
+   over the first-run setup. While that setup owns the screen it steps aside. */
+body.onboarding-open #topnav { display: none; }
 
 /* The dark, blurred wash that fades from the top edge down into the art. */
 /* The wash sits behind the wordmark and the navigation and fades out well
@@ -2972,6 +3029,90 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   background: var(--surface-0);
 }
 
+/* ── Settings rows ───────────────────────────────────────────────────────────
+   One column and hairline separators, not a card per section: every row states
+   what it does on the left and keeps its control on the right. The whole page
+   is a single scroll, so About sits at the bottom of the same column. */
+.set-list { display: flex; flex-direction: column; }
+.set-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.set-item:first-child { padding-top: 0; }
+.set-item-stack { display: block; }
+.set-copy { min-width: 0; }
+.set-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.set-sub-title { display: block; margin-top: 16px; font-weight: 500; color: var(--text-muted); }
+.set-desc { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--text-faint); }
+.set-desc-last { margin-top: 10px; }
+.set-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.set-item-stack .settings-toggle-row { padding: 0; }
+.set-inline-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+}
+.set-inline-row .set-desc-last { margin-top: 0; }
+.set-inline-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.set-inline-link:hover { color: var(--accent-strong); }
+
+/* The row above already closes with a hairline, so these blocks separate by
+   space only: a second rule here would read as an empty row. */
+.set-advanced,
+.set-about {
+  margin-top: 26px;
+  padding-top: 4px;
+}
+.set-group-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.set-nav-list { display: flex; flex-direction: column; }
+.set-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 13px 0;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--hairline);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.set-nav:hover { color: var(--accent); }
+.set-chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.set-app { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+.set-app-icon { width: 52px; height: 52px; border-radius: 12px; object-fit: cover; }
+.set-app-name { font-size: 18px; font-weight: 600; color: var(--text); }
+.set-app-version { margin-top: 2px; font-size: 12px; color: var(--text-faint); }
+.set-app-tag { margin: 14px 0 4px; font-size: 12px; color: var(--text-muted); }
+.set-about { padding-bottom: 10px; }
+
 /* Section separation */
 .settings-section { margin-bottom: var(--sp-5); }
 .settings-section-title {
@@ -5476,6 +5617,9 @@ body.rail-fx-instant #details-panel #details-actions {
   animation: modalIn 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 .discovery-modal {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
   grid-template-areas:
@@ -5484,6 +5628,26 @@ body.rail-fx-instant #details-panel #details-actions {
   gap: 18px 20px;
   width: min(560px, calc(100vw - 48px));
   padding: 28px;
+}
+/* The found game's own art fills the card, so the prompt reads as a game rather
+   than a dialog. One flat layer at low opacity keeps the copy readable; there is
+   no scrim gradient anywhere. */
+.discovery-modal::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--discovery-art, none);
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease;
+}
+.discovery-modal.has-art::before { opacity: 0.34; }
+.discovery-modal.has-art .discovery-art-box {
+  background: rgba(5, 6, 10, 0.4);
+  border-color: transparent;
 }
 .discovery-art-box {
   grid-area: art;
@@ -5508,16 +5672,18 @@ body.rail-fx-instant #details-panel #details-actions {
 .discovery-art-fallback[hidden] { display: none; }
 .discovery-copy { grid-area: copy; min-width: 0; }
 .discovery-eyebrow {
+  font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 1.4px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--text-faint);
 }
 .discovery-name {
   font-family: var(--font-ui);
   font-size: 21px;
-  font-weight: 700;
+  font-weight: 600;
+  letter-spacing: -0.012em;
   color: var(--text);
   margin: 6px 0;
   overflow-wrap: anywhere;
@@ -5578,4 +5744,680 @@ body.rail-fx-instant #details-panel #details-actions {
 @media (prefers-reduced-motion: reduce) {
   #discovery-overlay { transition: none; }
   #discovery-overlay:not(.hidden) .glass-panel { animation: none; opacity: 1; transform: none; }
+}
+
+/* ── First-run setup ─────────────────────────────────────────────────────────
+   One shell, four steps, flat surfaces. The only gradient on screen is the
+   app's animated backdrop showing through the flat scrim. Every panel,
+   button, input, pill and border below is a single solid colour. */
+
+#onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 530;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: rgba(5, 6, 10, 0.74);
+  transition: opacity 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+#onboarding-overlay.hidden { display: none; }
+
+.ob-shell:focus { outline: none; }
+.ob-shell {
+  position: relative;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding: 36px;
+  border-radius: 14px;
+  background: #0E0F13;
+  border: 1px solid #23242C;
+  box-shadow: none;
+  color: #F2F2F5;
+  font-family: 'Inter', system-ui, "Segoe UI", sans-serif;
+  text-align: left;
+}
+#onboarding-overlay:not(.hidden) .ob-shell {
+  animation: modalIn 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.ob-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid #2E2F38;
+  background: none;
+  color: #8A8A99;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ob-close:hover { color: #F2F2F5; border-color: #4A4B58; }
+
+/* Step indicator: three of these pills read as a small progress rail, with the
+   count spelled out beside it. */
+.ob-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 44px;
+}
+.ob-step-pill {
+  display: block;
+  width: 24px;
+  height: 4px;
+  border-radius: 2px;
+  background: #2E2F38;
+}
+.ob-step-pill.is-done { background: #4B3E99; }
+.ob-step-pill.is-current { background: #7C5CE6; }
+.ob-step-count {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #8A8A99;
+}
+
+.ob-step.hidden { display: none; }
+.ob-step { animation: obStepIn 150ms ease-out both; }
+@keyframes obStepIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.ob-title {
+  margin: 24px 0 0;
+  font-family: inherit;
+  font-size: 28px;
+  font-weight: 300;
+  letter-spacing: -0.4px;
+  line-height: 1.2;
+  color: #F2F2F5;
+}
+.ob-desc {
+  margin: 12px 0 0;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.6;
+  color: #C9C9D3;
+}
+.ob-desc code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #1A1B22;
+  border: 1px solid #23242C;
+  color: #F2F2F5;
+}
+.ob-content { margin-top: 24px; }
+
+.ob-folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ob-folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid #23242C;
+  border-radius: 8px;
+  background: transparent;
+}
+.ob-folder-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: #F2F2F5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Neutral, not destructive: removing a folder from the scan list is a
+   preference change, not a deletion. */
+.ob-folder-remove {
+  flex: 0 0 auto;
+  padding: 4px 0;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: #A6A6B3;
+  cursor: pointer;
+}
+.ob-folder-remove:hover { color: #F2F2F5; }
+
+.ob-empty {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: #8A8A99;
+}
+
+/* The add-folder button keeps its own margin so it never sits on top of the
+   empty-state line or the list. */
+#ob-add-folder {
+  display: block;
+  width: fit-content;
+  margin-top: 16px;
+}
+
+.ob-field { display: block; }
+.ob-field-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #C9C9D3;
+}
+.ob-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid #2E2F38;
+  background: #0A0B0F;
+  color: #F2F2F5;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 400;
+}
+.ob-input::placeholder { color: #8A8A99; }
+.ob-input:focus {
+  outline: 2px solid #C9BFFF;
+  outline-offset: 2px;
+  border-color: #7C5CE6;
+}
+
+.ob-link {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 400;
+  color: #A58BFF;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  cursor: pointer;
+}
+.ob-link:hover { color: #C9BFFF; }
+
+.ob-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: #8A8A99;
+}
+.ob-hint[hidden] { display: none; }
+
+/* Three square store cards, mark only: no label, no caption. The card itself is
+   the control, so the logo inherits the state colour through currentColor. */
+.ob-stores {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.ob-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  border: 1px solid #2A2735;
+  border-radius: 10px;
+  background: #12131A;
+  color: #9A93AE;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+.ob-card-mark {
+  width: 46%;
+  height: 46%;
+  fill: currentColor;
+}
+.ob-card:hover {
+  border-color: #4A3F6B;
+  background: #16171F;
+  color: #C9C9D3;
+}
+.ob-card.is-selected {
+  border-color: #7C5CE6;
+  color: #A58BFF;
+}
+.ob-card.is-selected:hover { border-color: #8D70F0; }
+.ob-card:disabled {
+  border-color: #23242C;
+  background: #101117;
+  color: #6E6A7A;
+  cursor: default;
+}
+
+.ob-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+.ob-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-family: inherit;
+  font-size: 13px;
+  background: none;
+  cursor: pointer;
+}
+.ob-btn--primary {
+  padding: 0 26px;
+  font-weight: 600;
+  background: #7C5CE6;
+  border-color: #7C5CE6;
+  color: #FFFFFF;
+  box-shadow: none;
+}
+.ob-btn--primary:hover { background: #8D70F0; border-color: #8D70F0; }
+.ob-btn--ghost {
+  padding: 0 22px;
+  font-weight: 500;
+  background: transparent;
+  border-color: #2E2F38;
+  color: #C9C9D3;
+}
+.ob-btn--ghost:hover { border-color: #4A4B58; color: #F2F2F5; }
+.ob-btn:disabled { opacity: 0.55; cursor: default; }
+
+.ob-shell :is(button, a, input, select, [tabindex]):focus-visible {
+  outline: 2px solid #C9BFFF;
+  outline-offset: 2px;
+}
+
+#ob-finish.hidden { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  #onboarding-overlay { transition: none; }
+  #onboarding-overlay:not(.hidden) .ob-shell { animation: none; opacity: 1; transform: none; }
+  .ob-step { animation: none; }
+}
+
+/* ── Add / Edit game panel ───────────────────────────────────────────────────
+   Two columns: the record on the left, its preview and artwork on the right.
+   The source row sits above both columns and the actions below them, so the
+   middle scrolls while the head and the footer stay put. Every surface is a
+   solid fill with a hairline border: no shadow, gradient or blur. */
+#modal.add-game-panel,
+#page-host #modal.add-game-panel {
+  width: min(1020px, calc(100vw - 72px));
+  max-width: calc(100vw - 72px);
+  max-height: calc(100vh - 72px);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface-0);
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+}
+.add-game-panel .ag-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 26px 28px 0;
+  flex-shrink: 0;
+}
+.add-game-panel #modal-title {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+  margin: 0 0 6px;
+}
+.add-game-panel .ag-close {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-1);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.add-game-panel .ag-close:hover { color: var(--text); border-color: var(--text-muted); }
+
+.add-game-panel .ag-sources {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 20px 28px 18px;
+  flex-shrink: 0;
+}
+.add-game-panel .ag-source-group { display: flex; align-items: center; gap: 10px; }
+.add-game-panel .ag-source-group[hidden] { display: none; }
+.add-game-panel .ag-divider { width: 1px; height: 26px; margin: 0 6px; background: var(--hairline); }
+.add-game-panel .ag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline-strong);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.add-game-panel .ag-pill:hover { border-color: var(--text-muted); }
+.add-game-panel .ag-pill-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.add-game-panel .ag-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.92fr);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 6px;
+}
+.add-game-panel .ag-col { padding: 0 28px; min-width: 0; }
+.add-game-panel .ag-col-side { border-left: 1px solid var(--hairline); }
+
+#modal.add-game-panel .field-group label,
+#page-host #modal.add-game-panel .field-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.add-game-panel .optional { font-weight: 400; color: var(--text-faint); }
+.add-game-panel input[type="text"],
+.add-game-panel input[type="number"],
+.add-game-panel select {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+.add-game-panel input[type="text"]::placeholder { color: var(--text-faint); }
+.add-game-panel input[type="text"]:focus,
+.add-game-panel input[type="number"]:focus,
+.add-game-panel select:focus { border-color: var(--accent); outline: none; }
+
+.add-game-panel .ag-name-row { display: flex; gap: 8px; align-items: center; }
+.add-game-panel .ag-name-row input { flex: 1; min-width: 0; }
+.add-game-panel .ag-autofill { flex-shrink: 0; height: 44px; }
+
+.add-game-panel .file-row { gap: 8px; }
+.add-game-panel .file-row input { flex: 1; min-width: 0; }
+.add-game-panel .file-row button,
+.add-game-panel .ag-hint-actions button {
+  height: 44px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.add-game-panel .file-row button:hover,
+.add-game-panel .ag-hint-actions button:hover { border-color: var(--text-muted); }
+
+.add-game-panel .ag-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.add-game-panel .ag-hint:empty { display: none; }
+.add-game-panel .ag-hint-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+.add-game-panel .segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 3px;
+  overflow: hidden;
+}
+.add-game-panel .segmented button {
+  height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.add-game-panel .segmented button + button { border-left: 0; }
+.add-game-panel .segmented button:hover { color: var(--text); }
+.add-game-panel .segmented button.active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+.add-game-panel .title-preview {
+  aspect-ratio: 2 / 1;
+  margin-top: 0;
+  padding: 20px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--surface-2);
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--text);
+  text-shadow: none;
+  white-space: normal;
+  overflow: hidden;
+}
+
+.add-game-panel .ag-title-row { display: flex; gap: 10px; align-items: center; }
+.add-game-panel .ag-title-row select { flex: 1; min-width: 0; }
+.add-game-panel input[type="color"] {
+  width: 52px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface-1);
+  cursor: pointer;
+}
+.add-game-panel .color-preview {
+  width: 100%;
+  min-width: 0;
+  margin-top: 10px;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.add-game-panel .asset-picker { display: flex; align-items: center; gap: 10px; }
+.add-game-panel .asset-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  background: var(--surface-1);
+  border: 1px dashed var(--hairline-strong);
+}
+.add-game-panel .asset-actions { flex-direction: row; align-items: center; gap: 10px; }
+.add-game-panel .asset-actions button {
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  cursor: pointer;
+}
+.add-game-panel .asset-actions button:hover { border-color: var(--text-muted); }
+
+.add-game-panel .ag-actions,
+#page-host #modal.add-game-panel .ag-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0;
+  padding: 18px 28px;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-0);
+  flex-shrink: 0;
+}
+.add-game-panel .ag-actions .ag-cancel,
+.add-game-panel .ag-actions .ag-save {
+  min-width: 108px;
+  height: 42px;
+  border-radius: 10px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+}
+.add-game-panel .ag-actions .ag-cancel {
+  border: 1px solid var(--hairline-strong);
+  background: transparent;
+  color: var(--text);
+}
+.add-game-panel .ag-actions .ag-save {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #0B0713;
+}
+.add-game-panel .ag-actions .ag-save:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+.add-game-panel .ag-actions .ag-cancel:hover { border-color: var(--text-muted); }
+
+/* Store marks in Settings: three squares that carry only the store logo, so the
+   row reads exactly like first-run setup. */
+.set-stores { display: flex; gap: 10px; margin-top: 14px; }
+.set-stores .ob-card {
+  width: 84px;
+  height: 84px;
+  aspect-ratio: auto;
+  flex: 0 0 auto;
+}
+.set-stores .ob-card:disabled { opacity: 0.55; cursor: default; }
+
+/* The three store marks sit as one even set of squares, so the row reads as a
+   picker rather than three panels. */
+.set-stores {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 14px;
+}
+.set-stores .ob-card {
+  flex: 0 0 108px;
+  width: 108px;
+  height: 108px;
+}
+.set-stores .ob-card-mark { width: 50%; height: 50%; }
+
+/* About carries the name and version only: the app mark already sits in the
+   title bar and on every shortcut. */
+.set-app {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 14px;
+}
+.set-app { align-items: flex-start; text-align: left; }
+
+/* About sits as a mark and a caption: the real SILO shield, then the name and
+   version stacked beside it. */
+.set-app {
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+.set-app-text { display: flex; flex-direction: column; gap: 2px; }
+.set-app-icon {
+  display: block;
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  object-fit: contain;
+}
+
+/* Artwork progress toast: the same bottom bar as the countdown, but driven by
+   the number of games fetched so far. The scale is written per update, so the
+   bar only ever moves forward and stops at full when the sweep ends. */
+.toast.progress-toast .toast-progress {
+  animation: none;
+  transform-origin: left center;
+  transform: scaleX(var(--art-progress, 0));
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.toast.progress-toast:hover .toast-progress { animation: none; }
+
+/* Reduced motion hides the countdown bar, because a bar ticking down is motion.
+   Real progress is information, not decoration: the artwork bar stays, it just
+   jumps between steps instead of easing. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) .toast.progress-toast .toast-progress {
+    display: block;
+    animation: none;
+    transition: none;
+  }
 }

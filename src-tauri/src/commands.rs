@@ -3435,6 +3435,32 @@ pub fn is_blacklisted_exe(lowercase_file_name: &str) -> bool {
     EXE_BLACKLIST.iter().any(|b| lowercase_file_name.contains(b))
 }
 
+/// Turns a folder or file name into the name a store would use: underscores and
+/// dots become spaces, runs of whitespace collapse, and the ends are trimmed.
+/// Case is left alone — `Cyberpunk 2077` must not become `cyberpunk 2077`.
+pub fn clean_game_name(raw: &str) -> String {
+    let spaced = raw.replace(['_', '.'], " ");
+    let mut out = String::with_capacity(spaced.len());
+    let mut last_was_space = false;
+    for ch in spaced.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(ch);
+            last_was_space = false;
+        }
+    }
+    let trimmed = out.trim().to_string();
+    if trimmed.is_empty() {
+        raw.trim().to_string()
+    } else {
+        trimmed
+    }
+}
+
 // Scores a candidate game executable — higher is better. Shared by scan_folder and library import.
 pub fn score_exe_candidate(stem: &str, game_dir: &str, depth: usize, size_bytes: u64) -> i32 {
     let mut score: i32 = 0;
@@ -3554,28 +3580,31 @@ pub fn scan_folder_core(folder_path: &str) -> Result<Vec<ScannedGame>, String> {
 
         let depth = entry.depth();
 
-        // Build display name from the game directory, cleaning up common folder patterns
-        let parent_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| game_dir.clone());
-
-        let display_name = {
-            let p_lower = parent_name.to_lowercase();
+        // The name the user recognises is the game's own folder under the scan
+        // root — `C:\Games\Cyberpunk 2077\bin\x64\…\Cyberpunk2077.exe` must be
+        // offered as "Cyberpunk 2077", never as the binary's parent (`x64`,
+        // `binaries`, `win64`). Only an exe sitting loose in the root falls back
+        // to its own file name, because it has no game folder to speak for it.
+        let display_name = if components.len() == 1 {
+            clean_game_name(&file_stem)
+        } else {
+            let top = clean_game_name(&components[0].as_os_str().to_string_lossy());
+            // The user may have pointed the scan at one game's own folder: then
+            // the top level is `bin`/`x64`, and the folder they picked is the
+            // name they know the game by.
             if [
-                "bin", "win64", "win32", "binaries", "system32", "x64", "x86", "game", "shipping",
+                "bin", "binaries", "win64", "win32", "x64", "x86", "system32", "game", "shipping",
+                "retail", "release",
             ]
-            .contains(&p_lower.as_str())
+            .contains(&top.to_lowercase().as_str())
             {
-                // Walk up to find a better name
-                path.parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or(game_dir.clone())
+                folder
+                    .file_name()
+                    .map(|name| clean_game_name(&name.to_string_lossy()))
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(top)
             } else {
-                parent_name
+                top
             }
         };
 
@@ -4850,6 +4879,35 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens a web link in the user's default browser.
+///
+/// Only http(s) is accepted: the renderer must never be able to hand this
+/// command a `file:` or `cmd:` URL and have the shell act on it.
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    let target = url.trim();
+    if !(target.starts_with("https://") || target.starts_with("http://")) {
+        return Err("Only web links can be opened".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // rundll32's protocol handler passes the URL through untouched, so a
+        // query string with `&` is not split the way `cmd /C start` would.
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", target])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn backup_library(app: AppHandle) -> Result<String, String> {
     let file_path = app
@@ -4950,6 +5008,41 @@ pub fn confirm_close(app: AppHandle, choice: String, remember: bool) -> Result<(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn clean_game_name_reads_like_a_title() {
+        assert_eq!(clean_game_name("Cyberpunk 2077"), "Cyberpunk 2077");
+        assert_eq!(clean_game_name("Elden_Ring"), "Elden Ring");
+        assert_eq!(clean_game_name("Portal.2"), "Portal 2");
+        assert_eq!(clean_game_name("__Hades__"), "Hades");
+        assert_eq!(clean_game_name("   "), "");
+    }
+
+    /// The name offered for a game is its own folder, never the binary's parent:
+    /// `C:\\Games\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe` is "Cyberpunk
+    /// 2077", which is what makes the SteamGridDB lookup find the right game.
+    #[test]
+    fn scan_names_a_game_after_its_folder_not_its_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "silo-scan-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let deep = root.join("Cyberpunk 2077").join("bin").join("x64");
+        std::fs::create_dir_all(&deep).unwrap();
+        // Above the 500 KB floor so the binary counts as a game executable.
+        std::fs::write(deep.join("Cyberpunk2077.exe"), vec![0u8; 600_000]).unwrap();
+
+        let found = scan_folder_core(root.to_str().unwrap()).unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Cyberpunk 2077");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// The Stage 6 gate is a pure function of the setting: the WebView is only
     /// ever destroyed when release is enabled, and the hide path is still

@@ -1,7 +1,7 @@
 /* ── settings.js — settings modal + preferences plumbing ──────────────────── */
-import { showGameTitles, setShowGameTitles } from './state.js';
+import { showGameTitles, setShowGameTitles, setAllGames } from './state.js';
 import { showToast } from './utils.js';
-import { applyMotionPref, syncMotionToggle, setForceMotion, setDynamicAccent, syncDynamicAccentToggle } from './library.js';
+import { applyMotionPref, syncMotionToggle, setForceMotion, setDynamicAccent, syncDynamicAccentToggle, applyCategoryFilter } from './library.js';
 import { showPage } from './pages.js';
 
 /* ── Settings & Backup ─────────────────────────────────────────────────────*/
@@ -236,12 +236,6 @@ document.getElementById('btn-toggle-key-visibility')?.addEventListener('click', 
   btn.textContent = show ? 'HIDE' : 'SHOW';
   btn.title = show ? 'Hide key' : 'Show key';
 });
-// Advanced section collapse (settings page)
-document.getElementById('settings-advanced-toggle')?.addEventListener('click', () => {
-  const adv = document.getElementById('settings-advanced');
-  if (adv) adv.classList.toggle('open');
-});
-
 document.getElementById('btn-save-settings').addEventListener('click', async () => {
   const sgdbApiKey = document.getElementById('input-sgdb-key').value.trim() || null;
   const checkUpdatesOnLaunch = document.getElementById('input-check-updates').checked;
@@ -254,6 +248,105 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     showToast('success', 'Settings Saved', 'Settings have been saved.');
   } catch (err) {
     showToast('error', 'Save Failed', err);
+  }
+});
+
+/* ── Store libraries ─────────────────────────────────────────────────────────
+   The three marks read the store the user already has installed. Only the
+   store that was picked is read, and its games are added through the normal
+   add path so artwork and the library refresh behave like any other add. */
+async function importStoreLibrary(source, button) {
+  const status = document.getElementById('set-import-status');
+  const cards = Array.from(document.querySelectorAll('.set-store'));
+  if (button.disabled) return;
+
+  for (const card of cards) card.disabled = true;
+  button.setAttribute('aria-pressed', 'true');
+  if (status) {
+    status.hidden = false;
+    status.textContent = `Looking through your ${source} library...`;
+  }
+
+  let candidates = [];
+  try {
+    candidates = (await window.vault[`import${source}Library`]()) || [];
+  } catch (err) {
+    console.warn('Store import failed', err);
+    if (status) status.textContent = `${source} could not be read. You can try again later.`;
+    for (const card of cards) card.disabled = false;
+    button.setAttribute('aria-pressed', 'false');
+    return;
+  }
+
+  let known = new Set();
+  try {
+    const library = (await window.vault.getGames()) || [];
+    known = new Set(library.map((game) => game.exePath).filter(Boolean));
+  } catch {
+    known = new Set();
+  }
+
+  const fresh = candidates.filter((candidate) => candidate
+    && candidate.exePath
+    && !known.has(candidate.exePath));
+
+  let added = 0;
+  for (const candidate of fresh) {
+    try {
+      const game = await window.vault.addGame({ name: candidate.name, exePath: candidate.exePath });
+      if (!game) continue;
+      added += 1;
+      try { await window.vault.autoArtForGame(game.id); } catch { /* artwork is optional */ }
+    } catch (err) {
+      console.warn(`Could not add ${candidate.name}`, err);
+    }
+  }
+
+  if (status) {
+    status.textContent = added
+      ? `${added} game${added === 1 ? '' : 's'} added from ${source}.`
+      : `Nothing new found in your ${source} library.`;
+  }
+  try {
+    setAllGames(await window.vault.getGames());
+    applyCategoryFilter(false);
+  } catch (err) {
+    console.warn('Could not refresh the library after the import', err);
+  }
+  for (const card of cards) card.disabled = false;
+  button.setAttribute('aria-pressed', 'false');
+}
+
+for (const card of document.querySelectorAll('.set-store')) {
+  card.addEventListener('click', () => importStoreLibrary(card.dataset.source, card));
+}
+
+/* ── Advanced rows and the About block at the end of the same scroll ──────── */
+const SGDB_KEY_URL = 'https://www.steamgriddb.com/profile/preferences/api';
+const RELEASES_URL = 'https://github.com/antnjhn/SILO/releases';
+const LICENSES_URL = 'https://github.com/antnjhn/SILO/blob/main/LICENSE';
+
+document.getElementById('btn-open-sgdb')?.addEventListener('click', async () => {
+  try {
+    await window.vault.openExternalUrl(SGDB_KEY_URL);
+  } catch (err) {
+    showToast('error', 'Browser Unavailable', 'Could not open steamgriddb.com.');
+  }
+});
+
+document.getElementById('btn-release-notes')?.addEventListener('click', async () => {
+  try {
+    await window.vault.openExternalUrl(RELEASES_URL);
+  } catch (err) {
+    showToast('error', 'Browser Unavailable', 'Could not open the release notes.');
+  }
+});
+
+document.getElementById('btn-open-licenses')?.addEventListener('click', async () => {
+  try {
+    await window.vault.openExternalUrl(LICENSES_URL);
+  } catch (err) {
+    showToast('error', 'Browser Unavailable', 'Could not open the license page.');
   }
 });
 

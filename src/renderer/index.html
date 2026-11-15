@@ -278,123 +278,156 @@
     </section>
     <!-- PAGE: Import games -->
     <section class="page page-centred page-import hidden" id="modal-overlay" data-page="import" aria-label="Import games" tabindex="-1" aria-hidden="true">
-      <div id="modal" class="glass-panel">
-        <div id="modal-title" class="modal-title">Add game</div>
-        <div class="modal-body">
-        <div id="scan-folder-container" style="display: flex; gap: 10px; margin-bottom: 16px;">
-          <button id="btn-browse-exe" class="btn-secondary" style="flex: 1;">Browse for .exe</button>
-          <button id="btn-scan-folder" class="btn-secondary" style="flex: 1;">Scan Folder</button>
+      <div id="modal" class="glass-panel add-game-panel">
+        <div class="ag-head">
+          <div id="modal-title" class="modal-title">Add game</div>
+          <button type="button" id="btn-modal-close" class="ag-close" aria-label="Close" title="Close">&#10005;</button>
         </div>
-        <div id="import-container" class="segmented" style="margin-bottom: 16px;">
-          <button id="btn-import-steam"><span>Steam</span></button>
-          <button id="btn-import-epic"><span>Epic</span></button>
-          <button id="btn-import-gog"><span>GOG</span></button>
-        </div>
-        <div class="field-group">
-          <label>Game Name</label>
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="text" id="input-name" placeholder="e.g. Red Dead Redemption 2" autocomplete="off" style="flex: 1;" />
-            <button id="btn-autofill" class="btn-ghost" style="display: none; flex-shrink: 0;">Auto-Fill Metadata</button>
+
+        <div class="ag-sources">
+          <div id="scan-folder-container" class="ag-source-group">
+            <button id="btn-browse-exe" class="ag-pill">
+              <svg class="ag-pill-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 4h16v16H4z" /><path d="M9 9h6v6H9z" /></svg>
+              Browse for .exe
+            </button>
+            <button id="btn-scan-folder" class="ag-pill">
+              <svg class="ag-pill-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7h6l2 2h10v10H3z" /></svg>
+              Scan folder
+            </button>
+            
           </div>
+
         </div>
-        <div class="field-group">
-          <label>Title Style <span class="optional">(optional)</span></label>
-          <div class="color-picker-row">
-            <select id="input-font">
-              <option value="">Default Font</option>
-              <option value="Inter">Inter</option>
-              <option value="Roboto">Roboto</option>
-              <option value="Outfit">Outfit</option>
-              <option value="Oswald">Oswald</option>
-              <option value="Playfair Display">Playfair Display</option>
-              <option value="Press Start 2P">Press Start 2P</option>
-              <option value="Cinzel">Cinzel</option>
-              <option value="Bebas Neue">Bebas Neue</option>
-              <option value="Arial">Arial</option>
-              <option value="Verdana">Verdana</option>
-              <option value="Tahoma">Tahoma</option>
-              <option value="Trebuchet MS">Trebuchet MS</option>
-              <option value="Times New Roman">Times New Roman</option>
-              <option value="Georgia">Georgia</option>
-              <option value="Garamond">Garamond</option>
-              <option value="Courier New">Courier New</option>
-              <option value="Impact">Impact</option>
-              <option value="Comic Sans MS">Comic Sans MS</option>
-            </select>
-            <input type="color" id="input-color" value="#ffffff" />
-            <div class="color-preview" id="color-preview-text">#ffffff</div>
-          </div>
-          <div class="title-preview" id="title-preview">Game Title</div>
-        </div>
-        <div class="field-group">
-          <label>Executable (.exe)</label>
-          <div class="file-row">
-            <input type="text" id="input-exe" placeholder="Path to .exe" readonly />
-            <button class="btn-secondary" id="btn-pick-exe">Browse</button>
-          </div>
-        </div>
-        <div class="field-group">
-          <label>Launch Target <span class="optional">(when the exe is a launcher)</span></label>
-          <div class="segmented" id="launch-target-group">
-            <button type="button" id="lt-auto">Auto</button>
-            <button type="button" id="lt-launcher">Launcher</button>
-            <button type="button" id="lt-game">Game</button>
-          </div>
-          <div id="launch-target-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;"></div>
-        </div>
-        <div class="field-group">
-          <label>Save Folder <span class="optional">(optional)</span></label>
-          <div class="file-row">
-            <input type="text" id="input-save-path" placeholder="Path to save files" readonly />
-            <button class="btn-secondary" id="btn-pick-save-path">Browse</button>
-            <button class="btn-secondary" id="btn-find-save-path">Find on this PC</button>
-            <button class="btn-ghost danger" id="btn-clear-save-path">Clear</button>
-          </div>
-          <div id="save-folder-hint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">An auto-detected save path shows here once the game is launched. If the library came from another PC, use Find on this PC.</div>
-        </div>
-        <div class="field-group">
-          <label>Logo <span class="optional">(transparent PNG)</span></label>
-          <div class="asset-picker">
-            <div class="asset-box">
-              <img id="edit-logo-preview-img" src="" alt="" />
-              <span class="asset-plus">+</span>
+
+        <div class="ag-grid">
+          <div class="ag-col">
+            <div class="field-group">
+              <label for="input-name">Game name</label>
+              <div class="ag-name-row">
+                <input type="text" id="input-name" placeholder="e.g. Red Dead Redemption 2" autocomplete="off" />
+                <button id="btn-autofill" class="btn-ghost ag-autofill" hidden>Auto-Fill Metadata</button>
+              </div>
             </div>
-            <div class="asset-actions">
-              <button class="btn-ghost" id="btn-online-logo">Search online</button>
-              <button class="btn-ghost" id="btn-pick-logo">Change</button>
+
+            <div class="field-group">
+              <label for="input-exe">Executable</label>
+              <div class="file-row">
+                <input type="text" id="input-exe" placeholder="Path to .exe" readonly />
+                <button class="btn-secondary" id="btn-pick-exe">Browse</button>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <label>Launch target <span class="optional">when the exe is a launcher</span></label>
+              <div class="segmented" id="launch-target-group">
+                <button type="button" id="lt-auto">Auto</button>
+                <button type="button" id="lt-launcher">Launcher</button>
+                <button type="button" id="lt-game">Game</button>
+              </div>
+              <div id="launch-target-hint" class="ag-hint"></div>
+            </div>
+
+            <div class="field-group">
+              <label for="input-save-path">Save folder <span class="optional">optional</span></label>
+              <div class="file-row">
+                <input type="text" id="input-save-path" placeholder="Path to save files" readonly />
+                <button class="btn-secondary" id="btn-pick-save-path">Browse</button>
+              </div>
+              <div id="save-folder-hint" class="ag-hint">An auto-detected save path shows here once the game is launched. If the library came from another PC, use Find on this PC.</div>
+              <div class="ag-hint-actions">
+                <button class="btn-secondary" id="btn-find-save-path">Find on this PC</button>
+                <button class="btn-ghost danger" id="btn-clear-save-path">Clear</button>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <label for="input-tags">Tags <span class="optional">comma-separated</span></label>
+              <input type="text" id="input-tags" placeholder="e.g. RPG, Indie, Favorites" autocomplete="off" />
+            </div>
+
+            <div class="field-group" id="backup-count-group" style="display: none;">
+              <label for="input-backup-count">Keep Last N Backups <span class="optional">1-50</span></label>
+              <input type="number" id="input-backup-count" min="1" max="50" value="5" />
             </div>
           </div>
-        </div>
-        <div class="field-group">
-          <label>Background Wallpaper <span class="optional">(optional)</span></label>
-          <div class="asset-picker">
-            <div class="asset-box">
-              <img id="edit-wallpaper-preview-img" src="" alt="" />
-              <span class="asset-plus">+</span>
+
+          <div class="ag-col ag-col-side">
+            <div class="field-group">
+              <label>Preview</label>
+              <div class="title-preview" id="title-preview">Game Title</div>
             </div>
-            <div class="asset-actions">
-              <button class="btn-ghost" id="btn-online-wallpaper">Search online</button>
-              <button class="btn-ghost" id="btn-pick-wallpaper-modal">Change</button>
+
+            <div class="field-group">
+              <label for="input-font">Title style <span class="optional">optional</span></label>
+              <div class="ag-title-row">
+                <select id="input-font">
+                  <option value="">Default font</option>
+                  <option value="Inter">Inter</option>
+                  <option value="Roboto">Roboto</option>
+                  <option value="Outfit">Outfit</option>
+                  <option value="Oswald">Oswald</option>
+                  <option value="Playfair Display">Playfair Display</option>
+                  <option value="Press Start 2P">Press Start 2P</option>
+                  <option value="Cinzel">Cinzel</option>
+                  <option value="Bebas Neue">Bebas Neue</option>
+                  <option value="Arial">Arial</option>
+                  <option value="Verdana">Verdana</option>
+                  <option value="Tahoma">Tahoma</option>
+                  <option value="Trebuchet MS">Trebuchet MS</option>
+                  <option value="Times New Roman">Times New Roman</option>
+                  <option value="Georgia">Georgia</option>
+                  <option value="Garamond">Garamond</option>
+                  <option value="Courier New">Courier New</option>
+                  <option value="Impact">Impact</option>
+                  <option value="Comic Sans MS">Comic Sans MS</option>
+                </select>
+                <input type="color" id="input-color" value="#ffffff" aria-label="Title colour" />
+              </div>
+              <div class="color-preview" id="color-preview-text">#ffffff</div>
             </div>
+
+            <div class="field-group">
+              <label>Logo <span class="optional">transparent PNG</span></label>
+              <div class="asset-picker">
+                <div class="asset-box">
+                  <img id="edit-logo-preview-img" src="" alt="" />
+                  <span class="asset-plus">+</span>
+                </div>
+                <div class="asset-actions">
+                  <button class="btn-secondary" id="btn-online-logo">Search online</button>
+                  <button class="btn-secondary" id="btn-pick-logo">Change</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <label>Background wallpaper <span class="optional">optional</span></label>
+              <div class="asset-picker">
+                <div class="asset-box">
+                  <img id="edit-wallpaper-preview-img" src="" alt="" />
+                  <span class="asset-plus">+</span>
+                </div>
+                <div class="asset-actions">
+                  <button class="btn-secondary" id="btn-online-wallpaper">Search online</button>
+                  <button class="btn-secondary" id="btn-pick-wallpaper-modal">Change</button>
+                </div>
+              </div>
+            </div>
+
+            <p id="artwork-hint" class="artwork-hint" role="status" hidden></p>
           </div>
         </div>
-        <p id="artwork-hint" class="artwork-hint" role="status" hidden></p>
-        <div class="field-group">
-          <label>Tags <span class="optional">(comma-separated)</span></label>
-          <input type="text" id="input-tags" placeholder="e.g. RPG, Indie, Favorites" autocomplete="off" />
-        </div>
-        <div class="field-group" id="backup-count-group" style="display: none;">
-          <label>Keep Last N Backups <span class="optional">(1-50)</span></label>
-          <input type="number" id="input-backup-count" min="1" max="50" value="5" />
-        </div>
-        </div>
-        <div id="modal-actions">
-          <button class="btn-ghost" id="btn-modal-cancel">Cancel</button>
-          <button class="btn-primary" id="btn-modal-save">Save</button>
+
+        <div id="modal-actions" class="ag-actions">
+          <button class="btn-ghost ag-cancel" id="btn-modal-cancel">Cancel</button>
+          <button class="btn-primary ag-save" id="btn-modal-save">Save</button>
         </div>
       </div>
     </section>
-    <!-- PAGE: Settings -->
+
+    <!-- PAGE: Settings. One page, one scroll: every group lives in the same
+         column and the About block sits at the very bottom, so there is no
+         second settings screen to navigate to. -->
     <section class="page page-centred page-settings hidden" id="settings-overlay" data-page="settings" aria-label="Settings" tabindex="-1" aria-hidden="true">
       <div id="settings-modal" class="glass-panel settings-modal">
         <div class="settings-head">
@@ -403,35 +436,48 @@
         </div>
 
         <div class="settings-body">
-          <div class="settings-section">
-            <h3 class="settings-section-title">Library Backup</h3>
-            <div class="settings-card">
-              <div class="settings-row">
-                <button id="btn-export-backup" class="settings-btn">Export Library</button>
-                <button id="btn-import-backup" class="settings-btn">Import Library</button>
+          <div class="set-list">
+            <div class="set-item">
+              <div class="set-copy">
+                <div class="set-title">Library backup</div>
+                <p class="set-desc">Export your library, or import one.</p>
+              </div>
+              <div class="set-actions">
+                <button id="btn-export-backup" class="settings-btn">Export</button>
+                <button id="btn-import-backup" class="settings-btn">Import</button>
               </div>
             </div>
-          </div>
 
-          <div class="settings-section">
-            <h3 class="settings-section-title">SteamGridDB</h3>
-            <div class="settings-card">
-              <label class="settings-field-label" for="input-sgdb-key">API Key</label>
+            <div class="set-item set-item-stack">
+              <div class="set-copy">
+                <div class="set-title">Import from a store</div>
+                <p class="set-desc">Reads the games Steam, Epic or GOG already have installed. Nothing is imported until you pick a store.</p>
+              </div>
+              <div class="set-stores" role="group" aria-label="Import from a store library">
+                <button type="button" id="set-import-steam" class="ob-card set-store" data-source="Steam" aria-label="Import Steam library" aria-pressed="false"><svg class="ob-card-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z" /></svg></button>
+                <button type="button" id="set-import-epic" class="ob-card set-store" data-source="Epic" aria-label="Import Epic Games library" aria-pressed="false"><svg class="ob-card-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.537 0C2.165 0 1.66.506 1.66 1.879V18.44a4.262 4.262 0 00.02.433c.031.3.037.59.316.92.027.033.311.245.311.245.153.075.258.13.43.2l8.335 3.491c.433.199.614.276.928.27h.002c.314.006.495-.071.928-.27l8.335-3.492c.172-.07.277-.124.43-.2 0 0 .284-.211.311-.243.28-.33.285-.621.316-.92a4.261 4.261 0 00.02-.434V1.879c0-1.373-.506-1.88-1.878-1.88zm13.366 3.11h.68c1.138 0 1.688.553 1.688 1.696v1.88h-1.374v-1.8c0-.369-.17-.54-.523-.54h-.235c-.367 0-.537.17-.537.539v5.81c0 .369.17.54.537.54h.262c.353 0 .523-.171.523-.54V8.619h1.373v2.143c0 1.144-.562 1.71-1.7 1.71h-.694c-1.138 0-1.7-.566-1.7-1.71V4.82c0-1.144.562-1.709 1.7-1.709zm-12.186.08h3.114v1.274H6.117v2.603h1.648v1.275H6.117v2.774h1.74v1.275h-3.14zm3.816 0h2.198c1.138 0 1.7.564 1.7 1.708v2.445c0 1.144-.562 1.71-1.7 1.71h-.799v3.338h-1.4zm4.53 0h1.4v9.201h-1.4zm-3.13 1.235v3.392h.575c.354 0 .523-.171.523-.54V4.965c0-.368-.17-.54-.523-.54zm-3.74 10.147a1.708 1.708 0 01.591.108 1.745 1.745 0 01.49.299l-.452.546a1.247 1.247 0 00-.308-.195.91.91 0 00-.363-.068.658.658 0 00-.28.06.703.703 0 00-.224.163.783.783 0 00-.151.243.799.799 0 00-.056.299v.008a.852.852 0 00.056.31.7.7 0 00.157.245.736.736 0 00.238.16.774.774 0 00.303.058.79.79 0 00.445-.116v-.339h-.548v-.565H7.37v1.255a2.019 2.019 0 01-.524.307 1.789 1.789 0 01-.683.123 1.642 1.642 0 01-.602-.107 1.46 1.46 0 01-.478-.3 1.371 1.371 0 01-.318-.455 1.438 1.438 0 01-.115-.58v-.008a1.426 1.426 0 01.113-.57 1.449 1.449 0 01.312-.46 1.418 1.418 0 01.474-.309 1.58 1.58 0 01.598-.111 1.708 1.708 0 01.045 0zm11.963.008a2.006 2.006 0 01.612.094 1.61 1.61 0 01.507.277l-.386.546a1.562 1.562 0 00-.39-.205 1.178 1.178 0 00-.388-.07.347.347 0 00-.208.052.154.154 0 00-.07.127v.008a.158.158 0 00.022.084.198.198 0 00.076.066.831.831 0 00.147.06c.062.02.14.04.236.061a3.389 3.389 0 01.43.122 1.292 1.292 0 01.328.17.678.678 0 01.207.24.739.739 0 01.071.337v.008a.865.865 0 01-.081.382.82.82 0 01-.229.285 1.032 1.032 0 01-.353.18 1.606 1.606 0 01-.46.061 2.16 2.16 0 01-.71-.116 1.718 1.718 0 01-.593-.346l.43-.514c.277.223.578.335.9.335a.457.457 0 00.236-.05.157.157 0 00.082-.142v-.008a.15.15 0 00-.02-.077.204.204 0 00-.073-.066.753.753 0 00-.143-.062 2.45 2.45 0 00-.233-.062 5.036 5.036 0 01-.413-.113 1.26 1.26 0 01-.331-.16.72.72 0 01-.222-.243.73.73 0 01-.082-.36v-.008a.863.863 0 01.074-.359.794.794 0 01.214-.283 1.007 1.007 0 01.34-.185 1.423 1.423 0 01.448-.066 2.006 2.006 0 01.025 0zm-9.358.025h.742l1.183 2.81h-.825l-.203-.499H8.623l-.198.498h-.81zm2.197.02h.814l.663 1.08.663-1.08h.814v2.79h-.766v-1.602l-.711 1.091h-.016l-.707-1.083v1.593h-.754zm3.469 0h2.235v.658h-1.473v.422h1.334v.61h-1.334v.442h1.493v.658h-2.255zm-5.3.897l-.315.793h.624zm-1.145 5.19h8.014l-4.09 1.348z" /></svg></button>
+                <button type="button" id="set-import-gog" class="ob-card set-store" data-source="GOG" aria-label="Import GOG library" aria-pressed="false"><svg class="ob-card-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7.15 15.24H4.36a.4.4 0 0 0-.4.4v2c0 .21.18.4.4.4h2.8v1.32h-3.5c-.56 0-1.02-.46-1.02-1.03v-3.39c0-.56.46-1.02 1.03-1.02h3.48v1.32zM8.16 11.54c0 .58-.47 1.05-1.05 1.05H2.63v-1.35h3.78a.4.4 0 0 0 .4-.4V6.39a.4.4 0 0 0-.4-.4H4.39a.4.4 0 0 0-.41.4v2.02c0 .23.18.4.4.4H6v1.35H3.68c-.58 0-1.05-.46-1.05-1.04V5.68c0-.57.47-1.04 1.05-1.04H7.1c.58 0 1.05.47 1.05 1.04v5.86zM21.36 19.36h-1.32v-4.12h-.93a.4.4 0 0 0-.4.4v3.72h-1.33v-4.12h-.93a.4.4 0 0 0-.4.4v3.72h-1.33v-4.42c0-.56.46-1.02 1.03-1.02h5.61v5.44zM21.37 11.54c0 .58-.47 1.05-1.05 1.05h-4.48v-1.35h3.78a.4.4 0 0 0 .4-.4V6.39a.4.4 0 0 0-.4-.4h-2.03a.4.4 0 0 0-.4.4v2.02c0 .23.18.4.4.4h1.62v1.35H16.9c-.58 0-1.05-.46-1.05-1.04V5.68c0-.57.47-1.04 1.05-1.04h3.43c.58 0 1.05.47 1.05 1.04v5.86zM13.72 4.64h-3.44c-.58 0-1.04.47-1.04 1.04v3.44c0 .58.46 1.04 1.04 1.04h3.44c.57 0 1.04-.46 1.04-1.04V5.68c0-.57-.47-1.04-1.04-1.04m-.3 1.75v2.02a.4.4 0 0 1-.4.4h-2.03a.4.4 0 0 1-.4-.4V6.4c0-.22.17-.4.4-.4H13c.23 0 .4.18.4.4zM12.63 13.92H9.24c-.57 0-1.03.46-1.03 1.02v3.39c0 .57.46 1.03 1.03 1.03h3.39c.57 0 1.03-.46 1.03-1.03v-3.39c0-.56-.46-1.02-1.03-1.02m-.3 1.72v2a.4.4 0 0 1-.4.4v-.01H9.94a.4.4 0 0 1-.4-.4v-1.99c0-.22.18-.4.4-.4h2c.22 0 .4.18.4.4zM23.49 1.1a1.74 1.74 0 0 0-1.24-.52H1.75A1.74 1.74 0 0 0 0 2.33v19.34a1.74 1.74 0 0 0 1.75 1.75h20.5A1.74 1.74 0 0 0 24 21.67V2.33c0-.48-.2-.92-.51-1.24m0 20.58a1.23 1.23 0 0 1-1.24 1.24H1.75A1.23 1.23 0 0 1 .5 21.67V2.33a1.23 1.23 0 0 1 1.24-1.24h20.5a1.24 1.24 0 0 1 1.24 1.24v19.34z" /></svg></button>
+              </div>
+              <p id="set-import-status" class="set-desc" role="status" hidden></p>
+            </div>
+
+            <div class="set-item set-item-stack">
+              <div class="set-copy">
+                <div class="set-title">SteamGridDB API key</div>
+                <p class="set-desc">Adds custom logos, heroes and grids to the art picker.</p>
+              </div>
               <div class="settings-key-row">
-                <input id="input-sgdb-key" type="password" class="settings-input" placeholder="Paste your SteamGridDB API key" autocomplete="off" />
+                <input id="input-sgdb-key" type="password" class="settings-input" placeholder="Paste your key" autocomplete="off" />
                 <button type="button" id="btn-toggle-key-visibility" class="settings-key-toggle" title="Show key" aria-label="Show or hide API key">SHOW</button>
               </div>
-              <p class="settings-hint">Adds custom logos, heroes and grids to the art picker. Get a free key at steamgriddb.com.</p>
+              <p class="set-desc set-desc-last">Get a free key at <button type="button" id="btn-open-sgdb" class="set-inline-link">steamgriddb.com</button></p>
             </div>
-          </div>
 
-          <div class="settings-section">
-            <h3 class="settings-section-title">Automatic Game Discovery</h3>
-            <div class="settings-card">
+            <div class="set-item set-item-stack">
               <label class="settings-toggle-row" for="input-discovery-enabled">
                 <span class="toggle-copy">
-                  <span class="toggle-title">Scan these folders at startup</span>
-                  <span class="toggle-sub" id="discovery-status-sub">SILO looks for installed games in the folders below and always asks before adding one.</span>
+                  <span class="toggle-title">Scan folders at startup</span>
+                  <span class="toggle-sub" id="discovery-status-sub">SILO looks for installed games in these folders and always asks before adding one.</span>
                 </span>
                 <span class="toggle-track">
                   <input type="checkbox" id="input-discovery-enabled" />
@@ -439,46 +485,37 @@
                 </span>
               </label>
               <ul id="discovery-folder-list" class="discovery-folders"></ul>
-              <p id="discovery-empty" class="settings-hint">No folders registered yet. Add the folder that holds your game installs — nothing else on the drive is scanned.</p>
-              <div class="settings-row">
-                <button id="btn-discovery-add-folder" class="settings-btn">Add Folder</button>
+              <div class="set-inline-row">
+                <p id="discovery-empty" class="set-desc set-desc-last">No folders yet.</p>
+                <button id="btn-discovery-add-folder" class="settings-btn">Add folder</button>
               </div>
               <div id="discovery-ignored-wrap" hidden>
-                <label class="settings-field-label">Games you chose not to add</label>
+                <label class="set-title set-sub-title">Games you chose not to add</label>
                 <ul id="discovery-ignored-list" class="discovery-folders"></ul>
                 <button id="btn-discovery-reset-ignored" class="settings-ghost">Reconsider all ignored games</button>
               </div>
             </div>
-          </div>
 
-          <div class="settings-section">
-            <h3 class="settings-section-title">General</h3>
-            <div class="settings-card">
-              <label class="settings-field-label">When closing SILO</label>
+            <div class="set-item set-item-stack">
+              <div class="set-title">When closing SILO</div>
               <div class="close-behaviour-group">
                 <label class="settings-check close-behaviour-option">
                   <input type="radio" name="closeBehaviour" id="close-behaviour-ask" value="askEveryTime" />
-                  <span>Ask every time</span>
-                  <span class="close-behaviour-desc">Show a confirmation dialog so you can choose to keep SILO running or exit each time you close the window.</span>
+                  <span>Ask every time<span class="close-behaviour-desc">Show a confirmation dialog so you can choose to keep SILO running or exit each time you close the window.</span></span>
                 </label>
                 <label class="settings-check close-behaviour-option">
                   <input type="radio" name="closeBehaviour" id="close-behaviour-tray" value="minimiseToTray" />
-                  <span>Minimise to system tray</span>
-                  <span class="close-behaviour-desc">Hide SILO in the tray and keep the native backend running; reopen through the tray icon.</span>
+                  <span>Minimise to system tray<span class="close-behaviour-desc">Hide SILO in the tray and keep the native backend running; reopen through the tray icon.</span></span>
                 </label>
                 <label class="settings-check close-behaviour-option">
                   <input type="radio" name="closeBehaviour" id="close-behaviour-exit" value="exitApplication" />
-                  <span>Exit application</span>
-                  <span class="close-behaviour-desc">Shut SILO down completely (WebView2 and all) when the window is closed.</span>
+                  <span>Exit application<span class="close-behaviour-desc">Shut SILO down completely (WebView2 and all) when the window is closed.</span></span>
                 </label>
               </div>
               <p class="settings-hint">This applies to closing the launcher window. Quitting from the tray always shuts SILO down.</p>
             </div>
-          </div>
 
-          <div class="settings-section">
-            <h3 class="settings-section-title">Display</h3>
-            <div class="settings-card">
+            <div class="set-item">
               <label class="settings-toggle-row" for="input-show-game-titles">
                 <span class="toggle-copy">
                   <span class="toggle-title">Show game titles</span>
@@ -489,10 +526,13 @@
                   <span class="toggle-thumb"></span>
                 </span>
               </label>
+            </div>
+
+            <div class="set-item">
               <label class="settings-toggle-row" for="input-force-motion">
                 <span class="toggle-copy">
                   <span class="toggle-title">Always animate</span>
-                  <span class="toggle-sub">Overrides your system's reduce-motion setting for the launcher's animations.</span>
+                  <span class="toggle-sub">Your system asks for reduced motion, so the rail is standing still. Turn this on to animate fully anyway.</span>
                 </span>
                 <span class="toggle-track">
                   <input type="checkbox" id="input-force-motion" />
@@ -500,11 +540,8 @@
                 </span>
               </label>
             </div>
-          </div>
 
-          <div class="settings-section">
-            <h3 class="settings-section-title">Preferences</h3>
-            <div class="settings-card">
+            <div class="set-item">
               <label class="settings-check">
                 <input type="checkbox" id="input-check-updates" />
                 <span>Check for updates on launch</span>
@@ -512,22 +549,52 @@
             </div>
           </div>
 
-          <div class="settings-section settings-advanced" id="settings-advanced">
-            <button class="settings-btn-advanced-toggle" id="settings-advanced-toggle">Advanced</button>
-            <div class="advanced-body">
-              <div class="advanced-inner">
-                <button id="btn-backup-manager" class="settings-ghost">Backup Manager</button>
-                <button id="btn-open-logs" class="settings-ghost">Open Logs Folder</button>
-                <button id="btn-check-updates" class="settings-ghost">Check for Updates</button>
-                <button id="btn-setup-from-another-pc" class="settings-ghost">Set Up From Another PC</button>
+          <div class="set-advanced" id="settings-advanced">
+            <div class="set-group-title">Advanced</div>
+            <div class="set-nav-list">
+              <button type="button" id="btn-backup-manager" class="set-nav">
+                <span>Backup Manager</span>
+                <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>
+              </button>
+              <button type="button" id="btn-open-logs" class="set-nav">
+                <span>Open Logs Folder</span>
+                <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>
+              </button>
+              <button type="button" id="btn-check-updates" class="set-nav">
+                <span>Check for Updates</span>
+                <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>
+              </button>
+
+
+            </div>
+          </div>
+
+          <div class="set-about" id="settings-about">
+            <div class="set-group-title">About</div>
+            <div class="set-app">
+              <img class="set-app-icon" src="assets/icon.png" alt="" />
+              <div class="set-app-text">
+                <div class="set-app-name">SILO</div>
+                <div class="set-app-version">Version 0.5.3</div>
               </div>
+            </div>
+            <p class="set-app-tag">Every game. Its own place.</p>
+            <div class="set-nav-list">
+              <button type="button" id="btn-release-notes" class="set-nav">
+                <span>Release notes</span>
+                <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>
+              </button>
+              <button type="button" id="btn-open-licenses" class="set-nav">
+                <span>Open-source licenses</span>
+                <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>
+              </button>
             </div>
           </div>
         </div>
 
         <div class="settings-footer">
           <button id="btn-settings-close" class="settings-back">&larr; Back</button>
-          <button id="btn-save-settings" class="settings-btn settings-btn-primary">Save Changes</button>
+          <button id="btn-save-settings" class="settings-btn settings-btn-primary">Save changes</button>
         </div>
       </div>
     </section>
@@ -555,6 +622,102 @@
           <button id="btn-discovery-ignore" class="btn-ghost danger">Don&#39;t Add</button>
           <button id="btn-discovery-later" class="btn-ghost">Not Now</button>
         </div>
+      </div>
+    </div>
+
+    <!-- FIRST-RUN SETUP — shown once, while the library is empty: where the
+         games live, then the SteamGridDB key that makes artwork automatic. -->
+    <!-- FIRST-RUN SETUP — four steps in one flat shell: where the games live,
+         the artwork key, the store libraries, then what the scan found. The
+         step rail is drawn by js/onboarding.js so every screen reports the
+         same count. -->
+    <div id="onboarding-overlay" class="hidden">
+      <div id="onboarding-card" class="ob-shell" role="dialog" aria-modal="true" aria-labelledby="ob-title" tabindex="-1">
+        <button id="ob-close" class="ob-close" aria-label="Skip setup" title="Skip setup">✕</button>
+
+        <div id="ob-steps" class="ob-steps" role="group" aria-label="Step 1 of 4">
+          <span class="ob-step-pill is-current" data-pill="1"></span>
+          <span class="ob-step-pill" data-pill="2"></span>
+          <span class="ob-step-pill" data-pill="3"></span>
+          <span class="ob-step-pill" data-pill="4"></span>
+          <span id="ob-step-count" class="ob-step-count">1 of 4</span>
+        </div>
+
+        <section id="ob-step-1" class="ob-step">
+          <h2 id="ob-title" class="ob-title">Where are your games?</h2>
+          <p class="ob-desc">
+            Point SILO at the folder your installed games live in — usually
+            <code>C:\Games</code>. Only the folders you list here are scanned, and
+            SILO always asks before adding anything.
+          </p>
+          <div class="ob-content">
+            <ul id="ob-folder-list" class="ob-folder-list"></ul>
+            <p id="ob-folder-empty" class="ob-empty">No folders yet. Add the one your games are installed in.</p>
+            <button type="button" id="ob-add-folder" class="ob-btn ob-btn--ghost">+ Add folder</button>
+          </div>
+          <div class="ob-actions">
+            <button type="button" id="ob-skip-1" class="ob-btn ob-btn--ghost">Not now</button>
+            <button type="button" id="ob-next-1" class="ob-btn ob-btn--primary">Continue</button>
+          </div>
+        </section>
+
+        <section id="ob-step-2" class="ob-step hidden">
+          <h2 class="ob-title">Artwork, automatically.</h2>
+          <p class="ob-desc">
+            SILO pulls covers and hero images from SteamGridDB. It needs a free
+            personal API key to do that — create one on your SteamGridDB profile,
+            then paste it here.
+          </p>
+          <div class="ob-content">
+            <a id="ob-get-key" class="ob-link" href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" rel="noreferrer">
+              Open steamgriddb.com → profile → API → Get a key ↗
+            </a>
+            <label class="ob-field" style="margin-top: 16px;">
+              <span class="ob-field-label">SteamGridDB API key</span>
+              <input id="ob-sgdb-key" class="ob-input" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key" />
+            </label>
+            <p class="ob-hint">You can add or change this later in Settings. Without a key, games are added without artwork.</p>
+          </div>
+          <div class="ob-actions">
+            <button type="button" id="ob-skip-2" class="ob-btn ob-btn--ghost">Skip</button>
+            <button type="button" id="ob-save-key" class="ob-btn ob-btn--primary">Save &amp; continue</button>
+          </div>
+        </section>
+
+        <section id="ob-step-3" class="ob-step hidden">
+          <h2 class="ob-title">Bring in your libraries.</h2>
+          <p class="ob-desc">
+            SILO can read the games Steam, Epic and GOG already have installed,
+            and add them with their artwork. Pick a store. Nothing is imported
+            unless you ask.
+          </p>
+          <div class="ob-content">
+            <div class="ob-stores" role="group" aria-label="Store libraries">
+              <button type="button" id="ob-import-steam" class="ob-card" data-source="Steam" aria-label="Import Steam library" aria-pressed="false">
+                <svg class="ob-card-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z" /></svg>
+              </button>
+              <button type="button" id="ob-import-epic" class="ob-card" data-source="Epic" aria-label="Import Epic Games library" aria-pressed="false">
+                <svg class="ob-card-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.537 0C2.165 0 1.66.506 1.66 1.879V18.44a4.262 4.262 0 00.02.433c.031.3.037.59.316.92.027.033.311.245.311.245.153.075.258.13.43.2l8.335 3.491c.433.199.614.276.928.27h.002c.314.006.495-.071.928-.27l8.335-3.492c.172-.07.277-.124.43-.2 0 0 .284-.211.311-.243.28-.33.285-.621.316-.92a4.261 4.261 0 00.02-.434V1.879c0-1.373-.506-1.88-1.878-1.88zm13.366 3.11h.68c1.138 0 1.688.553 1.688 1.696v1.88h-1.374v-1.8c0-.369-.17-.54-.523-.54h-.235c-.367 0-.537.17-.537.539v5.81c0 .369.17.54.537.54h.262c.353 0 .523-.171.523-.54V8.619h1.373v2.143c0 1.144-.562 1.71-1.7 1.71h-.694c-1.138 0-1.7-.566-1.7-1.71V4.82c0-1.144.562-1.709 1.7-1.709zm-12.186.08h3.114v1.274H6.117v2.603h1.648v1.275H6.117v2.774h1.74v1.275h-3.14zm3.816 0h2.198c1.138 0 1.7.564 1.7 1.708v2.445c0 1.144-.562 1.71-1.7 1.71h-.799v3.338h-1.4zm4.53 0h1.4v9.201h-1.4zm-3.13 1.235v3.392h.575c.354 0 .523-.171.523-.54V4.965c0-.368-.17-.54-.523-.54zm-3.74 10.147a1.708 1.708 0 01.591.108 1.745 1.745 0 01.49.299l-.452.546a1.247 1.247 0 00-.308-.195.91.91 0 00-.363-.068.658.658 0 00-.28.06.703.703 0 00-.224.163.783.783 0 00-.151.243.799.799 0 00-.056.299v.008a.852.852 0 00.056.31.7.7 0 00.157.245.736.736 0 00.238.16.774.774 0 00.303.058.79.79 0 00.445-.116v-.339h-.548v-.565H7.37v1.255a2.019 2.019 0 01-.524.307 1.789 1.789 0 01-.683.123 1.642 1.642 0 01-.602-.107 1.46 1.46 0 01-.478-.3 1.371 1.371 0 01-.318-.455 1.438 1.438 0 01-.115-.58v-.008a1.426 1.426 0 01.113-.57 1.449 1.449 0 01.312-.46 1.418 1.418 0 01.474-.309 1.58 1.58 0 01.598-.111 1.708 1.708 0 01.045 0zm11.963.008a2.006 2.006 0 01.612.094 1.61 1.61 0 01.507.277l-.386.546a1.562 1.562 0 00-.39-.205 1.178 1.178 0 00-.388-.07.347.347 0 00-.208.052.154.154 0 00-.07.127v.008a.158.158 0 00.022.084.198.198 0 00.076.066.831.831 0 00.147.06c.062.02.14.04.236.061a3.389 3.389 0 01.43.122 1.292 1.292 0 01.328.17.678.678 0 01.207.24.739.739 0 01.071.337v.008a.865.865 0 01-.081.382.82.82 0 01-.229.285 1.032 1.032 0 01-.353.18 1.606 1.606 0 01-.46.061 2.16 2.16 0 01-.71-.116 1.718 1.718 0 01-.593-.346l.43-.514c.277.223.578.335.9.335a.457.457 0 00.236-.05.157.157 0 00.082-.142v-.008a.15.15 0 00-.02-.077.204.204 0 00-.073-.066.753.753 0 00-.143-.062 2.45 2.45 0 00-.233-.062 5.036 5.036 0 01-.413-.113 1.26 1.26 0 01-.331-.16.72.72 0 01-.222-.243.73.73 0 01-.082-.36v-.008a.863.863 0 01.074-.359.794.794 0 01.214-.283 1.007 1.007 0 01.34-.185 1.423 1.423 0 01.448-.066 2.006 2.006 0 01.025 0zm-9.358.025h.742l1.183 2.81h-.825l-.203-.499H8.623l-.198.498h-.81zm2.197.02h.814l.663 1.08.663-1.08h.814v2.79h-.766v-1.602l-.711 1.091h-.016l-.707-1.083v1.593h-.754zm3.469 0h2.235v.658h-1.473v.422h1.334v.61h-1.334v.442h1.493v.658h-2.255zm-5.3.897l-.315.793h.624zm-1.145 5.19h8.014l-4.09 1.348z" /></svg>
+              </button>
+              <button type="button" id="ob-import-gog" class="ob-card" data-source="GOG" aria-label="Import GOG library" aria-pressed="false">
+                <svg class="ob-card-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7.15 15.24H4.36a.4.4 0 0 0-.4.4v2c0 .21.18.4.4.4h2.8v1.32h-3.5c-.56 0-1.02-.46-1.02-1.03v-3.39c0-.56.46-1.02 1.03-1.02h3.48v1.32zM8.16 11.54c0 .58-.47 1.05-1.05 1.05H2.63v-1.35h3.78a.4.4 0 0 0 .4-.4V6.39a.4.4 0 0 0-.4-.4H4.39a.4.4 0 0 0-.41.4v2.02c0 .23.18.4.4.4H6v1.35H3.68c-.58 0-1.05-.46-1.05-1.04V5.68c0-.57.47-1.04 1.05-1.04H7.1c.58 0 1.05.47 1.05 1.04v5.86zM21.36 19.36h-1.32v-4.12h-.93a.4.4 0 0 0-.4.4v3.72h-1.33v-4.12h-.93a.4.4 0 0 0-.4.4v3.72h-1.33v-4.42c0-.56.46-1.02 1.03-1.02h5.61v5.44zM21.37 11.54c0 .58-.47 1.05-1.05 1.05h-4.48v-1.35h3.78a.4.4 0 0 0 .4-.4V6.39a.4.4 0 0 0-.4-.4h-2.03a.4.4 0 0 0-.4.4v2.02c0 .23.18.4.4.4h1.62v1.35H16.9c-.58 0-1.05-.46-1.05-1.04V5.68c0-.57.47-1.04 1.05-1.04h3.43c.58 0 1.05.47 1.05 1.04v5.86zM13.72 4.64h-3.44c-.58 0-1.04.47-1.04 1.04v3.44c0 .58.46 1.04 1.04 1.04h3.44c.57 0 1.04-.46 1.04-1.04V5.68c0-.57-.47-1.04-1.04-1.04m-.3 1.75v2.02a.4.4 0 0 1-.4.4h-2.03a.4.4 0 0 1-.4-.4V6.4c0-.22.17-.4.4-.4H13c.23 0 .4.18.4.4zM12.63 13.92H9.24c-.57 0-1.03.46-1.03 1.02v3.39c0 .57.46 1.03 1.03 1.03h3.39c.57 0 1.03-.46 1.03-1.03v-3.39c0-.56-.46-1.02-1.03-1.02m-.3 1.72v2a.4.4 0 0 1-.4.4v-.01H9.94a.4.4 0 0 1-.4-.4v-1.99c0-.22.18-.4.4-.4h2c.22 0 .4.18.4.4zM23.49 1.1a1.74 1.74 0 0 0-1.24-.52H1.75A1.74 1.74 0 0 0 0 2.33v19.34a1.74 1.74 0 0 0 1.75 1.75h20.5A1.74 1.74 0 0 0 24 21.67V2.33c0-.48-.2-.92-.51-1.24m0 20.58a1.23 1.23 0 0 1-1.24 1.24H1.75A1.23 1.23 0 0 1 .5 21.67V2.33a1.23 1.23 0 0 1 1.24-1.24h20.5a1.24 1.24 0 0 1 1.24 1.24v19.34z" /></svg>
+              </button>
+            </div>
+            <p id="ob-import-status" class="ob-hint" role="status" hidden></p>
+          </div>
+          <div class="ob-actions">
+            <button type="button" id="ob-skip-3" class="ob-btn ob-btn--ghost">Skip</button>
+            <button type="button" id="ob-next-3" class="ob-btn ob-btn--primary">Continue</button>
+          </div>
+        </section>
+
+        <section id="ob-step-4" class="ob-step hidden">
+          <h2 id="ob-scan-title" class="ob-title">Looking for games…</h2>
+          <p id="ob-scan-detail" class="ob-desc"></p>
+          <div class="ob-actions">
+            <button type="button" id="ob-finish" class="ob-btn ob-btn--primary hidden">Finish</button>
+          </div>
+        </section>
       </div>
     </div>
 

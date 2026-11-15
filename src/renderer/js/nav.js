@@ -25,6 +25,10 @@ let idleTimer = null;
 let pointerInside = false;
 let focusInside = false;
 let revealed = false;
+/* With no games saved there is nothing to look at and the bar is the only way
+   into the app, so it stays on screen instead of timing out. The first game
+   added releases it back to the ordinary reveal-on-approach behaviour. */
+let pinned = false;
 
 function navEl() { return document.getElementById('topnav'); }
 
@@ -71,6 +75,7 @@ export function revealNav() {
 export function hideNav() {
   const nav = navEl();
   if (!nav) return;
+  if (pinned) return;
   // Never hide while the pointer or the keyboard focus is on the bar, while
   // a search is open, or while a full-screen overlay is up.
   if (pointerInside || focusInside) return;
@@ -87,6 +92,10 @@ export function hideNav() {
    focus goes, so every hide path agrees. */
 export function hideNavNow() {
   const nav = navEl();
+  if (pinned) {
+    clearTimeout(idleTimer);
+    return;
+  }
   revealed = false;
   if (nav) nav.classList.remove('revealed');
   document.body.classList.remove('nav-open');
@@ -119,11 +128,31 @@ function restoreFocusFromNav() {
   target.focus({ preventScroll: true });
 }
 
-/* Escape closes the bar even though the focus is inside it. */
+/* Escape closes the bar even though the focus is inside it. A pinned bar stays:
+   there is nothing behind it to go back to. */
 export function dismissNav() {
   focusInside = false;
   pointerInside = false;
+  if (pinned) {
+    releaseNavKeyboard();
+    return;
+  }
   hideNavNow();
+}
+
+/* Pinning is about the empty library, nothing else: it only holds the bar on
+   screen and never changes the page, the selection or the focus. */
+export function setNavPinned(on) {
+  const next = !!on;
+  if (next === pinned) return;
+  pinned = next;
+  navEl()?.classList.toggle('pinned', pinned);
+  if (pinned) {
+    revealNav();
+    return;
+  }
+  // Back to normal: the bar can fade again on the next idle or pointer leave.
+  scheduleHide();
 }
 
 /* One toggle for the controller's START button: show if hidden, hide if shown.
@@ -143,6 +172,7 @@ function isBusy() {
 
 function scheduleHide() {
   clearTimeout(idleTimer);
+  if (pinned) return;
   idleTimer = setTimeout(() => {
     // Re-check inside the timer: the pointer may have come back.
     hideNav();
@@ -334,6 +364,16 @@ export function initNav() {
   const host = document.getElementById('page-host');
   if (host) {
     new MutationObserver(syncActiveNav).observe(host, { attributes: true, attributeFilter: ['class', 'hidden'], subtree: true });
+  }
+
+  // The empty state is the single signal for "library has no games": keeping
+  // the bar up follows it, so every add, import and delete is covered without
+  // this module reaching into the library.
+  const emptyState = document.getElementById('empty-state');
+  if (emptyState) {
+    const syncPinned = () => setNavPinned(emptyState.style.display === 'flex');
+    syncPinned();
+    new MutationObserver(syncPinned).observe(emptyState, { attributes: true, attributeFilter: ['style'] });
   }
 
   syncActiveNav();

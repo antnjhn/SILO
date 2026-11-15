@@ -79,6 +79,7 @@ pub fn run() {
             settings::set_settings,
             commands::confirm_close,
             commands::open_logs_folder,
+            commands::open_external_url,
             commands::get_all_backups,
             commands::delete_game_backups,
             commands::list_sessions,
@@ -87,6 +88,7 @@ pub fn run() {
             metadata::sgdb_search_games,
             metadata::sgdb_art,
             metadata::auto_art_for_game,
+            metadata::sweep_art,
             metadata::preview_art,
             discovery::get_discovery_state,
             discovery::discovery_add_folder,
@@ -138,6 +140,16 @@ pub fn run() {
             if let Err(error) = tray::install(app.handle()) {
                 log::error!("SILO could not install its tray icon: {error}");
             }
+            // Artwork for games that are still missing it is fetched after the
+            // window is up. Fetching it only from the Add game dialog meant one
+            // dismissed dialog left a game with no logo or wallpaper for good;
+            // this walks whatever is still empty once per launch. It runs on its
+            // own thread because the sweep paces itself between games.
+            let art_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                tauri::async_runtime::block_on(crate::metadata::sweep_missing_art(art_handle));
+            });
             #[cfg(target_os = "windows")]
             {
                 let handle = app.handle().clone();

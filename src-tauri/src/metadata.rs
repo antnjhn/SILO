@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MetadataCandidate {
@@ -74,10 +74,45 @@ pub struct SgdbArtPage {
     pub arts: Vec<SgdbArt>,
 }
 
-fn normalize_tokens(text: &str) -> HashSet<String> {
+// Latin letters with their diacritics folded to the plain letter, so "Pokémon"
+// and "POKEMON" are the same word. SteamGridDB titles carry accents that a game
+// folder or exe name almost never does, and an accent mismatch made a correct
+// title look unrelated ("POKEMON EMERALD" scored 40 against "Pokémon Emerald
+// Version" because the accented token never matched).
+fn fold_diacritics(text: &str) -> String {
     text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
+            'ç' | 'ć' | 'č' => 'c',
+            'ď' | 'đ' => 'd',
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+            'ĝ' | 'ğ' => 'g',
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => 'i',
+            'ł' => 'l',
+            'ñ' | 'ń' | 'ň' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
+            'ŕ' | 'ř' => 'r',
+            'ś' | 'š' | 'ş' => 's',
+            'ť' | 'ţ' => 't',
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ź' | 'ż' | 'ž' => 'z',
+            'ß' => 's',
+            other => other,
+        })
+        .collect()
+}
+
+fn normalize_tokens(text: &str) -> HashSet<String> {
+    fold_diacritics(text)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty() && (t.len() > 1 || t.chars().all(|c| c.is_ascii_digit())))
+        // SteamGridDB names the handheld Pokémon entries "<name> Version". The
+        // word is catalogue formatting, not part of the title, and keeping it
+        // made "Pokémon Emerald Version" tie with a romhack of equal overlap
+        // ("Pokémon Emerald Crest"), which then won on alphabetical order.
+        .filter(|t| *t != "version")
         .map(|t| t.to_string())
         .collect()
 }
@@ -713,6 +748,35 @@ pub fn first_art(arts: Vec<SgdbArt>) -> Option<SgdbArt> {
     arts.into_iter().next()
 }
 
+/// The first art that is an actual image.
+///
+/// SteamGridDB ranks animated art highly, and animated assets are served as
+/// WebM — an `<img>` cannot draw one and neither can the rail, so an automatic
+/// pick that lands on one looks exactly like "no artwork was found" (this is
+/// what happens for Cyberpunk 2077, whose top logo is animated). Still images
+/// win outright; an animated entry is kept only as a last resort when the
+/// catalogue has nothing else, and even then only if its bytes are an image.
+pub fn first_static_art(arts: Vec<SgdbArt>) -> Option<SgdbArt> {
+    let mut animated_fallback: Option<SgdbArt> = None;
+    for art in arts {
+        if !art.mime.to_ascii_lowercase().starts_with("image/") {
+            continue;
+        }
+        let animated = art
+            .style
+            .as_deref()
+            .is_some_and(|style| style.eq_ignore_ascii_case("animated"));
+        if animated {
+            if animated_fallback.is_none() {
+                animated_fallback = Some(art);
+            }
+            continue;
+        }
+        return Some(art);
+    }
+    animated_fallback
+}
+
 /// File extension for a downloaded asset: the URL's own extension when it has
 /// a usable one, else what the API said the bytes are, else png.
 pub fn art_extension(url: &str, mime: &str) -> &'static str {
@@ -751,19 +815,31 @@ fn claim_auto_art_attempt(game_id: &str) -> bool {
 static PREVIEW_CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, ArtPreview>>> = OnceLock::new();
 
 async fn search_best_match(client: &reqwest::Client, key: &str, title: &str) -> Option<SgdbGame> {
-    let games = sgdb_games(client, key, title).await;
-    let best = order_sgdb_games(title, games).into_iter().next()?;
-    if is_confident_title_match(title, &best.name) {
-        Some(best)
-    } else {
-        log::info!(
-            "auto-art: '{}' matched '{}' ({}) which is not close enough to use",
-            title,
-            best.name,
-            name_similarity(title, &best.name)
-        );
-        None
+    let games = order_sgdb_games(title, sgdb_games(client, key, title).await);
+    if games.is_empty() {
+        log::info!("auto-art: no SteamGridDB entry for '{}'", title);
+        return None;
     }
+    // The top hit is normally the right game, but a re-release or a spin-off can
+    // outrank it. The list is already ordered best-first, so the first entry
+    // that is confident is the answer — rejecting the lookup over one bad first
+    // hit is what made a correct title come back with no artwork.
+    for game in &games {
+        if is_confident_title_match(title, &game.name) {
+            if game.name.trim().to_lowercase() != title.trim().to_lowercase() {
+                log::info!("auto-art: '{}' matched SteamGridDB entry '{}'", title, game.name);
+            }
+            return Some(game.clone());
+        }
+    }
+    let closest = &games[0];
+    log::info!(
+        "auto-art: '{}' has no confident match (closest '{}', {}), skipping",
+        title,
+        closest.name,
+        name_similarity(title, &closest.name)
+    );
+    None
 }
 
 async fn fetch_first_art(client: &reqwest::Client, key: &str, game_id: &str, kind: &str) -> Option<SgdbArt> {
@@ -780,7 +856,17 @@ async fn fetch_first_art(client: &reqwest::Client, key: &str, game_id: &str, kin
         return None;
     }
     let json = response.json::<serde_json::Value>().await.ok()?;
-    first_art(parse_sgdb_art_page(&json, 0, 10).arts)
+    let arts = parse_sgdb_art_page(&json, 0, 10).arts;
+    let picked = first_static_art(arts.clone());
+    if picked.is_none() {
+        log::info!(
+            "auto-art: no usable still {} among {} entries for game {}",
+            kind,
+            arts.len(),
+            game_id
+        );
+    }
+    picked
 }
 
 async fn download_art(app: &AppHandle, game_id: &str, kind: &str, art: &SgdbArt) -> Result<String, String> {
@@ -803,6 +889,13 @@ async fn download_art(app: &AppHandle, game_id: &str, kind: &str, art: &SgdbArt)
 /// replace an existing image), so a manual choice is never overwritten.
 #[tauri::command]
 pub async fn auto_art_for_game(app: AppHandle, game_id: String) -> AutoArtResult {
+    auto_art(app, game_id, true).await
+}
+
+/// The lookup itself, shared by the command and the startup sweep.
+/// `once_per_session` keeps a reopened Edit modal from spending a second set of
+/// API calls on a game whose artwork is already settled.
+async fn auto_art(app: AppHandle, game_id: String, once_per_session: bool) -> AutoArtResult {
     let games = crate::commands::get_games(app.clone());
     let Some(game) = games.iter().find(|g| g.id == game_id).cloned() else {
         return AutoArtResult::skipped("That game is no longer in the library.");
@@ -825,8 +918,13 @@ pub async fn auto_art_for_game(app: AppHandle, game_id: String) -> AutoArtResult
         Ok(key) => key,
         Err(reason) => return AutoArtResult::skipped(reason),
     };
-    if !claim_auto_art_attempt(&game_id) {
+    if once_per_session && !claim_auto_art_attempt(&game_id) {
         return AutoArtResult::skipped("Artwork for this game was already looked up in this session.");
+    }
+    if !once_per_session {
+        // The sweep is the authority for the session: claim the game so the
+        // Edit modal does not run the same three requests again.
+        claim_auto_art_attempt(&game_id);
     }
 
     let client = match sgdb_client() {
@@ -875,6 +973,122 @@ pub async fn auto_art_for_game(app: AppHandle, game_id: String) -> AutoArtResult
     }
 }
 
+/// How many artwork fields a serialized game record actually carries.
+fn art_field_count(game: &serde_json::Value) -> usize {
+    ["logoPath", "wallpaper"]
+        .iter()
+        .filter(|key| {
+            game.get(**key)
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        .count()
+}
+
+/// Fills in the logo and wallpaper of every game that is still missing one.
+///
+/// Adding a game opens Edit and fetches its artwork there, but that path is tied
+/// to a modal the user may close straight away, so a game can stay in the
+/// library with no artwork at all and nothing ever asks again. This runs once
+/// per launch, after the window is up, and walks the games that still have
+/// none. Each record that gains art is pushed to the renderer as `art-updated`,
+/// so the tile and the hero fill in without a restart.
+///
+/// It is deliberately sequential and spaced out: SteamGridDB rate limits per
+/// minute, and a library of a few dozen games must not trip it.
+pub async fn sweep_missing_art(app: AppHandle) {
+    let games = crate::commands::get_games(app.clone());
+    let missing: Vec<(String, String, usize)> = games
+        .iter()
+        .filter(|game| {
+            let has_logo = game.logo_path.as_deref().is_some_and(|p| !p.trim().is_empty());
+            let has_wallpaper = game.wallpaper.as_deref().is_some_and(|p| !p.trim().is_empty());
+            !(has_logo && has_wallpaper)
+        })
+        .map(|game| {
+            let has_logo = game.logo_path.as_deref().is_some_and(|p| !p.trim().is_empty());
+            let has_wallpaper = game.wallpaper.as_deref().is_some_and(|p| !p.trim().is_empty());
+            (
+                game.id.clone(),
+                game.name.clone(),
+                usize::from(has_logo) + usize::from(has_wallpaper),
+            )
+        })
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+    // No key is not a failure to report: the user has not set one up yet.
+    if let Err(reason) = sgdb_api_key(&app) {
+        log::info!("auto-art sweep: {} game(s) missing artwork, not fetching: {}", missing.len(), reason);
+        return;
+    }
+
+    let total = missing.len();
+    log::info!("auto-art sweep: {} game(s) missing artwork", total);
+    // The window shows a progress bar for this work: the first launch after
+    // adding a few games is otherwise a silent wait with letter tiles on screen.
+    let _ = app.emit(
+        "art-progress",
+        serde_json::json!({ "kind": "start", "done": 0, "total": total, "filled": 0 }),
+    );
+    let mut filled = 0usize;
+    let mut done = 0usize;
+    for (id, name, before) in missing {
+        let result = auto_art(app.clone(), id, false).await;
+        let after = result.game.as_ref().map(art_field_count).unwrap_or(before);
+        if let Some(reason) = &result.reason {
+            log::warn!("auto-art sweep: '{}' incomplete: {}", name, reason);
+        }
+        if after > before {
+            filled += 1;
+            log::info!("auto-art sweep: '{}' now has artwork", name);
+            if let Some(game) = result.game {
+                let _ = app.emit("art-updated", game);
+            }
+        }
+        done += 1;
+        let _ = app.emit(
+            "art-progress",
+            serde_json::json!({ "kind": "step", "done": done, "total": total, "filled": filled }),
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    log::info!("auto-art sweep: filled {} of {}", filled, total);
+    let _ = app.emit(
+        "art-progress",
+        serde_json::json!({ "kind": "done", "done": total, "total": total, "filled": filled }),
+    );
+}
+
+/// Runs the artwork sweep on demand, for a library that grew after launch.
+///
+/// The startup sweep only sees the games that existed when it ran, and setup
+/// adds games while it is on screen, so without this a game added during setup
+/// waited for the next launch. It answers at once and does the work in the
+/// background, reporting through the same `art-progress` events.
+#[tauri::command]
+pub fn sweep_art(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        sweep_missing_art(app).await;
+    });
+}
+
+/// What the discovery prompt can actually draw.
+///
+/// A thumbnail is normally the cheap choice, but for animated art SteamGridDB
+/// serves the thumbnail as a WebM clip — an `<img>` shows nothing for it, which
+/// reads as "no artwork found". In that case the full still image is used
+/// instead.
+fn preview_url(art: &SgdbArt) -> String {
+    let thumb = art.thumb.trim();
+    if thumb.is_empty() || thumb.to_ascii_lowercase().ends_with(".webm") {
+        return art.url.clone();
+    }
+    thumb.to_string()
+}
+
 /// First logo and first hero for a name, as remote thumbnails only. Used by the
 /// discovery prompt so a candidate can show what it will look like; nothing is
 /// downloaded or stored here.
@@ -905,10 +1119,16 @@ pub async fn preview_art(app: AppHandle, name: String) -> ArtPreview {
     };
     let logo = fetch_first_art(&client, &key, &match_game.id, "logos")
         .await
-        .map(|art| art.thumb);
-    let wallpaper = fetch_first_art(&client, &key, &match_game.id, "heroes")
-        .await
-        .map(|art| art.thumb);
+        .map(|art| preview_url(&art));
+    // Heroes are the widescreen banner a game page uses. Grids are the vertical
+    // capsule art SteamGridDB users mostly pick, so they carry the game even
+    // when no hero exists for it.
+    let wallpaper = match fetch_first_art(&client, &key, &match_game.id, "heroes").await {
+        Some(art) => Some(preview_url(&art)),
+        None => fetch_first_art(&client, &key, &match_game.id, "grids")
+            .await
+            .map(|art| preview_url(&art)),
+    };
     let preview = ArtPreview { logo, wallpaper };
     if preview.logo.is_some() || preview.wallpaper.is_some() {
         if let Ok(mut cache) = PREVIEW_CACHE
@@ -924,6 +1144,49 @@ pub async fn preview_art(app: AppHandle, name: String) -> ArtPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn art(url: &str, mime: &str, style: Option<&str>) -> SgdbArt {
+        SgdbArt {
+            id: 1,
+            url: url.to_string(),
+            thumb: url.to_string(),
+            width: 1,
+            height: 1,
+            mime: mime.to_string(),
+            style: style.map(str::to_string),
+            animated: style.is_some_and(|s| s.eq_ignore_ascii_case("animated")),
+            author: None,
+        }
+    }
+
+    /// The animated logo that ranks first for a game like Cyberpunk 2077 is a
+    /// WebM file: an <img> shows nothing for it, so the automatic pick has to
+    /// reach past it for the still image underneath.
+    #[test]
+    fn first_static_art_skips_animated_webm_and_takes_the_next_image() {
+        let arts = vec![
+            art("https://cdn2.steamgriddb.com/logo/animated.webm", "video/webm", Some("animated")),
+            art("https://cdn2.steamgriddb.com/logo/static.png", "image/png", Some("official")),
+        ];
+        let picked = first_static_art(arts).expect("the still logo should win");
+        assert_eq!(picked.url, "https://cdn2.steamgriddb.com/logo/static.png");
+    }
+
+    #[test]
+    fn first_static_art_falls_back_to_an_animated_image_but_never_to_video() {
+        let only_video = vec![art("https://x/a.webm", "video/webm", Some("animated"))];
+        assert!(first_static_art(only_video).is_none());
+
+        let animated_image = vec![art("https://x/a.webp", "image/webp", Some("animated"))];
+        assert!(first_static_art(animated_image).is_some());
+    }
+
+    /// Only static images matter for the auto-art path; without any, the caller
+    /// reports "no logo found" instead of downloading something unrenderable.
+    #[test]
+    fn first_static_art_returns_none_for_an_empty_page() {
+        assert!(first_static_art(Vec::new()).is_none());
+    }
 
     #[test]
     fn automatic_art_takes_the_first_result_in_api_order() {
@@ -976,6 +1239,25 @@ mod tests {
     fn name_similarity_is_case_insensitive() {
         assert_eq!(name_similarity("WITCHER 3", "witcher 3"), 100);
         assert_eq!(name_similarity("Witcher 3", "WITCHER 3"), 100);
+    }
+
+    #[test]
+    fn name_similarity_ignores_accents() {
+        // A folder called POKEMON EMERALD must still find "Pokémon Emerald
+        // Version": the accent used to make the first token unrelated, and the
+        // game then sat in the library with no artwork at all.
+        assert_eq!(name_similarity("POKEMON EMERALD", "Pokémon Emerald"), 100);
+        assert!(is_confident_title_match("POKEMON EMERALD", "Pokémon Emerald Version"));
+        assert!(is_confident_title_match("Cafe International", "Café International"));
+        // "Version" is catalogue wording: the real entry must beat a romhack
+        // that merely shares the first two words.
+        assert_eq!(name_similarity("POKEMON EMERALD", "Pokémon Emerald Version"), 100);
+        assert!(
+            name_similarity("POKEMON EMERALD", "Pokémon Emerald Version")
+                > name_similarity("POKEMON EMERALD", "Pokémon Emerald Crest")
+        );
+        // Folding accents must not merge different numbers.
+        assert!(!is_confident_title_match("Pokémon Emerald 2", "Pokémon Emerald"));
     }
 
     #[test]
