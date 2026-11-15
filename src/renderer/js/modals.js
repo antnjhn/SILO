@@ -103,7 +103,6 @@ export function openAddModal() {
   editingGameId = null; modalWallpaperPath = null; modalLogoPath = null;
   document.getElementById('modal-title').textContent = 'Add game';
   document.getElementById('scan-folder-container').hidden = false;
-  document.getElementById('import-container').hidden = false;
   document.getElementById('input-name').value = '';
   document.getElementById('input-font').value = '';
   document.getElementById('input-color').value = '#ffffff';
@@ -135,7 +134,6 @@ export function openEditModal(g) {
   modalLogoPath = g.logoPath || null;
   document.getElementById('modal-title').textContent = 'Edit game';
   document.getElementById('scan-folder-container').hidden = true;
-  document.getElementById('import-container').hidden = true;
   document.getElementById('input-name').value = g.name;
   document.getElementById('input-font').value = g.fontFamily || '';
   document.getElementById('input-color').value = g.fontColor || '#ffffff';
