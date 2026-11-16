@@ -6421,3 +6421,143 @@ body.rail-fx-instant #details-panel #details-actions {
     transition: none;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   COMPACT ACTION BAR
+   One bar for every input: a 56px track holding 44px hit areas, the wallpaper
+   accent on Launch only, and focus drawn on the button instead of the bar.
+   Delete stays outside the bar and keeps its own square control, the same
+   height as the track.
+   ═══════════════════════════════════════════════════════════════════════════ */
+#details-actions { overflow: visible; }
+
+.action-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 56px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+}
+
+.action-divider {
+  flex: 0 0 1px;
+  width: 1px;
+  height: 24px;
+  margin: 0 5px;
+  background: var(--hairline-strong);
+}
+
+/* Every button inside the bar is a 44px hit area on the bar's own surface, so
+   the bar reads as one object and only the focused or hovered button lifts. */
+#details-actions .action-bar .action-dock-btn {
+  width: auto;
+  min-width: 0;
+  flex: 0 0 auto;
+  height: 44px;
+  min-height: 44px;
+  padding: 0 14px;
+  gap: 9px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+#details-actions .action-bar .action-dock-btn:hover { background: var(--surface-3); }
+
+/* The labelled buttons carry a bare 18px glyph. The square accent tile belongs
+   to the old roomy dock, so it is flattened here rather than in its own rules. */
+#details-actions .action-bar .action-icon-tile {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  flex: 0 0 18px;
+  border-radius: 0;
+  background: transparent;
+  color: currentColor;
+}
+#details-actions .action-bar .action-icon-tile svg {
+  width: 18px;
+  height: 18px;
+  color: currentColor;
+  stroke-width: 1.7;
+}
+
+/* Launch is the one filled control: the wallpaper accent with its ink colour,
+   so the same bar reads correctly on a purple wallpaper and on a pale one. */
+#details-actions .action-bar #btn-launch {
+  padding: 0 16px;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+#details-actions .action-bar #btn-launch:hover,
+#details-actions .action-bar #btn-launch:focus-visible {
+  background: var(--accent-strong);
+}
+#details-actions .action-bar #btn-launch .action-label { color: var(--accent-ink); }
+#details-actions .action-bar #btn-launch .action-icon-tile,
+#details-actions .action-bar #btn-launch:hover .action-icon-tile,
+#details-actions .action-bar #btn-launch:focus-visible .action-icon-tile {
+  background: transparent;
+  color: var(--accent-ink);
+}
+
+/* Favorite is icon only, at the end of the bar past the divider. */
+#details-actions .action-bar .dock-fav {
+  width: 44px;
+  min-width: 44px;
+  flex: 0 0 44px;
+  height: 44px;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+}
+#details-actions .action-bar .dock-fav:hover { background: var(--surface-3); }
+#details-actions .action-bar .dock-fav .fav-star { width: 20px; height: 20px; }
+#details-actions .action-bar .dock-fav.fav-active,
+#details-actions .action-bar .dock-fav[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+#details-actions .action-bar .dock-fav.fav-active .fav-star,
+#details-actions .action-bar .dock-fav[aria-pressed="true"] .fav-star {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+
+/* Focus is drawn on the button: a white ring with a dark gap under it, which
+   holds up on a bright wallpaper and on a black one. The same ring marks the
+   controller's dock focus, so both inputs show the same thing. */
+#details-actions .action-bar .action-dock-btn:focus-visible,
+#details-actions .action-bar .action-dock-btn.dock-focus {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.85);
+}
+
+/* Controller: the bar steps up about 14% so the hit areas read at distance,
+   and the focused button grows inside it. */
+body.gamepad-active .action-bar {
+  transform: scale(1.14);
+  transform-origin: left center;
+}
+body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
+  transform: scale(1.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body:not(.force-motion) .action-bar,
+  body:not(.force-motion) #details-actions .action-bar .action-dock-btn {
+    transition: none;
+  }
+}
