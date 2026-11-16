@@ -304,11 +304,11 @@ export function closeOnlineArtPicker() {
 
 document.getElementById('btn-online-logo').addEventListener('click', () => {
   onlineArtMode = 'logo';
-  openArtPicker('logo', { apply: applyOnlineArt });
+  openArtPicker('logo', { apply: applyOnlineArt, gameId: editingGameId });
 });
 document.getElementById('btn-online-wallpaper').addEventListener('click', () => {
   onlineArtMode = 'wallpaper';
-  openArtPicker('wallpaper', { apply: applyOnlineArt });
+  openArtPicker('wallpaper', { apply: applyOnlineArt, gameId: editingGameId });
 });
 document.getElementById('btn-online-art-cancel').addEventListener('click', closeOnlineArtPicker);
 

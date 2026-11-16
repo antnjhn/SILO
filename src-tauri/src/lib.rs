@@ -18,12 +18,21 @@ pub mod tray;
 mod uninstaller;
 pub mod window_lifecycle;
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Registered first: a second launch hands off to the running window and
+        // exits, so two processes can never write the library at once.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -89,7 +98,10 @@ pub fn run() {
             metadata::sgdb_art,
             metadata::auto_art_for_game,
             metadata::sweep_art,
+            metadata::validate_sgdb_key,
+            metadata::art_status,
             metadata::preview_art,
+            commands::set_game_sgdb_id,
             discovery::get_discovery_state,
             discovery::discovery_add_folder,
             discovery::discovery_remove_folder,

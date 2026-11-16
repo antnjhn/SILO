@@ -3,6 +3,7 @@ import { showGameTitles, setShowGameTitles, setAllGames } from './state.js';
 import { showToast } from './utils.js';
 import { applyMotionPref, syncMotionToggle, setForceMotion, setDynamicAccent, syncDynamicAccentToggle, applyCategoryFilter } from './library.js';
 import { showPage } from './pages.js';
+import { listen } from './api.js';
 
 /* ── Settings & Backup ─────────────────────────────────────────────────────*/
 let cachedSettings = null;
@@ -36,7 +37,68 @@ async function openSettingsModal() {
     console.error(err);
   }
   await loadDiscovery();
+  await refreshArtStatus();
 }
+
+/* ── Artwork status ────────────────────────────────────────────────────────
+   The sweep is the only thing that fetches art, and when it fails it fails
+   quietly. This row is where the result lands: how many games still have none,
+   and a retry that kicks the same sweep off again. */
+async function refreshArtStatus() {
+  const text = document.getElementById('art-status-text');
+  const retry = document.getElementById('btn-art-retry');
+  if (!text || !retry) return;
+
+  let status;
+  try {
+    status = await window.vault.artStatus();
+  } catch {
+    text.textContent = 'Artwork status is unavailable.';
+    retry.hidden = true;
+    return;
+  }
+
+  if (!status || !status.total) {
+    text.textContent = 'No games yet, so there is nothing to fetch.';
+    retry.hidden = true;
+    return;
+  }
+  if (status.missing === 0) {
+    text.textContent = `All ${status.total} games have their artwork.`;
+    retry.hidden = true;
+    return;
+  }
+  text.textContent = status.hasKey
+    ? `${status.missing} of ${status.total} games still need artwork.`
+    : `${status.missing} of ${status.total} games need artwork. Add a key to fetch it.`;
+  retry.hidden = !status.hasKey;
+}
+
+document.getElementById('btn-art-retry')?.addEventListener('click', async () => {
+  const button = document.getElementById('btn-art-retry');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.textContent = 'Fetching...';
+  try {
+    await window.vault.sweepArt();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = 'Retry';
+    showToast('error', 'Artwork Failed', err);
+  }
+});
+
+// The sweep reports through art-progress; when it finishes, the row tells the
+// truth again and Retry becomes usable.
+listen('art-progress', (event) => {
+  if (event?.payload?.kind !== 'done') return;
+  const button = document.getElementById('btn-art-retry');
+  if (button) {
+    button.disabled = false;
+    button.textContent = 'Retry';
+  }
+  refreshArtStatus();
+});
 
 function currentCloseBehaviour() {
   const checked = document.querySelector('input[name="closeBehaviour"]:checked');
@@ -242,10 +304,24 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
   const closeBehaviour = currentCloseBehaviour();
   setShowGameTitles(document.getElementById('input-show-game-titles').checked);
   applyShowGameTitles();
+
+  // A key is checked before it is stored, so a bad paste is caught here rather
+  // than becoming games that never get artwork.
+  if (sgdbApiKey) {
+    try {
+      await window.vault.validateSgdbKey(sgdbApiKey);
+    } catch (err) {
+      showToast('error', 'Key Not Accepted', err);
+      return;
+    }
+  }
+
   try {
     await window.vault.setSettings({ settings: { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles, closeBehaviour } });
     cachedSettings = { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles, closeBehaviour };
     showToast('success', 'Settings Saved', 'Settings have been saved.');
+    // A new key can make the retry button relevant straight away.
+    refreshArtStatus();
   } catch (err) {
     showToast('error', 'Save Failed', err);
   }

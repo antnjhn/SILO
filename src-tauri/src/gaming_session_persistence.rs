@@ -431,6 +431,7 @@ mod tests {
             is_installed: Some(true),
             favorite: true,
             tags: vec!["tag".into()],
+            sgdb_id: None,
             launch_target: Some("game".into()),
             launch_child_path: None,
             exe_dir: Some("ignored".into()),

@@ -202,6 +202,29 @@ export function pollGamepad() {
   }
 }
 
+/* ── First run setup on a pad ──────────────────────────────────────────────
+   The setup card was mouse and keyboard only, which is a strange first
+   impression for a controller-first launcher. The d-pad walks the controls of
+   the step on screen, A presses the focused one, B takes the step's own skip
+   (or closes setup on the last step). Text fields stay keyboard work. */
+let onboardingFocusIndex = 0;
+
+function onboardingControls() {
+  const step = document.querySelector('#onboarding-card .ob-step:not(.hidden)');
+  if (!step) return [];
+  return [...step.querySelectorAll('button:not([disabled]), a[href]')]
+    .filter((control) => control.offsetParent !== null && !control.hidden);
+}
+
+function paintOnboardingFocus() {
+  const controls = onboardingControls();
+  if (!controls.length) return;
+  onboardingFocusIndex = ((onboardingFocusIndex % controls.length) + controls.length) % controls.length;
+  controls.forEach((control, index) => {
+    control.classList.toggle('ob-pad-focus', index === onboardingFocusIndex);
+  });
+}
+
 function handlePad(pad) {
   const now = Date.now();
   const modalOpen = !document.getElementById('modal-overlay').classList.contains('hidden');
@@ -246,6 +269,27 @@ function handlePad(pad) {
     prevAxes.up = up;
     prevAxes.down = down;
   };
+
+  /* ── 0. First run setup ──────────────────────────────────────────────────── */
+  if (document.body.classList.contains('onboarding-open')) {
+    const step = document.querySelector('#onboarding-card .ob-step:not(.hidden)');
+    if (step) {
+      const controls = onboardingControls();
+      if (down && !prevAxes.down) { onboardingFocusIndex += 1; paintOnboardingFocus(); }
+      if (up && !prevAxes.up) { onboardingFocusIndex -= 1; paintOnboardingFocus(); }
+      if (pressed.a && controls.length) {
+        controls[onboardingFocusIndex % controls.length]?.click();
+      }
+      if (pressed.b) {
+        const stepNumber = step.id.replace('ob-step-', '');
+        const skip = document.getElementById(`ob-skip-${stepNumber}`);
+        if (skip) skip.click();
+        else document.getElementById('ob-close')?.click();
+      }
+    }
+    commitAxes();
+    return;
+  }
 
   /* ── 1. Statistics page ──────────────────────────────────────────────────── */
   if (statsOpen) {

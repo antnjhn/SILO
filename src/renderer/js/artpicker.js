@@ -19,6 +19,10 @@ const artCache = new Map();
 const state = {
   mode: 'wallpaper',
   apply: null,
+  // The SILO game the picker was opened for, when there is one. Applying art
+  // against a game the user picked by hand is what lets later lookups skip the
+  // name search entirely.
+  libraryGameId: null,
   game: null,
   arts: [],
   shown: 0,
@@ -517,6 +521,9 @@ async function openGallery(game) {
 function applySelection() {
   const art = state.arts[state.selected];
   if (!art) return;
+  if (state.libraryGameId && state.game?.id) {
+    window.vault.setGameSgdbId(state.libraryGameId, state.game.id).catch(() => {});
+  }
   const apply = state.apply;
   if (apply) apply(art.url || art.thumb, art);
   closeArtPicker();
@@ -526,6 +533,7 @@ function applySelection() {
 export function openArtPicker(mode, options = {}) {
   state.mode = mode === 'logo' ? 'logo' : 'wallpaper';
   state.apply = typeof options.apply === 'function' ? options.apply : null;
+  state.libraryGameId = options.gameId || null;
 
   /* Remember the trigger so focus can be returned on close (better-accessibility focus restoration). */
   pickerTrigger = document.activeElement;

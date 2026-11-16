@@ -123,6 +123,14 @@ async function saveKey() {
   const input = el('ob-sgdb-key');
   const key = (input?.value || '').trim();
   if (key) {
+    // Check it now: a rejected key saved here would look like setup worked and
+    // then quietly leave every game without artwork.
+    try {
+      await window.vault.validateSgdbKey(key);
+    } catch (error) {
+      showToast('error', 'Key Not Accepted', error);
+      return false;
+    }
     try {
       const current = await window.vault.getSettings();
       await window.vault.setSettings({

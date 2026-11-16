@@ -931,12 +931,36 @@ async fn auto_art(app: AppHandle, game_id: String, once_per_session: bool) -> Au
         Ok(client) => client,
         Err(reason) => return AutoArtResult::skipped(reason),
     };
-    let Some(match_game) = search_best_match(&client, &key, &game.name).await else {
-        return AutoArtResult::skipped(format!(
-            "SteamGridDB has no confident match for \"{}\". Pick the art manually.",
-            game.name
-        ));
+    // A game the user matched by hand goes straight to that entry: searching by
+    // name again would quietly undo their choice on the next sweep.
+    let remembered = game
+        .sgdb_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    let match_game = match remembered {
+        Some(id) => SgdbGame {
+            id: id.to_string(),
+            name: game.name.clone(),
+            year: None,
+        },
+        None => match search_best_match(&client, &key, &game.name).await {
+            Some(found) => found,
+            None => {
+                return AutoArtResult::skipped(format!(
+                    "SteamGridDB has no confident match for \"{}\". Pick the art manually.",
+                    game.name
+                ))
+            }
+        },
     };
+
+    // Whatever was matched, remembered or guessed, is worth keeping: the next
+    // lookup then costs one art request instead of a search plus art.
+    if remembered.is_none() {
+        let _ = crate::commands::remember_sgdb_game(&app, &game_id, &match_game.id);
+    }
 
     let mut notes: Vec<String> = Vec::new();
     let mut logo_path = None;
@@ -1073,6 +1097,63 @@ pub fn sweep_art(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         sweep_missing_art(app).await;
     });
+}
+
+/// Checks a key before it is saved, so a bad paste shows up on the spot instead
+/// of as games that quietly never get artwork.
+#[tauri::command]
+pub async fn validate_sgdb_key(key: String) -> Result<String, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("Paste a key first.".to_string());
+    }
+    let client = sgdb_client()?;
+    let url = format!(
+        "{}/search/autocomplete/{}",
+        SGDB_BASE,
+        urlencoding::encode("portal")
+    );
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", key))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach SteamGridDB: {}", e))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok("Key works.".to_string());
+    }
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err("SteamGridDB rejected that key.".to_string());
+    }
+    Err(format!("SteamGridDB answered HTTP {}.", status))
+}
+
+/// How much of the library is still without artwork, for the Settings row.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtStatus {
+    pub total: usize,
+    pub missing: usize,
+    pub has_key: bool,
+}
+
+#[tauri::command]
+pub fn art_status(app: AppHandle) -> ArtStatus {
+    let games = crate::commands::get_games(app.clone());
+    let missing = games
+        .iter()
+        .filter(|game| {
+            let has_logo = game.logo_path.as_deref().is_some_and(|p| !p.trim().is_empty());
+            let has_wallpaper = game.wallpaper.as_deref().is_some_and(|p| !p.trim().is_empty());
+            !(has_logo && has_wallpaper)
+        })
+        .count();
+    ArtStatus {
+        total: games.len(),
+        missing,
+        has_key: sgdb_api_key(&app).is_ok(),
+    }
 }
 
 /// What the discovery prompt can actually draw.

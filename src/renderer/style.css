@@ -6578,3 +6578,11 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
 #details-actions .action-bar .action-dock-btn:hover,
 #details-actions .action-bar .dock-fav:hover { background: rgba(255, 255, 255, 0.09); }
 #details-actions .dock-delete:hover { background: var(--surface-2); }
+
+/* The pad's cursor in first run setup. A ring on the focused control, the same
+   one the action bar uses, so the two never disagree about what focus is. */
+#onboarding-card .ob-pad-focus {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.85);
+}

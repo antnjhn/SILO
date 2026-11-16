@@ -55,6 +55,11 @@ pub(crate) struct Game {
     pub favorite: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The SteamGridDB game this title was matched to, once the user has picked
+    /// one. With an id stored here the artwork sweep stops guessing by name and
+    /// asks for this game's art directly.
+    #[serde(rename = "sgdbId", default)]
+    pub sgdb_id: Option<String>,
     /// What the exePath points at, as chosen in the Edit modal: "auto" (SILO's
     /// guess, resolved per-launch), "launcher", or "game". Serialization uses
     /// camelCase like every other field.
@@ -122,10 +127,86 @@ pub(crate) fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), S
 
     if data_path.exists() {
         let _ = fs::copy(&data_path, &bak_path);
+        rotate_library_snapshot(&data_path);
     }
 
     fs::rename(&tmp_path, &data_path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Keeps a small rolling set of dated copies of the library beside it.
+///
+/// `.bak` protects against one bad write; these protect against a run of them,
+/// which is what a migration bug or a bad import looks like. One snapshot an
+/// hour is enough, and the ten newest are kept.
+fn rotate_library_snapshot(data_path: &Path) {
+    const KEEP: usize = 10;
+    const MIN_GAP_SECS: i64 = 3600;
+
+    let Some(parent) = data_path.parent() else {
+        return;
+    };
+    let dir = parent.join("library-backups");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    let mut snapshots: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_snapshot = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("library-") && name.ends_with(".json"));
+            if !is_snapshot {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    snapshots.sort_by_key(|(modified, _)| *modified);
+
+    let newest = snapshots.last().map(|(modified, _)| *modified);
+    let fresh_enough = newest
+        .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| (age.as_secs() as i64) < MIN_GAP_SECS);
+
+    if !fresh_enough {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let _ = fs::copy(data_path, dir.join(format!("library-{}.json", stamp)));
+    }
+
+    for (_, path) in snapshots.into_iter().rev().skip(KEEP) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Stores which SteamGridDB game a title was matched to, so the next lookup
+/// goes straight to it instead of searching by name again.
+pub(crate) fn remember_sgdb_game(app: &AppHandle, game_id: &str, sgdb_id: &str) -> Result<(), String> {
+    let clean = sgdb_id.trim();
+    if clean.is_empty() {
+        return Ok(());
+    }
+    let mut games = get_games(app.clone());
+    let Some(game) = games.iter_mut().find(|game| game.id == game_id) else {
+        return Err("That game is no longer in the library.".to_string());
+    };
+    if game.sgdb_id.as_deref() == Some(clean) {
+        return Ok(());
+    }
+    game.sgdb_id = Some(clean.to_string());
+    save_games_atomic(app, &games)
+}
+
+#[tauri::command]
+pub fn set_game_sgdb_id(app: AppHandle, game_id: String, sgdb_id: String) -> Result<(), String> {
+    remember_sgdb_game(&app, &game_id, &sgdb_id)
 }
 
 #[tauri::command]
@@ -453,6 +534,7 @@ pub fn add_game(
         backup_count: Some(5),
         favorite: false,
         tags: vec![],
+        sgdb_id: None,
         launch_target: launch_target.filter(|t| matches!(t.as_str(), "auto" | "launcher" | "game")),
         launch_child_path: launch_child_path
             .map(|path| path.trim().to_string())
@@ -5010,6 +5092,40 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn library_snapshot_rotation_keeps_one_copy_an_hour_and_caps_the_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "silo-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let data_path = root.join("games.json");
+        std::fs::write(&data_path, "[]").unwrap();
+
+        // First call takes a copy.
+        rotate_library_snapshot(&data_path);
+        let dir = root.join("library-backups");
+        let count = || std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(count(), 1, "the first save should leave one snapshot");
+
+        // A second save in the same hour does not add another.
+        rotate_library_snapshot(&data_path);
+        assert_eq!(count(), 1, "the hourly gate should hold");
+
+        // A folder that has grown past the cap is trimmed back to it.
+        for index in 0..14 {
+            std::fs::write(dir.join(format!("library-2000010{}-000000.json", index)), "[]").unwrap();
+        }
+        rotate_library_snapshot(&data_path);
+        assert_eq!(count(), 10, "only the ten newest snapshots are kept");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn clean_game_name_reads_like_a_title() {
         assert_eq!(clean_game_name("Cyberpunk 2077"), "Cyberpunk 2077");
         assert_eq!(clean_game_name("Elden_Ring"), "Elden Ring");
@@ -5099,6 +5215,7 @@ mod tests {
             is_installed: None,
             favorite: false,
             tags: vec![],
+            sgdb_id: None,
             launch_target: None,
             launch_child_path: None,
             exe_dir: None,
