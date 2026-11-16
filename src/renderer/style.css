@@ -6577,7 +6577,16 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
    back into the bar. */
 #details-actions .action-bar .action-dock-btn:hover,
 #details-actions .action-bar .dock-fav:hover { background: rgba(255, 255, 255, 0.09); }
-#details-actions .dock-delete:hover { background: var(--surface-2); }
+#details-actions .dock-delete:hover { background: rgba(255, 255, 255, 0.09); }
+
+/* The old hover inverted the control to ivory, and the glyphs were recoloured
+   for that surface. On the lifted surface the glyphs keep their resting colours,
+   so delete lifts exactly like the bar buttons and stays legible. The converge
+   animation is untouched. */
+#details-actions .dock-delete:hover .delete-x,
+#details-actions .dock-delete:focus-visible .delete-x { color: var(--text); }
+#details-actions .dock-delete:hover .delete-arrow path,
+#details-actions .dock-delete:focus-visible .delete-arrow path { fill: var(--accent); }
 
 /* The pad's cursor in first run setup. A ring on the focused control, the same
    one the action bar uses, so the two never disagree about what focus is. */
