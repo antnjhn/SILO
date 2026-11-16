@@ -6595,3 +6595,100 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
   outline-offset: 2px;
   box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.85);
 }
+
+/* ── On-screen keyboard ─────────────────────────────────────────────────────
+   Setup on a pad: the d-pad walks the keys, A types, B closes. Flat surfaces
+   only, so focus is a ring and the keys lift with the same wash as the bar. */
+.osk-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 560;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.osk-panel {
+  width: min(760px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgb(25, 25, 25);
+}
+
+.osk-row {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.osk-row-last {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 2px;
+}
+
+.osk-key {
+  height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.osk-key:hover { background: rgba(255, 255, 255, 0.09); }
+
+.osk-key-wide {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.osk-key.osk-focus {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.osk-hint {
+  margin: 2px 0 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* ── Library snapshots (Settings) ───────────────────────────────────────── */
+.snapshot-block { margin-top: 14px; }
+
+.snapshot-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.snapshot-select {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgb(25, 25, 25);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.snapshot-select:disabled,
+#btn-restore-snapshot:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

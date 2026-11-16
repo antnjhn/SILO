@@ -12,6 +12,7 @@ import {
   revealNavFromController, revealNavAndFocus, isNavRevealed, hideNavNow, moveNavFocus, activateNavItem, toggleNav,
 } from './nav.js';
 import { showPage } from './pages.js';
+import { isKeyboardOpen, openKeyboard, handleKeyboardPad } from './osk.js';
 
 // Gamepad
 const DEADZONE = 0.4;
@@ -205,15 +206,16 @@ export function pollGamepad() {
 /* ── First run setup on a pad ──────────────────────────────────────────────
    The setup card was mouse and keyboard only, which is a strange first
    impression for a controller-first launcher. The d-pad walks the controls of
-   the step on screen, A presses the focused one, B takes the step's own skip
-   (or closes setup on the last step). Text fields stay keyboard work. */
+   the step on screen, A presses the focused one (or brings up the on-screen
+   keyboard for a text field), B takes the step's own skip (or closes setup on
+   the last step). */
 let onboardingFocusIndex = 0;
 
 function onboardingControls() {
   const step = document.querySelector('#onboarding-card .ob-step:not(.hidden)');
   if (!step) return [];
-  return [...step.querySelectorAll('button:not([disabled]), a[href]')]
-    .filter((control) => control.offsetParent !== null && !control.hidden);
+  return [...step.querySelectorAll('button:not([disabled]), a[href], input:not([type="checkbox"]):not([type="radio"]):not([type="color"])')]
+    .filter((control) => control.offsetParent !== null && !control.hidden && !control.readOnly);
 }
 
 function paintOnboardingFocus() {
@@ -274,11 +276,24 @@ function handlePad(pad) {
   if (document.body.classList.contains('onboarding-open')) {
     const step = document.querySelector('#onboarding-card .ob-step:not(.hidden)');
     if (step) {
+      // The keyboard takes the pad while it is up, or typing would move the
+      // focus behind it.
+      if (isKeyboardOpen()) {
+        handleKeyboardPad({
+          a: pressed.a, b: pressed.b, up, down, left, right,
+          wasUp: prevAxes.up, wasDown: prevAxes.down,
+          wasLeft: prevAxes.left, wasRight: prevAxes.right,
+        });
+        commitAxes();
+        return;
+      }
       const controls = onboardingControls();
       if (down && !prevAxes.down) { onboardingFocusIndex += 1; paintOnboardingFocus(); }
       if (up && !prevAxes.up) { onboardingFocusIndex -= 1; paintOnboardingFocus(); }
       if (pressed.a && controls.length) {
-        controls[onboardingFocusIndex % controls.length]?.click();
+        const control = controls[onboardingFocusIndex % controls.length];
+        if (control?.tagName === 'INPUT') openKeyboard(control);
+        else control?.click();
       }
       if (pressed.b) {
         const stepNumber = step.id.replace('ob-step-', '');

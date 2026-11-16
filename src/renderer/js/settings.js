@@ -26,7 +26,6 @@ async function openSettingsModal() {
     cachedSettings = s;
     setShowGameTitles(!!s.showGameTitles);
     document.getElementById('input-sgdb-key').value = s.sgdbApiKey || '';
-    document.getElementById('input-check-updates').checked = !!s.checkUpdatesOnLaunch;
     const closeBehaviourIds = { askEveryTime: 'ask', minimiseToTray: 'tray', exitApplication: 'exit' };
     const radio = document.getElementById('close-behaviour-' + closeBehaviourIds[s.closeBehaviour]);
     if (radio) radio.checked = true;
@@ -38,6 +37,41 @@ async function openSettingsModal() {
   }
   await loadDiscovery();
   await refreshArtStatus();
+  await loadSnapshots();
+}
+
+/* ── Library snapshots ─────────────────────────────────────────────────────
+   games.json is written through a temp file and a .bak, and hourly copies are
+   kept beside it. Until now nothing could use them. This is the way back: the
+   copies are listed, and one can be put back without touching a file by hand. */
+async function loadSnapshots() {
+  const select = document.getElementById('snapshot-select');
+  const button = document.getElementById('btn-restore-snapshot');
+  if (!select || !button) return;
+  select.innerHTML = '';
+  let snapshots = [];
+  try {
+    snapshots = (await window.vault.listLibrarySnapshots()) || [];
+  } catch {
+    snapshots = [];
+  }
+  if (!snapshots.length) {
+    const option = document.createElement('option');
+    option.textContent = 'No snapshots yet';
+    option.value = '';
+    select.append(option);
+    select.disabled = true;
+    button.disabled = true;
+    return;
+  }
+  for (const snapshot of snapshots) {
+    const option = document.createElement('option');
+    option.value = snapshot.name;
+    option.textContent = `${snapshot.savedAt} · ${snapshot.games} game${snapshot.games === 1 ? '' : 's'}`;
+    select.append(option);
+  }
+  select.disabled = false;
+  button.disabled = false;
 }
 
 /* ── Artwork status ────────────────────────────────────────────────────────
@@ -73,6 +107,32 @@ async function refreshArtStatus() {
     : `${status.missing} of ${status.total} games need artwork. Add a key to fetch it.`;
   retry.hidden = !status.hasKey;
 }
+
+document.getElementById('btn-restore-snapshot')?.addEventListener('click', async () => {
+  const select = document.getElementById('snapshot-select');
+  const button = document.getElementById('btn-restore-snapshot');
+  const name = select?.value;
+  if (!name || !button || button.disabled) return;
+  const label = select.options[select.selectedIndex]?.textContent || name;
+  const { ask } = window.__TAURI__.dialog;
+  const yes = await ask(
+    `Restore the library from ${label}? The library you have now is saved first, so this can be undone.`,
+    { title: 'Restore library', kind: 'warning' },
+  );
+  if (!yes) return;
+  button.disabled = true;
+  try {
+    const count = await window.vault.restoreLibrarySnapshot(name);
+    setAllGames(await window.vault.getGames());
+    applyCategoryFilter(false);
+    showToast('success', 'Library Restored', `${count} game${count === 1 ? '' : 's'} restored.`);
+  } catch (err) {
+    showToast('error', 'Restore Failed', err);
+  } finally {
+    button.disabled = false;
+    loadSnapshots();
+  }
+});
 
 document.getElementById('btn-art-retry')?.addEventListener('click', async () => {
   const button = document.getElementById('btn-art-retry');
@@ -114,7 +174,6 @@ document.getElementById('input-show-game-titles')?.addEventListener('change', as
   applyShowGameTitles();
   const base = cachedSettings || {
     sgdbApiKey: document.getElementById('input-sgdb-key').value.trim() || null,
-    checkUpdatesOnLaunch: document.getElementById('input-check-updates').checked,
     closeBehaviour: currentCloseBehaviour(),
   };
   base.showGameTitles = on;
@@ -123,7 +182,6 @@ document.getElementById('input-show-game-titles')?.addEventListener('change', as
     await window.vault.setSettings({
       settings: {
         sgdbApiKey: base.sgdbApiKey || null,
-        checkUpdatesOnLaunch: !!base.checkUpdatesOnLaunch,
         showGameTitles: on,
         closeBehaviour: base.closeBehaviour,
       },
@@ -138,7 +196,6 @@ document.querySelectorAll('input[name="closeBehaviour"]').forEach((radio) => {
   radio.addEventListener('change', async () => {
     const base = cachedSettings || {
       sgdbApiKey: document.getElementById('input-sgdb-key').value.trim() || null,
-      checkUpdatesOnLaunch: document.getElementById('input-check-updates').checked,
       closeBehaviour: currentCloseBehaviour(),
     };
     base.closeBehaviour = currentCloseBehaviour();
@@ -146,7 +203,6 @@ document.querySelectorAll('input[name="closeBehaviour"]').forEach((radio) => {
       await window.vault.setSettings({
         settings: {
           sgdbApiKey: base.sgdbApiKey || null,
-          checkUpdatesOnLaunch: !!base.checkUpdatesOnLaunch,
           showGameTitles: document.getElementById('input-show-game-titles').checked,
           closeBehaviour: base.closeBehaviour,
         },
@@ -300,7 +356,6 @@ document.getElementById('btn-toggle-key-visibility')?.addEventListener('click', 
 });
 document.getElementById('btn-save-settings').addEventListener('click', async () => {
   const sgdbApiKey = document.getElementById('input-sgdb-key').value.trim() || null;
-  const checkUpdatesOnLaunch = document.getElementById('input-check-updates').checked;
   const closeBehaviour = currentCloseBehaviour();
   setShowGameTitles(document.getElementById('input-show-game-titles').checked);
   applyShowGameTitles();
@@ -317,8 +372,8 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
   }
 
   try {
-    await window.vault.setSettings({ settings: { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles, closeBehaviour } });
-    cachedSettings = { sgdbApiKey, checkUpdatesOnLaunch, showGameTitles, closeBehaviour };
+    await window.vault.setSettings({ settings: { sgdbApiKey, showGameTitles, closeBehaviour } });
+    cachedSettings = { sgdbApiKey, showGameTitles, closeBehaviour };
     showToast('success', 'Settings Saved', 'Settings have been saved.');
     // A new key can make the retry button relevant straight away.
     refreshArtStatus();
@@ -355,16 +410,25 @@ async function importStoreLibrary(source, button) {
   }
 
   let known = new Set();
+  let knownNames = new Set();
   try {
     const library = (await window.vault.getGames()) || [];
     known = new Set(library.map((game) => game.exePath).filter(Boolean));
+    // The same game can come from a store and from a folder scan, and those
+    // records do not always agree on the executable, so the name counts too.
+    knownNames = new Set(library
+      .map((game) => (game.name || '').trim().toLowerCase())
+      .filter(Boolean));
   } catch {
     known = new Set();
+    knownNames = new Set();
   }
 
   const fresh = candidates.filter((candidate) => candidate
     && candidate.exePath
-    && !known.has(candidate.exePath));
+    && !known.has(candidate.exePath)
+    && !knownNames.has((candidate.name || '').trim().toLowerCase()));
+  const alreadyThere = candidates.length - fresh.length;
 
   let added = 0;
   for (const candidate of fresh) {
@@ -379,9 +443,13 @@ async function importStoreLibrary(source, button) {
   }
 
   if (status) {
-    status.textContent = added
-      ? `${added} game${added === 1 ? '' : 's'} added from ${source}.`
-      : `Nothing new found in your ${source} library.`;
+    if (added) {
+      status.textContent = `${added} game${added === 1 ? '' : 's'} added from ${source}.`;
+    } else if (alreadyThere) {
+      status.textContent = `Every game in your ${source} library is already here.`;
+    } else {
+      status.textContent = `Nothing new found in your ${source} library.`;
+    }
   }
   try {
     setAllGames(await window.vault.getGames());

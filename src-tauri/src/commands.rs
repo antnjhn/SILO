@@ -134,6 +134,109 @@ pub(crate) fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), S
     Ok(())
 }
 
+/// A path folded the way the filesystem compares it: case-insensitive, either
+/// separator, no trailing slash. Used only to decide whether two records name
+/// the same executable.
+fn path_identity(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .to_lowercase()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// One dated copy of the library, as Settings lists them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySnapshot {
+    pub name: String,
+    pub saved_at: String,
+    pub games: usize,
+}
+
+/// A snapshot name is a bare file name: the renderer never gets to name a path,
+/// so a restore cannot reach outside the snapshots folder.
+fn is_snapshot_name(name: &str) -> bool {
+    !name.is_empty()
+        && Path::new(name).file_name().and_then(|part| part.to_str()) == Some(name)
+        && name.starts_with("library-")
+        && name.ends_with(".json")
+}
+
+fn library_snapshots_dir(app: &AppHandle) -> Option<PathBuf> {
+    get_data_path(app).parent().map(|parent| parent.join("library-backups"))
+}
+
+/// The snapshots `rotate_library_snapshot` has written, newest first.
+#[tauri::command]
+pub fn list_library_snapshots(app: AppHandle) -> Vec<LibrarySnapshot> {
+    let Some(dir) = library_snapshots_dir(&app) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut snapshots: Vec<(std::time::SystemTime, LibrarySnapshot)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            if !name.starts_with("library-") || !name.ends_with(".json") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            let games = fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Vec<Game>>(&text).ok())
+                .map(|games| games.len())
+                .unwrap_or(0);
+            let saved_at: chrono::DateTime<chrono::Local> = modified.into();
+            Some((
+                modified,
+                LibrarySnapshot {
+                    name,
+                    saved_at: saved_at.format("%Y-%m-%d %H:%M").to_string(),
+                    games,
+                },
+            ))
+        })
+        .collect();
+    snapshots.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    snapshots.into_iter().map(|(_, snapshot)| snapshot).collect()
+}
+
+/// Puts one snapshot back. The library it replaces is written the normal way,
+/// so the current contents become the newest `.bak` and a fresh snapshot before
+/// anything changes: restoring the wrong copy is itself undoable.
+#[tauri::command]
+pub fn restore_library_snapshot(app: AppHandle, name: String) -> Result<usize, String> {
+    let clean = name.trim();
+    if !is_snapshot_name(clean) {
+        return Err("That is not a library snapshot.".to_string());
+    }
+    let dir = library_snapshots_dir(&app).ok_or("The library folder is unavailable.")?;
+    let games = read_snapshot(&dir, clean)?;
+    let count = games.len();
+    save_games_atomic(&app, &games)?;
+    Ok(count)
+}
+
+/// Reads one snapshot out of its folder. Kept apart from the command so the
+/// refusal cases can be tested without an app handle or a real library.
+fn read_snapshot(dir: &Path, name: &str) -> Result<Vec<Game>, String> {
+    if !is_snapshot_name(name) {
+        return Err("That is not a library snapshot.".to_string());
+    }
+    let text = fs::read_to_string(dir.join(name))
+        .map_err(|_| "That snapshot is no longer there.".to_string())?;
+    let games: Vec<Game> =
+        serde_json::from_str(&text).map_err(|_| "That snapshot cannot be read.".to_string())?;
+    if games.is_empty() {
+        return Err("That snapshot holds no games, so nothing was restored.".to_string());
+    }
+    Ok(games)
+}
+
 /// Keeps a small rolling set of dated copies of the library beside it.
 ///
 /// `.bak` protects against one bad write; these protect against a run of them,
@@ -509,6 +612,21 @@ pub fn add_game(
     launch_child_path: Option<String>,
 ) -> Result<Game, String> {
     let mut games = get_games(app.clone());
+    // A game can reach the library twice: once from a store import and once
+    // from a folder scan. Both carry the same executable, and a second scan
+    // without one carries the same name, which is enough to refuse the copy
+    // rather than leave two tiles for one game.
+    let exe_identity = exe_path.as_deref().map(path_identity).filter(|p| !p.is_empty());
+    let name_identity = name.trim().to_lowercase();
+    if let Some(existing) = games.iter().find(|game| {
+        let same_exe = exe_identity.as_ref().is_some_and(|candidate| {
+            game.exe_path.as_deref().map(path_identity).as_ref() == Some(candidate)
+        });
+        let same_name = !name_identity.is_empty() && game.name.trim().to_lowercase() == name_identity;
+        same_exe || same_name
+    }) {
+        return Err(format!("{} is already in your library.", existing.name));
+    }
     let save_path = normalize_save_path(save_path.as_deref())?;
     let new_game = Game {
         id: std::time::SystemTime::now()
@@ -2146,13 +2264,14 @@ fn save_import_plan(
             // Nothing recorded to work from; the relink check reports these too.
             continue;
         };
-        // Only the games with nowhere at all to point. A folder that exists here
-        // is the relink's business, and a usable one needs nothing.
-        if !matches!(
-            survey_save_folder_with(game, &machine),
-            SaveFolderOutcome::Unresolved { .. }
-        ) {
-            continue;
+        // A folder this machine already has is the relink's business, and a
+        // usable one needs nothing. A match that only a name supports is not:
+        // the relink refuses those, so leaving them to it would drop the game
+        // from the import plan without a word about it.
+        match survey_save_folder_with(game, &machine) {
+            SaveFolderOutcome::Usable => continue,
+            SaveFolderOutcome::Relink { confidence, .. } if confidence.is_enough_for_a_relink() => continue,
+            _ => {}
         }
 
         let verdict = stored_path_verdict(Path::new(recorded), &current_profile_name());
@@ -5090,6 +5209,54 @@ pub fn confirm_close(app: AppHandle, choice: String, remember: bool) -> Result<(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn snapshot_names_are_bare_file_names() {
+        assert!(is_snapshot_name("library-20260116-120000.json"));
+        assert!(!is_snapshot_name("../games.json"));
+        assert!(!is_snapshot_name("library-backups/library-20260116-120000.json"));
+        assert!(!is_snapshot_name("games.json"));
+        assert!(!is_snapshot_name(""));
+    }
+
+    #[test]
+    fn read_snapshot_returns_the_games_and_refuses_the_rest() {
+        let dir = TempDir::new("snapshot_read");
+        let root = dir.path();
+        fs::create_dir_all(root).unwrap();
+        let good = root.join("library-20260101-090000.json");
+        let games = vec![survey_game("g1", "Game", None)];
+        fs::write(&good, serde_json::to_string(&games).unwrap()).unwrap();
+
+        let read = read_snapshot(root, "library-20260101-090000.json").unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].id, "g1");
+
+        assert!(read_snapshot(root, "games.json").unwrap_err().contains("not a library snapshot"));
+        assert!(read_snapshot(root, "library-missing.json")
+            .unwrap_err()
+            .contains("no longer there"));
+
+        fs::write(root.join("library-empty.json"), "[]").unwrap();
+        assert!(read_snapshot(root, "library-empty.json")
+            .unwrap_err()
+            .contains("holds no games"));
+
+        fs::write(root.join("library-broken.json"), "{not json").unwrap();
+        assert!(read_snapshot(root, "library-broken.json")
+            .unwrap_err()
+            .contains("cannot be read"));
+    }
+
+    #[test]
+    fn path_identity_folds_case_and_separators() {
+        assert_eq!(
+            path_identity(r"C:\Games\Silo\Game.EXE"),
+            path_identity("c:/games/silo/game.exe")
+        );
+        assert_eq!(path_identity("  /opt/game/  "), "/opt/game");
+        assert_ne!(path_identity("C:/Games/A.exe"), path_identity("C:/Games/B.exe"));
+    }
 
     #[test]
     fn library_snapshot_rotation_keeps_one_copy_an_hour_and_caps_the_folder() {

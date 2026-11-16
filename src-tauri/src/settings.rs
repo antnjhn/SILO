@@ -25,6 +25,8 @@ pub enum CloseBehaviour {
 pub struct Settings {
     #[serde(rename = "sgdbApiKey")]
     pub sgdb_api_key: Option<String>,
+    // Kept so an older settings file still parses, and inert: automatic update
+    // checks are off for now, so nothing reads this.
     #[serde(rename = "checkUpdatesOnLaunch")]
     pub check_updates_on_launch: bool,
     #[serde(rename = "showGameTitles")]

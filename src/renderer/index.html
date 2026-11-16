@@ -550,12 +550,6 @@
               </label>
             </div>
 
-            <div class="set-item">
-              <label class="settings-check">
-                <input type="checkbox" id="input-check-updates" />
-                <span>Check for updates on launch</span>
-              </label>
-            </div>
           </div>
 
           <div class="set-advanced" id="settings-advanced">
@@ -565,6 +559,14 @@
                 <span>Backup Manager</span>
                 <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>
               </button>
+              <div class="set-item set-item-stack snapshot-block" id="snapshot-block">
+                <div class="set-title">Library snapshots</div>
+                <p class="settings-hint">SILO keeps the ten newest hourly copies of your library, so a bad import or a broken edit can be undone.</p>
+                <div class="snapshot-row">
+                  <select id="snapshot-select" class="snapshot-select" aria-label="Library snapshot"></select>
+                  <button type="button" id="btn-restore-snapshot" class="settings-ghost">Restore</button>
+                </div>
+              </div>
               <button type="button" id="btn-open-logs" class="set-nav">
                 <span>Open Logs Folder</span>
                 <svg class="set-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" /></svg>

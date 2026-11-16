@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MetadataCandidate {
@@ -337,6 +337,44 @@ pub async fn fetch_metadata(app: AppHandle, name: String) -> Result<MetadataResu
 
 // Returns SteamGridDB game hits for a query via autocomplete, logging the
 // matched games so a failed lookup is diagnosable.
+/* ── Rate limiting ─────────────────────────────────────────────────────────
+   SteamGridDB answers 429 with a Retry-After when its per-minute budget is
+   spent. The sweep honours that instead of hammering the endpoint: the deadline
+   is shared, so every lookup after the first 429 waits for it, and a wait that
+   outlives the sweep ends the sweep rather than burning the rest of the budget
+   in the background. */
+static RATE_LIMITED_UNTIL: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
+
+fn note_rate_limit(response: &reqwest::Response) {
+    if response.status().as_u16() != 429 {
+        return;
+    }
+    let wait = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(15)
+        .clamp(1, 120);
+    let until = std::time::Instant::now() + Duration::from_secs(wait);
+    let slot = RATE_LIMITED_UNTIL.get_or_init(|| std::sync::Mutex::new(None));
+    match slot.lock() {
+        Ok(mut guard) => *guard = Some(until),
+        Err(poisoned) => *poisoned.into_inner() = Some(until),
+    }
+    log::warn!("SteamGridDB rate limited; waiting {}s before the next lookup", wait);
+}
+
+/// How long the shared rate-limit deadline still has to run, if it is set.
+fn rate_limit_wait() -> Option<Duration> {
+    let slot = RATE_LIMITED_UNTIL.get_or_init(|| std::sync::Mutex::new(None));
+    let until = match slot.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    }?;
+    until.checked_duration_since(std::time::Instant::now())
+}
+
 async fn sgdb_games(client: &reqwest::Client, key: &str, query: &str) -> Vec<SgdbGame> {
     let url = format!(
         "https://www.steamgriddb.com/api/v2/search/autocomplete/{}",
@@ -352,6 +390,7 @@ async fn sgdb_games(client: &reqwest::Client, key: &str, query: &str) -> Vec<Sgd
         return Vec::new();
     };
     if !response.status().is_success() {
+        note_rate_limit(&response);
         log::warn!("SteamGridDB autocomplete -> HTTP {}", response.status());
         return Vec::new();
     }
@@ -852,6 +891,7 @@ async fn fetch_first_art(client: &reqwest::Client, key: &str, game_id: &str, kin
         .map_err(|error| log::warn!("auto-art: {} request failed: {}", kind, error))
         .ok()?;
     if !response.status().is_success() {
+        note_rate_limit(&response);
         log::warn!("auto-art: {} -> HTTP {}", kind, response.status());
         return None;
     }
@@ -946,12 +986,18 @@ async fn auto_art(app: AppHandle, game_id: String, once_per_session: bool) -> Au
             year: None,
         },
         None => match search_best_match(&client, &key, &game.name).await {
-            Some(found) => found,
+            Some(found) => {
+                forget_art_failure(&app, &game.name);
+                found
+            }
             None => {
+                // Remembering this is what stops the next launch spending the
+                // same request on a title SteamGridDB simply does not have.
+                remember_art_failure(&app, &game.name);
                 return AutoArtResult::skipped(format!(
                     "SteamGridDB has no confident match for \"{}\". Pick the art manually.",
                     game.name
-                ))
+                ));
             }
         },
     };
@@ -1020,7 +1066,67 @@ fn art_field_count(game: &serde_json::Value) -> usize {
 ///
 /// It is deliberately sequential and spaced out: SteamGridDB rate limits per
 /// minute, and a library of a few dozen games must not trip it.
-pub async fn sweep_missing_art(app: AppHandle) {
+/* ── Titles SteamGridDB does not have ──────────────────────────────────────
+   A first launch with fifty games used to spend fifty lookups on titles that
+   will never match, again on every launch and usually against the same answer.
+   The failures are remembered for a week, so a sweep only pays for them once;
+   an explicit retry, which the Settings row offers, ignores the memory. */
+const ART_FAILURE_COOLDOWN: i64 = 7 * 24 * 60 * 60;
+
+fn art_failures_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("art-failures.json"))
+}
+
+fn load_art_failures(app: &AppHandle) -> std::collections::HashMap<String, i64> {
+    art_failures_path(app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_art_failures(app: &AppHandle, failures: &std::collections::HashMap<String, i64>) {
+    let Some(path) = art_failures_path(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(failures) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn art_failure_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn remember_art_failure(app: &AppHandle, name: &str) {
+    let mut failures = load_art_failures(app);
+    failures.insert(art_failure_key(name), chrono::Utc::now().timestamp());
+    save_art_failures(app, &failures);
+}
+
+fn forget_art_failure(app: &AppHandle, name: &str) {
+    let key = art_failure_key(name);
+    let mut failures = load_art_failures(app);
+    if failures.remove(&key).is_some() {
+        save_art_failures(app, &failures);
+    }
+}
+
+/// Whether a title failed to match recently enough that a sweep should skip it.
+fn art_failure_is_recent(failures: &std::collections::HashMap<String, i64>, name: &str) -> bool {
+    let Some(failed_at) = failures.get(&art_failure_key(name)) else {
+        return false;
+    };
+    let age = chrono::Utc::now().timestamp() - failed_at;
+    age < ART_FAILURE_COOLDOWN
+}
+
+pub async fn sweep_missing_art(app: AppHandle, ignore_cooldown: bool) {
     let games = crate::commands::get_games(app.clone());
     let missing: Vec<(String, String, usize)> = games
         .iter()
@@ -1057,9 +1163,27 @@ pub async fn sweep_missing_art(app: AppHandle) {
         "art-progress",
         serde_json::json!({ "kind": "start", "done": 0, "total": total, "filled": 0 }),
     );
+    let failures = load_art_failures(&app);
     let mut filled = 0usize;
     let mut done = 0usize;
     for (id, name, before) in missing {
+        if !ignore_cooldown && art_failure_is_recent(&failures, &name) {
+            log::info!("auto-art sweep: '{}' had no match recently, skipping", name);
+            done += 1;
+            let _ = app.emit(
+                "art-progress",
+                serde_json::json!({ "kind": "step", "done": done, "total": total, "filled": filled }),
+            );
+            continue;
+        }
+        // A 429 means the rest of this sweep would only earn more of them.
+        if let Some(wait) = rate_limit_wait() {
+            if wait > Duration::from_secs(60) {
+                log::warn!("auto-art sweep: rate limited for {:?}, stopping", wait);
+                break;
+            }
+            std::thread::sleep(wait);
+        }
         let result = auto_art(app.clone(), id, false).await;
         let after = result.game.as_ref().map(art_field_count).unwrap_or(before);
         if let Some(reason) = &result.reason {
@@ -1095,7 +1219,8 @@ pub async fn sweep_missing_art(app: AppHandle) {
 #[tauri::command]
 pub fn sweep_art(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        sweep_missing_art(app).await;
+        // Asked for on purpose, so a title that failed before is tried again.
+        sweep_missing_art(app, true).await;
     });
 }
 
@@ -1514,5 +1639,16 @@ mod tests {
             })
             .collect();
         assert_eq!(order_sgdb_games("Game", games).len(), 20);
+    }
+
+    #[test]
+    fn a_recent_failure_is_skipped_and_an_old_one_is_tried_again() {
+        let mut failures = std::collections::HashMap::new();
+        let now = chrono::Utc::now().timestamp();
+        failures.insert(art_failure_key("Hollow Knight"), now);
+        assert!(art_failure_is_recent(&failures, " hollow KNIGHT "));
+        failures.insert(art_failure_key("Old Game"), now - ART_FAILURE_COOLDOWN - 1);
+        assert!(!art_failure_is_recent(&failures, "Old Game"));
+        assert!(!art_failure_is_recent(&failures, "Never Tried"));
     }
 }

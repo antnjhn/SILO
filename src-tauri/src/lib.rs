@@ -84,6 +84,8 @@ pub fn run() {
             commands::delete_game_folder,
             commands::backup_library,
             commands::restore_library,
+            commands::list_library_snapshots,
+            commands::restore_library_snapshot,
             settings::get_settings,
             settings::set_settings,
             commands::confirm_close,
@@ -160,7 +162,7 @@ pub fn run() {
             let art_handle = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                tauri::async_runtime::block_on(crate::metadata::sweep_missing_art(art_handle));
+                tauri::async_runtime::block_on(crate::metadata::sweep_missing_art(art_handle, false));
             });
             #[cfg(target_os = "windows")]
             {

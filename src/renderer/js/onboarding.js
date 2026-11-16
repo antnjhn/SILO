@@ -136,7 +136,6 @@ async function saveKey() {
       await window.vault.setSettings({
         settings: {
           sgdbApiKey: key,
-          checkUpdatesOnLaunch: !!current?.checkUpdatesOnLaunch,
           showGameTitles: !!current?.showGameTitles,
           closeBehaviour: current?.closeBehaviour || 'askEveryTime',
         },

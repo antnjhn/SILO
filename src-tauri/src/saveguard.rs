@@ -210,6 +210,13 @@ pub fn pid_chain_reaches(system: &System, target_pid: u32, known: &HashSet<u32>)
     false
 }
 
+/// SILO's own installation folder. It sits in the same kind of directory a
+/// library scan walks, and a game whose name merely contains the launcher's
+/// name would otherwise be matched to it: its saves are never there.
+fn is_launcher_own_folder(folder_name: &str) -> bool {
+    normalize_key(folder_name) == normalize_key(env!("CARGO_PKG_NAME"))
+}
+
 pub fn is_save_root_excluded(folder_name: &str) -> bool {
     let exclusions = [
         "d3dscache",
@@ -529,7 +536,7 @@ pub fn find_save_root_by_scan(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if is_save_root_excluded(&name) {
+            if is_save_root_excluded(&name) || is_launcher_own_folder(&name) {
                 continue;
             }
             if !name_keys.iter().any(|key| name_matches(&name, key)) {
