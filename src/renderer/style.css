@@ -6668,6 +6668,8 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
 /* ── Library snapshots (Settings) ───────────────────────────────────────── */
 .snapshot-block { margin-top: 14px; }
 
+/* The picker takes the row and the button keeps its own width, so the control
+   reads as one field with a button beside it rather than two stretched boxes. */
 .snapshot-row {
   display: flex;
   gap: 8px;
@@ -6675,20 +6677,41 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
   margin-top: 10px;
 }
 
-.snapshot-select {
-  flex: 1;
+#settings-modal .snapshot-select {
+  flex: 1 1 auto;
+  width: auto;
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: rgb(25, 25, 25);
   color: var(--text);
-  font-family: inherit;
+  font-family: var(--font-ui);
   font-size: 13px;
 }
+
+#btn-restore-snapshot { flex: 0 0 auto; }
 
 .snapshot-select:disabled,
 #btn-restore-snapshot:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Toggle rows fill their row, so every switch lands on the same right edge no
+   matter how long the copy beside it is. */
+#settings-modal .set-item > .settings-toggle-row { width: 100%; }
+
+/* Hierarchy in the settings header: the title names the page, the line under
+   it is support, so it gets smaller rather than larger. */
+#settings-modal .settings-head .settings-title {
+  font-family: 'Inter', sans-serif;
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+#settings-modal .settings-head .settings-desc {
+  font-size: 11px;
+  margin-top: 2px;
 }
