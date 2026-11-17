@@ -1611,7 +1611,6 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   width: 16px;
   height: 16px;
   stroke: currentColor;
-  stroke-width: 2.6;
   stroke-linecap: round;
   stroke-linejoin: round;
   fill: none;
@@ -6489,6 +6488,11 @@ body.rail-fx-instant #details-panel #details-actions {
   color: currentColor;
   stroke-width: 1.7;
 }
+/* Launch is the primary action, so its arrow carries a heavier line than the
+   icons beside it. This is the only place that weight is declared. */
+#details-actions .action-bar #btn-launch .dock-launch-arrow svg {
+  stroke-width: 2.6;
+}
 
 /* Launch is the one filled control: the wallpaper accent with its ink colour,
    so the same bar reads correctly on a purple wallpaper and on a pale one. */
@@ -6716,8 +6720,3 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
   margin-top: 2px;
 }
 
-/* The compact bar sets one icon stroke for every action. Launch's arrow reads
-   as the primary action, so it carries a bolder line than the rest. */
-#details-actions .action-bar #btn-launch .dock-launch-arrow svg {
-  stroke-width: 2.6;
-}
