@@ -84,6 +84,9 @@ jobs:
       - name: Check imports/exports
         run: python3 .tools/check-modules.py
 
+      - name: Renderer tests
+        run: node --test src/renderer/js/gamepad.test.mjs src/renderer/js/structure.test.mjs
+
   rust-diff-churn:
     name: Rust diff is not mostly reformatting
     runs-on: ubuntu-latest

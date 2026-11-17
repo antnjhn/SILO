@@ -135,9 +135,8 @@ pub(crate) fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), S
 }
 
 /// The schema version written into `games.json` and into every library zip,
-/// which carries the same file. Bump it when a field is renamed or retyped, and
-/// teach `parse_library_json` the older shape: a reader that knows the number can
-/// say so instead of guessing.
+/// which carries the same file. Bump it and add the step for the old shape to
+/// `LIBRARY_MIGRATIONS`; a test refuses a bump without one.
 pub(crate) const LIBRARY_SCHEMA_VERSION: u32 = 1;
 
 /// The on-disk shape of the library: the version beside the games, so a future
@@ -149,27 +148,82 @@ pub(crate) fn library_document(games: &[Game]) -> serde_json::Value {
     })
 }
 
-/// Reads either shape: the bare array every version up to 0.5.4 wrote, and the
-/// versioned object written since. A library from a newer SILO is refused with
-/// its number named, because reading it as this version's shape would lose data.
-pub(crate) fn parse_library_json(text: &str) -> Result<Vec<Game>, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|error| error.to_string())?;
+/// One step from an older on-disk shape to the next. Steps chain, so a library
+/// several versions old is read by applying each in turn instead of by one
+/// reader that has to understand every era at once.
+struct LibraryMigration {
+    from: u32,
+    to: u32,
+    apply: fn(serde_json::Value) -> Result<serde_json::Value, String>,
+}
+
+const LIBRARY_MIGRATIONS: &[LibraryMigration] = &[LibraryMigration {
+    from: 0,
+    to: 1,
+    apply: wrap_bare_library,
+}];
+
+/// Schema 0: a bare array of games, which is what every version before 0.5.4
+/// wrote and what an older snapshot still holds.
+fn wrap_bare_library(value: serde_json::Value) -> Result<serde_json::Value, String> {
+    if !value.is_array() {
+        return Err("This library file is not in a shape SILO reads.".to_string());
+    }
+    Ok(serde_json::json!({ "schemaVersion": 1, "games": value }))
+}
+
+/// The version a document says it is. A bare array is schema 0 by definition;
+/// a versioned object without a number is refused rather than guessed at.
+fn document_version(value: &serde_json::Value) -> Result<u32, String> {
     if value.is_array() {
-        return serde_json::from_value(value).map_err(|error| error.to_string());
+        return Ok(0);
     }
     let Some(object) = value.as_object() else {
         return Err("This library file is not in a shape SILO reads.".to_string());
     };
-    if let Some(version) = object.get("schemaVersion").and_then(|value| value.as_u64()) {
-        if version > LIBRARY_SCHEMA_VERSION as u64 {
-            return Err(format!(
-                "This file was written by a newer version of SILO (schema {}). Update SILO first.",
-                version
-            ));
-        }
+    object
+        .get("schemaVersion")
+        .and_then(|version| version.as_u64())
+        .map(|version| version as u32)
+        .ok_or_else(|| "This library file has no schema version.".to_string())
+}
+
+/// Walks `value` up to `target` using `steps`. A missing step is an error, not
+/// a fallback: reading a shape nobody wrote a migration for is how a library
+/// file ends up emptied.
+fn migrate_library_document(
+    mut value: serde_json::Value,
+    target: u32,
+    steps: &[LibraryMigration],
+) -> Result<serde_json::Value, String> {
+    let mut version = document_version(&value)?;
+    if version > target {
+        return Err(format!(
+            "This file was written by a newer version of SILO (schema {}). Update SILO first.",
+            version
+        ));
     }
-    let games = object
+    while version < target {
+        let step = steps.iter().find(|step| step.from == version).ok_or_else(|| {
+            format!(
+                "This library needs a migration SILO does not have (from schema {}).",
+                version
+            )
+        })?;
+        value = (step.apply)(value)?;
+        version = step.to;
+    }
+    Ok(value)
+}
+
+/// Reads any shape a released SILO has written, by migrating it to the shape
+/// this build reads. A library from a newer SILO is refused with its number
+/// named, because reading it as this version's shape would lose data.
+pub(crate) fn parse_library_json(text: &str) -> Result<Vec<Game>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let value = migrate_library_document(value, LIBRARY_SCHEMA_VERSION, LIBRARY_MIGRATIONS)?;
+    let games = value
         .get("games")
         .cloned()
         .ok_or("This library file has no games in it.")?;
@@ -5475,8 +5529,38 @@ mod tests {
             .unwrap_err()
             .contains("newer version"));
 
-        assert!(parse_library_json("{}").unwrap_err().contains("no games"));
+        assert!(parse_library_json("{}")
+            .unwrap_err()
+            .contains("no schema version"));
+        assert!(parse_library_json(r#"{"schemaVersion": 1}"#)
+            .unwrap_err()
+            .contains("no games"));
         assert!(parse_library_json("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_schema_version_has_one_migration_step() {
+        for version in 0..LIBRARY_SCHEMA_VERSION {
+            let step = LIBRARY_MIGRATIONS
+                .iter()
+                .find(|step| step.from == version)
+                .unwrap_or_else(|| panic!("schema {} has no migration step", version));
+            assert_eq!(
+                step.to,
+                version + 1,
+                "the step from schema {} must land on the next version",
+                version
+            );
+        }
+        assert!(LIBRARY_MIGRATIONS
+            .iter()
+            .all(|step| step.to <= LIBRARY_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn a_missing_migration_is_reported_rather_than_skipped() {
+        let error = migrate_library_document(serde_json::json!([]), 2, &[]).unwrap_err();
+        assert!(error.contains("does not have"), "{}", error);
     }
 
     #[test]
