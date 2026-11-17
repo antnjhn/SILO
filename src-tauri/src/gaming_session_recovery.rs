@@ -75,10 +75,11 @@ pub fn reconcile(directory: &Path) -> Result<RecoveryAction, String> {
                 .elapsed_seconds
                 .ok_or("missing elapsed checkpoint for interrupted session")?;
             let minutes = elapsed.div_ceil(60) as u32;
-            let games: Vec<crate::commands::Game> = match std::fs::read(directory.join("games.json")) {
-                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
-                Err(error) => return Err(error.to_string()),
-            };
+            let games: Vec<crate::commands::Game> =
+                match std::fs::read_to_string(directory.join("games.json")) {
+                    Ok(text) => crate::commands::parse_library_json(&text)?,
+                    Err(error) => return Err(error.to_string()),
+                };
             let game = games
                 .iter()
                 .find(|game| game.id == journal.game_id)
@@ -178,7 +179,10 @@ mod tests {
 
         assert_eq!(reconcile(&directory).unwrap(), RecoveryAction::RetryFinalization);
         assert_eq!(reconcile(&directory).unwrap(), RecoveryAction::NoJournal);
-        let games: Vec<Game> = serde_json::from_slice(&fs::read(directory.join("games.json")).unwrap()).unwrap();
+        let games: Vec<Game> = crate::commands::parse_library_json(
+            &std::fs::read_to_string(directory.join("games.json")).unwrap(),
+        )
+        .unwrap();
         let history: Vec<HistoryRow> =
             serde_json::from_slice(&fs::read(directory.join("sessions.json")).unwrap()).unwrap();
         assert_eq!(games[0].playtime_minutes, 13);
@@ -235,7 +239,10 @@ mod tests {
         // PID 4242 does not exist, so the observation is a definite exit.
         assert_eq!(reconcile(&directory).unwrap(), RecoveryAction::FinalizeInterrupted);
         assert_eq!(reconcile(&directory).unwrap(), RecoveryAction::NoJournal);
-        let games: Vec<Game> = serde_json::from_slice(&fs::read(directory.join("games.json")).unwrap()).unwrap();
+        let games: Vec<Game> = crate::commands::parse_library_json(
+            &std::fs::read_to_string(directory.join("games.json")).unwrap(),
+        )
+        .unwrap();
         let history: Vec<HistoryRow> =
             serde_json::from_slice(&fs::read(directory.join("sessions.json")).unwrap()).unwrap();
         assert_eq!(

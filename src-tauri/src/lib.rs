@@ -86,6 +86,8 @@ pub fn run() {
             commands::restore_library,
             commands::list_library_snapshots,
             commands::restore_library_snapshot,
+            commands::verify_save_backups,
+            commands::check_for_update,
             settings::get_settings,
             settings::set_settings,
             commands::confirm_close,

@@ -114,7 +114,7 @@ pub(crate) fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), S
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let json_str = serde_json::to_string_pretty(games).map_err(|e| e.to_string())?;
+    let json_str = serde_json::to_string_pretty(&library_document(games)).map_err(|e| e.to_string())?;
     let tmp_path = data_path.with_extension("json.tmp");
     let bak_path = data_path.with_extension("json.bak");
 
@@ -132,6 +132,48 @@ pub(crate) fn save_games_atomic(app: &AppHandle, games: &[Game]) -> Result<(), S
 
     fs::rename(&tmp_path, &data_path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The schema version written into `games.json` and into every library zip,
+/// which carries the same file. Bump it when a field is renamed or retyped, and
+/// teach `parse_library_json` the older shape: a reader that knows the number can
+/// say so instead of guessing.
+pub(crate) const LIBRARY_SCHEMA_VERSION: u32 = 1;
+
+/// The on-disk shape of the library: the version beside the games, so a future
+/// version can be recognised before it is misread.
+pub(crate) fn library_document(games: &[Game]) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": LIBRARY_SCHEMA_VERSION,
+        "games": games,
+    })
+}
+
+/// Reads either shape: the bare array every version up to 0.5.4 wrote, and the
+/// versioned object written since. A library from a newer SILO is refused with
+/// its number named, because reading it as this version's shape would lose data.
+pub(crate) fn parse_library_json(text: &str) -> Result<Vec<Game>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| error.to_string())?;
+    if value.is_array() {
+        return serde_json::from_value(value).map_err(|error| error.to_string());
+    }
+    let Some(object) = value.as_object() else {
+        return Err("This library file is not in a shape SILO reads.".to_string());
+    };
+    if let Some(version) = object.get("schemaVersion").and_then(|value| value.as_u64()) {
+        if version > LIBRARY_SCHEMA_VERSION as u64 {
+            return Err(format!(
+                "This file was written by a newer version of SILO (schema {}). Update SILO first.",
+                version
+            ));
+        }
+    }
+    let games = object
+        .get("games")
+        .cloned()
+        .ok_or("This library file has no games in it.")?;
+    serde_json::from_value(games).map_err(|error| error.to_string())
 }
 
 /// A path folded the way the filesystem compares it: case-insensitive, either
@@ -187,7 +229,7 @@ pub fn list_library_snapshots(app: AppHandle) -> Vec<LibrarySnapshot> {
             let modified = entry.metadata().ok()?.modified().ok()?;
             let games = fs::read_to_string(&path)
                 .ok()
-                .and_then(|text| serde_json::from_str::<Vec<Game>>(&text).ok())
+                .and_then(|text| parse_library_json(&text).ok())
                 .map(|games| games.len())
                 .unwrap_or(0);
             let saved_at: chrono::DateTime<chrono::Local> = modified.into();
@@ -215,7 +257,13 @@ pub fn restore_library_snapshot(app: AppHandle, name: String) -> Result<usize, S
         return Err("That is not a library snapshot.".to_string());
     }
     let dir = library_snapshots_dir(&app).ok_or("The library folder is unavailable.")?;
-    let games = read_snapshot(&dir, clean)?;
+    let mut games = read_snapshot(&dir, clean)?;
+    // Install state is checked against this machine, not restored from the day
+    // the copy was taken: a snapshot from before an uninstall would otherwise
+    // bring back a tile that claims to be installed.
+    for game in &mut games {
+        game.is_installed = Some(game.exe_path.as_ref().is_some_and(|path| Path::new(path).exists()));
+    }
     let count = games.len();
     save_games_atomic(&app, &games)?;
     Ok(count)
@@ -230,7 +278,7 @@ fn read_snapshot(dir: &Path, name: &str) -> Result<Vec<Game>, String> {
     let text = fs::read_to_string(dir.join(name))
         .map_err(|_| "That snapshot is no longer there.".to_string())?;
     let games: Vec<Game> =
-        serde_json::from_str(&text).map_err(|_| "That snapshot cannot be read.".to_string())?;
+        parse_library_json(&text).map_err(|_| "That snapshot cannot be read.".to_string())?;
     if games.is_empty() {
         return Err("That snapshot holds no games, so nothing was restored.".to_string());
     }
@@ -320,7 +368,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
     if !data_path.exists() {
         if bak_path.exists() {
             if let Ok(data) = fs::read_to_string(&bak_path) {
-                if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&data) {
+                if let Ok(mut games) = parse_library_json(&data) {
                     let _ = app.emit(
                         "library-corrupt-recovered",
                         "Primary library missing. Recovered from backup.",
@@ -336,7 +384,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
     }
 
     let data = fs::read_to_string(&data_path).unwrap_or_default();
-    match serde_json::from_str::<Vec<Game>>(&data) {
+    match parse_library_json(&data) {
         Ok(mut games) => {
             for game in &mut games {
                 game.is_installed = Some(game.exe_path.as_ref().is_some_and(|p| Path::new(p).exists()));
@@ -347,7 +395,7 @@ pub fn get_games(app: AppHandle) -> Vec<Game> {
             log::error!("Failed to parse games.json: {}", e);
             if bak_path.exists() {
                 if let Ok(bak_data) = fs::read_to_string(&bak_path) {
-                    if let Ok(mut games) = serde_json::from_str::<Vec<Game>>(&bak_data) {
+                    if let Ok(mut games) = parse_library_json(&bak_data) {
                         let _ = app.emit(
                             "library-corrupt-recovered",
                             format!("Primary library corrupt ({}). Recovered from backup.", e),
@@ -4734,6 +4782,147 @@ pub fn get_all_backups(app: AppHandle) -> Result<Vec<BackupSummary>, String> {
     Ok(summaries)
 }
 
+/// What a pass over the save archives found, for the Backup Manager.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupVerifyReport {
+    pub checked: usize,
+    pub healthy: usize,
+    /// File names that could not be read back, newest first.
+    pub broken: Vec<String>,
+}
+
+/// Opens every save archive and reads its entries. A backup that was written to
+/// a full disk still has a plausible name and a non-zero size, and the only way
+/// to know it is usable is to look inside it. This is the same check that runs
+/// on every new archive, over the whole set.
+#[tauri::command]
+pub fn verify_save_backups(app: AppHandle) -> Result<BackupVerifyReport, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "The library folder is unavailable.".to_string())?
+        .join("saves");
+    let mut report = BackupVerifyReport {
+        checked: 0,
+        healthy: 0,
+        broken: Vec::new(),
+    };
+    let Ok(games) = fs::read_dir(&root) else {
+        return Ok(report);
+    };
+    let mut archives: Vec<PathBuf> = Vec::new();
+    for game in games.flatten() {
+        if !game.path().is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(game.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("zip") {
+                archives.push(path);
+            }
+        }
+    }
+    archives.sort_by(|a, b| b.cmp(a));
+    for path in archives {
+        report.checked += 1;
+        match crate::saveguard::verify_save_archive(&path) {
+            Ok(_) => report.healthy += 1,
+            Err(reason) => {
+                log::warn!("Save archive {:?} failed verification: {}", path, reason);
+                let game = path
+                    .parent()
+                    .and_then(|dir| dir.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                report.broken.push(format!(
+                    "{}/{}",
+                    game,
+                    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                ));
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// The newest published release, when it is newer than this build.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub current: String,
+    pub latest: String,
+    pub url: String,
+}
+
+/// Asks GitHub for the latest release. Drafts are invisible to this endpoint,
+/// which is exactly right: a draft is not something to send anyone to.
+#[tauri::command]
+pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let current = app.package_info().version.to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("Could not start the request: {}", error))?;
+    let response = client
+        .get("https://api.github.com/repos/antnjhn/SILO/releases/latest")
+        .header("User-Agent", "SILO-update-check")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach GitHub: {}", error))?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub answered HTTP {}.", response.status()));
+    }
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Could not read GitHub's answer: {}", error))?;
+    let latest = json
+        .get("tag_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
+    if latest.is_empty() {
+        return Err("GitHub did not name a version.".to_string());
+    }
+    let url = json
+        .get("html_url")
+        .and_then(|value| value.as_str())
+        .unwrap_or("https://github.com/antnjhn/SILO/releases")
+        .to_string();
+    Ok(if version_is_newer(&latest, &current) {
+        Some(UpdateInfo { current, latest, url })
+    } else {
+        None
+    })
+}
+
+/// Numeric comparison of dotted versions, so 0.5.10 is newer than 0.5.9.
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    fn parts(version: &str) -> Vec<u64> {
+        version
+            .split(['.', '-', '+'])
+            .map(|part| part.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let latest = parts(latest);
+    let current = parts(current);
+    for index in 0..latest.len().max(current.len()) {
+        let a = latest.get(index).copied().unwrap_or(0);
+        let b = current.get(index).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    false
+}
+
 #[tauri::command]
 pub fn delete_game_backups(app: AppHandle, game_id: String) -> Result<(), String> {
     if game_id.contains('/') || game_id.contains('\\') || game_id.contains("..") {
@@ -5142,6 +5331,20 @@ pub async fn backup_library(app: AppHandle) -> Result<String, String> {
     Err("Backup cancelled".into())
 }
 
+/// The schema version a library archive carries, when its games.json names one.
+fn archive_library_schema(path: &Path) -> Option<u32> {
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut entry = archive.by_name("games.json").ok()?;
+    let mut text = String::new();
+    entry.read_to_string(&mut text).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("schemaVersion")
+        .and_then(|version| version.as_u64())
+        .map(|version| version as u32)
+}
+
 #[tauri::command]
 pub async fn restore_library(app: AppHandle) -> Result<String, String> {
     let file_path = app
@@ -5154,6 +5357,16 @@ pub async fn restore_library(app: AppHandle) -> Result<String, String> {
             .path()
             .app_data_dir()
             .map_err(|_| "Failed to get AppData directory")?;
+        // A backup from a newer SILO is refused before anything is unpacked:
+        // extracting it would replace this library with a shape it cannot read.
+        if let Some(schema) = archive_library_schema(std::path::Path::new(&src_path.to_string())) {
+            if schema > LIBRARY_SCHEMA_VERSION {
+                return Err(format!(
+                    "This backup was written by a newer version of SILO (schema {}). Update SILO first.",
+                    schema
+                ));
+            }
+        }
         log::info!("Starting library restore: src={:?}, dest={:?}", src_path, app_data_dir);
         let result = unzip_file(std::path::Path::new(&src_path.to_string()), &app_data_dir);
         match &result {
@@ -5246,6 +5459,32 @@ mod tests {
         assert!(read_snapshot(root, "library-broken.json")
             .unwrap_err()
             .contains("cannot be read"));
+    }
+
+    #[test]
+    fn library_json_reads_both_shapes_and_refuses_the_future() {
+        let games = vec![survey_game("g1", "Game", None)];
+        let document = library_document(&games).to_string();
+        assert_eq!(parse_library_json(&document).unwrap().len(), 1);
+
+        let legacy = serde_json::to_string(&games).unwrap();
+        assert_eq!(parse_library_json(&legacy).unwrap().len(), 1);
+
+        let future = r#"{"schemaVersion": 9, "games": []}"#;
+        assert!(parse_library_json(future)
+            .unwrap_err()
+            .contains("newer version"));
+
+        assert!(parse_library_json("{}").unwrap_err().contains("no games"));
+        assert!(parse_library_json("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn versions_compare_by_number_not_text() {
+        assert!(version_is_newer("0.5.10", "0.5.9"));
+        assert!(version_is_newer("1.0", "0.9.9"));
+        assert!(!version_is_newer("0.5.4", "0.5.4"));
+        assert!(!version_is_newer("0.4.9", "0.5.0"));
     }
 
     #[test]

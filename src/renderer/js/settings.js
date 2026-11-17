@@ -502,28 +502,29 @@ document.getElementById('btn-open-logs').addEventListener('click', async () => {
   }
 });
 
+/* Asks GitHub for the newest published release. This needs no signing key and
+   no updater endpoint: it is a read of the public releases list, and it sends
+   the user to the download page rather than installing anything behind them. */
 document.getElementById('btn-check-updates').addEventListener('click', async () => {
+  const button = document.getElementById('btn-check-updates');
+  if (button?.disabled) return;
+  if (button) button.disabled = true;
   try {
-    const updater = window.__TAURI__?.updater;
-    if (updater && updater.check) {
-      const u = await updater.check();
-      if (u) {
-        if (u.updateAvailable) {
-          showToast('info', 'Update Available', `Update ${u.version} is available`);
-          await u.downloadAndInstall({
-            mimeType: 'application/octet-stream',
-            requestHeaders: [],
-          });
-        } else {
-          showToast('info', 'Up to Date', 'You are up to date');
-        }
-      } else {
-        showToast('info', 'Up to Date', 'You are up to date');
-      }
-    } else {
-      showToast('info', 'Not Configured', 'Updates not configured');
+    const update = await window.vault.checkForUpdate();
+    if (!update) {
+      const version = await window.__TAURI__.app.getVersion();
+      showToast('info', 'Up to Date', `You are on ${version}.`);
+      return;
     }
-  } catch (e) {
-    showToast('error', 'Update Unavailable', 'Update check unavailable');
+    const { ask } = window.__TAURI__.dialog;
+    const yes = await ask(`Version ${update.latest} is available. Open the releases page?`, {
+      title: 'Update Available',
+      kind: 'info',
+    });
+    if (yes) await window.vault.openExternalUrl(update.url);
+  } catch (err) {
+    showToast('error', 'Update Unavailable', err);
+  } finally {
+    if (button) button.disabled = false;
   }
 });

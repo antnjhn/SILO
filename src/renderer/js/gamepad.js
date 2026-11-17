@@ -218,6 +218,20 @@ function onboardingControls() {
     .filter((control) => control.offsetParent !== null && !control.hidden && !control.readOnly);
 }
 
+/* Text fields in whatever panel is open. The same keyboard the setup step uses
+   is offered wherever one of these takes focus, so a key or a game name can be
+   typed with a pad after setup as well. */
+let panelInputIndex = 0;
+
+function panelTextInputs() {
+  const panels = ['#modal', '#settings-modal', '#backup-name-modal', '#metadata-modal']
+    .map((selector) => document.querySelector(selector))
+    .filter((panel) => panel && panel.offsetParent !== null);
+  return panels.flatMap((panel) => [...panel.querySelectorAll(
+    'input[type="text"], input[type="password"], input[type="number"]',
+  )]).filter((input) => input.offsetParent !== null && !input.readOnly && !input.disabled);
+}
+
 function paintOnboardingFocus() {
   const controls = onboardingControls();
   if (!controls.length) return;
@@ -272,21 +286,21 @@ function handlePad(pad) {
     prevAxes.down = down;
   };
 
+  /* The keyboard owns the pad while it is up, wherever it was opened from. */
+  if (isKeyboardOpen()) {
+    handleKeyboardPad({
+      a: pressed.a, b: pressed.b, up, down, left, right,
+      wasUp: prevAxes.up, wasDown: prevAxes.down,
+      wasLeft: prevAxes.left, wasRight: prevAxes.right,
+    });
+    commitAxes();
+    return;
+  }
+
   /* ── 0. First run setup ──────────────────────────────────────────────────── */
   if (document.body.classList.contains('onboarding-open')) {
     const step = document.querySelector('#onboarding-card .ob-step:not(.hidden)');
     if (step) {
-      // The keyboard takes the pad while it is up, or typing would move the
-      // focus behind it.
-      if (isKeyboardOpen()) {
-        handleKeyboardPad({
-          a: pressed.a, b: pressed.b, up, down, left, right,
-          wasUp: prevAxes.up, wasDown: prevAxes.down,
-          wasLeft: prevAxes.left, wasRight: prevAxes.right,
-        });
-        commitAxes();
-        return;
-      }
       const controls = onboardingControls();
       if (down && !prevAxes.down) { onboardingFocusIndex += 1; paintOnboardingFocus(); }
       if (up && !prevAxes.up) { onboardingFocusIndex -= 1; paintOnboardingFocus(); }
@@ -319,6 +333,24 @@ function handlePad(pad) {
 
   /* ── 2. Overlays: import, settings, metadata, online art, backup manager ──── */
   if (modalOpen || metadataOpen || onlineArtOpen || backupManagerOpen || settingsOpen) {
+    // A text field in the open panel can be reached with the d-pad and typed
+    // into with the on-screen keyboard. Buttons stay mouse and keyboard work, as
+    // before; this only closes the typing gap for a controller.
+    const inputs = panelTextInputs();
+    if (inputs.length) {
+      const active = inputs.indexOf(document.activeElement);
+      if (down && !prevAxes.down) {
+        panelInputIndex = active < 0 ? 0 : Math.min(active + 1, inputs.length - 1);
+        inputs[panelInputIndex].focus({ preventScroll: true });
+      }
+      if (up && !prevAxes.up) {
+        panelInputIndex = active <= 0 ? 0 : active - 1;
+        inputs[panelInputIndex].focus({ preventScroll: true });
+      }
+      if (pressed.a && inputs.includes(document.activeElement)) {
+        openKeyboard(document.activeElement);
+      }
+    }
     // The import and settings panels are pages now, so the controller needs a
     // way out of them: B goes back to the library, like it does on the
     // statistics page.

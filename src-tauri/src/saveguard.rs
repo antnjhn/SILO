@@ -553,6 +553,24 @@ pub fn find_save_root_by_scan(
     named_only
 }
 
+/// Reads every entry of a save archive, so a truncated or empty zip is caught
+/// before anyone relies on it. Returns the entry count.
+pub fn verify_save_archive(path: &Path) -> Result<usize, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("not a readable archive: {}", error))?;
+    let count = archive.len();
+    if count == 0 {
+        return Err("the archive holds nothing".to_string());
+    }
+    for index in 0..count {
+        archive
+            .by_index(index)
+            .map_err(|error| format!("entry {}: {}", index, error))?;
+    }
+    Ok(count)
+}
+
 pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHandle) {
     if roots.is_empty() {
         return;
@@ -608,8 +626,21 @@ pub fn backup_saves(roots: &HashSet<PathBuf>, game_id: &str, app_handle: &AppHan
         }
     }
 
-    let _ = zip.finish();
-    log::info!("Backup created at {:?}", zip_path);
+    if let Err(error) = zip.finish() {
+        log::error!("Save backup could not be finished: {}", error);
+        let _ = fs::remove_file(&zip_path);
+        return;
+    }
+
+    // A file that opens is not a backup. Read it back before it counts as one,
+    // so a full disk leaves nothing behind that looks like a usable copy.
+    match verify_save_archive(&zip_path) {
+        Ok(entries) => log::info!("Backup created at {:?} ({} entries)", zip_path, entries),
+        Err(reason) => {
+            log::error!("Save backup at {:?} failed verification: {}", zip_path, reason);
+            let _ = fs::remove_file(&zip_path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -629,6 +660,43 @@ mod tests {
         ] {
             assert!(is_save_root_excluded(folder), "expected {:?} excluded", folder);
         }
+    }
+
+    #[test]
+    fn verify_save_archive_rejects_an_empty_or_broken_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "silo-verify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let good = dir.join("good.zip");
+        {
+            let file = File::create(&good).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("Saves/save.dat", FileOptions::default()).unwrap();
+            zip.write_all(b"progress").unwrap();
+            zip.finish().unwrap();
+        }
+        assert_eq!(verify_save_archive(&good).unwrap(), 1);
+
+        let broken = dir.join("broken.zip");
+        fs::write(&broken, b"PK not really").unwrap();
+        assert!(verify_save_archive(&broken).is_err());
+
+        let empty = dir.join("empty.zip");
+        {
+            let file = File::create(&empty).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.finish().unwrap();
+        }
+        assert!(verify_save_archive(&empty).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

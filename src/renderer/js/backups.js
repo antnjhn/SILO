@@ -80,6 +80,34 @@ document.getElementById('btn-backup-manager-close').addEventListener('click', ()
   document.getElementById('backup-manager-overlay').classList.add('hidden');
 });
 
+/* Every archive is opened and read once. A backup written while the disk was
+   full has a plausible name and size, so naming is not evidence. */
+document.getElementById('btn-verify-backups').addEventListener('click', async () => {
+  const button = document.getElementById('btn-verify-backups');
+  const status = document.getElementById('backup-verify-status');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = 'Reading every archive...';
+  }
+  try {
+    const report = await window.vault.verifySaveBackups();
+    if (!status) return;
+    if (!report || !report.checked) {
+      status.textContent = 'There are no save backups to check yet.';
+    } else if (report.broken.length) {
+      status.textContent = `${report.healthy} of ${report.checked} backups read back cleanly. Could not read: ${report.broken.join(', ')}`;
+    } else {
+      status.textContent = `All ${report.checked} backups read back cleanly.`;
+    }
+  } catch (err) {
+    showToast('error', 'Verification Failed', err);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 async function openBackupManager() {
   const overlay = document.getElementById('backup-manager-overlay');
   const listEl = document.getElementById('backup-manager-list');

@@ -991,7 +991,9 @@
       <div class="panel-title">Backup manager</div>
       <div class="panel-desc">All save backups across your library.</div>
       <div id="backup-manager-list" style="display: flex; flex-direction: column; gap: 12px; max-height: 380px; overflow-y: auto; margin-bottom: 20px;"></div>
-      <div style="display: flex; justify-content: flex-end;">
+      <p id="backup-verify-status" class="set-desc" role="status" hidden></p>
+      <div style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="glass-btn small" id="btn-verify-backups">Verify backups</button>
         <button class="glass-btn small" id="btn-backup-manager-close">Close</button>
       </div>
     </div>

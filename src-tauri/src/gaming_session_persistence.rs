@@ -2,7 +2,6 @@
 //!
 //! This module intentionally has no Tauri or process-monitor dependency. Callers
 //! provide the app-data directory and a snapshot of the game's current totals.
-use crate::commands::Game;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -274,7 +273,9 @@ fn finalize_with_boundary(
     boundary(CommitBoundary::History)?;
 
     let games_path = directory.join(GAMES_FILE);
-    let mut games = read_json_or_default::<Vec<Game>>(&games_path)?;
+    let mut games = crate::commands::parse_library_json(
+        &std::fs::read_to_string(&games_path).map_err(|error| error.to_string())?,
+    )?;
     let game = games
         .iter_mut()
         .find(|game| game.id == journal.game_id)
@@ -285,7 +286,7 @@ fn finalize_with_boundary(
     game.uncertain_playtime_minutes = finalization.targets.uncertain_playtime_minutes;
     game.session_count = finalization.targets.session_count;
     game.last_played.clone_from(&finalization.targets.last_played);
-    write_json_atomic(&games_path, &games)?;
+    write_json_atomic(&games_path, &crate::commands::library_document(&games))?;
     boundary(CommitBoundary::Games)?;
 
     // Clearing only follows both durable writes. Failure leaves replay evidence.
@@ -371,6 +372,7 @@ fn sync_directory(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::Game;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestDir(PathBuf);
@@ -461,7 +463,10 @@ mod tests {
                 .expect("journal retained");
             finalize(dir.path(), &mut recovered, row.clone()).expect("retry finalize");
             let history: Vec<HistoryRow> = read_json_or_default(&dir.path().join(HISTORY_FILE)).expect("history read");
-            let games: Vec<Game> = read_json_or_default(&dir.path().join(GAMES_FILE)).expect("game read");
+            let games: Vec<Game> = crate::commands::parse_library_json(
+                &std::fs::read_to_string(dir.path().join(GAMES_FILE)).expect("read")
+            )
+            .expect("game read");
             assert_eq!(history, vec![row]);
             assert_eq!(games[0].playtime_minutes, 19);
             assert_eq!(games[0].uncertain_playtime_minutes, 4);
@@ -494,7 +499,10 @@ mod tests {
         );
         assert!(load_journal(dir.path()).expect("journal load").is_none());
         let history: Vec<HistoryRow> = read_json_or_default(&dir.path().join(HISTORY_FILE)).expect("history");
-        let games: Vec<Game> = read_json_or_default(&dir.path().join(GAMES_FILE)).expect("games");
+        let games: Vec<Game> = crate::commands::parse_library_json(
+                &std::fs::read_to_string(dir.path().join(GAMES_FILE)).expect("read")
+            )
+            .expect("games");
         assert_eq!(history, vec![row]);
         assert_eq!(games[0].playtime_minutes, 19);
         assert_eq!(games[0].session_count, 3);
@@ -529,7 +537,10 @@ mod tests {
         let (mut journal, row) = fixture(dir.path());
         write_journal(dir.path(), &journal).expect("journal");
         finalize(dir.path(), &mut journal, row.clone()).expect("finalize");
-        let games: Vec<Game> = read_json_or_default(&dir.path().join(GAMES_FILE)).expect("games");
+        let games: Vec<Game> = crate::commands::parse_library_json(
+                &std::fs::read_to_string(dir.path().join(GAMES_FILE)).expect("read")
+            )
+            .expect("games");
         // The fixture commits 19 exact minutes and 4 uncertain minutes.
         assert_eq!(games[0].playtime_minutes, 19);
         assert_eq!(games[0].uncertain_playtime_minutes, 4);
