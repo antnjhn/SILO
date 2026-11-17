@@ -1611,7 +1611,7 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   width: 16px;
   height: 16px;
   stroke: currentColor;
-  stroke-width: 1.8;
+  stroke-width: 2.6;
   stroke-linecap: round;
   stroke-linejoin: round;
   fill: none;
@@ -6714,4 +6714,10 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
 #settings-modal .settings-head .settings-desc {
   font-size: 11px;
   margin-top: 2px;
+}
+
+/* The compact bar sets one icon stroke for every action. Launch's arrow reads
+   as the primary action, so it carries a bolder line than the rest. */
+#details-actions .action-bar #btn-launch .dock-launch-arrow svg {
+  stroke-width: 2.6;
 }
