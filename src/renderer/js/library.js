@@ -56,8 +56,8 @@ const RAIL = {
   GAP: 16,                             // gap between the line and a resting logo
   PAD: 18,                             // breathing room right of the focused logo
   MIN_W: 236,                          // the rail never shrinks past this
-  MAX_W: 400,                          // …nor grows past this
-  WIDTH_RATIO: 0.32,                   // …nor past this share of the window
+  MAX_W: 440,                          // …nor grows past this
+  WIDTH_RATIO: 0.36,                   // …nor past this share of the window
   FOCUS_SCALE: 2.0,                    // how much larger the focused logo gets
   FOCUS_OFFSET: 44,                    // px it slides off the line
   SCALE:   [1.00, 0.66, 0.48, 0.38],   // by distance 0…3+ (0 uses FOCUS_SCALE)
@@ -207,7 +207,6 @@ window.addEventListener('resize', () => {
     railResizeRaf = 0;
     layoutRail();
     layoutSearch();
-    measureLaunchArrowTravel();
     document.body.classList.add('rail-fx-instant');
     applyRailCarousel();
     centerActiveItem(false);
@@ -355,7 +354,10 @@ export function renderGameList() {
     gifEligibilityObserver?.observe(el);
     el.addEventListener('click', () => {
       const i = parseInt(el.dataset.index);
-      if (i === selectedIndex) railEnterGame();   // clicking the focused logo steps in
+      // Pointer uses the same browsing -> details action as RIGHT on either
+      // keyboard or controller.  A second, mouse-only intermediate state made
+      // the three input methods disagree.
+      if (i === selectedIndex) openDetails();
       else selectGame(i);
     });
     el.addEventListener('dblclick', () => { selectGame(parseInt(el.dataset.index)); openDetails(); });
@@ -977,13 +979,11 @@ export function centerActiveItem(animate = true) {
   // Position of active item center relative to list top
   const itemCenterY = selectedIndex * ITEM_STEP + ITEM_SIZE / 2;
   const translateY = centerY - itemCenterY;
-  // In focused mode the focused logo parks to the right edge of the sidebar:
-  // handled here because the inline transform overrides any CSS-only rule.
-  const focused = document.getElementById('game-list-panel').classList.contains('focused');
-  const translateX = focused ? 60 : 0;
-
+  // The park position is already reserved by layoutRail's width budget
+  // (line + gap + offset + logo + padding). An extra sideways nudge here
+  // pushed the logo past the sidebar's clip edge, cutting its right side.
   if (!animate) list.style.transition = 'none';
-  list.style.transform = `translateY(${translateY}px) translateX(${translateX}px)`;
+  list.style.transform = `translateY(${translateY}px)`;
   if (!animate) {
     // Force reflow then re-enable transitions
     list.offsetHeight;
@@ -1033,6 +1033,9 @@ export function syncRailInstant() {
 /* ── Select game — with transitions ───────────────────────────────────────*/
 export function selectGame(i) {
   if (i < 0 || i >= games.length || i === selectedIndex) return;
+  // A restore/backup/remove dialog is always scoped to the game that opened
+  // it.  Do not let it survive a change in selection and present stale data.
+  closeActiveGameDialog({ restoreFocus: false });
   setSelectedIndex(i);
   // Route memory: the rebuilt WebView focuses the same game when it boots.
   rememberUiState({ selectedGameId: games[i].id });
@@ -1611,89 +1614,6 @@ export function openDetails() {
   sidebar.classList.add('focused');
   sidebar.classList.remove('logos-mode');
 
-  // The panel is now visible: measure how far the launch arrow can travel.
-  measureLaunchArrowTravel();
-}
-
-/* Launch travel depends on live geometry. The label is hidden only while the
-   tile and label cross, then both settle visible at opposite ends. */
-function measureLaunchArrowTravel() {
-  const btn = document.getElementById('btn-launch');
-  const arrow = btn ? btn.querySelector('.dock-launch-arrow') : null;
-  const arrowIcon = btn ? btn.querySelector('.dock-launch-arrow-icon') : null;
-  const label = btn ? btn.querySelector('.action-label') : null;
-  if (!btn || !arrow || !arrowIcon || !label) return;
-  if (btn._launchMotionBound) return btn._launchEndpoints || null;
-  const abr = arrow.getBoundingClientRect();
-  const aibr = arrowIcon.getBoundingClientRect();
-  const lbr = label.getBoundingClientRect();
-  const bbr = btn.getBoundingClientRect();
-  const styles = getComputedStyle(btn);
-  const paddingLeft = parseFloat(styles.paddingLeft) || 0;
-  const paddingRight = parseFloat(styles.paddingRight) || 0;
-  const borderLeft = parseFloat(styles.borderLeftWidth) || 0;
-  const borderRight = parseFloat(styles.borderRightWidth) || 0;
-  const leftInset = bbr.left + borderLeft + paddingLeft;
-  const rightInset = bbr.right - borderRight - paddingRight;
-  const gap = 10;
-  const labelWidth = lbr.width;
-  const tileWidth = abr.width;
-  const restTileLeft = abr.left - bbr.left;
-  const restLabelLeft = lbr.left - bbr.left;
-  const innerLeft = leftInset - bbr.left;
-  const innerRight = rightInset - bbr.left;
-  const labelLeft = Math.max(innerLeft, Math.min(restTileLeft - labelWidth - gap, innerRight - labelWidth));
-  const tileLeft = Math.min(innerRight - tileWidth, Math.max(labelLeft + labelWidth + gap, innerLeft));
-  const endpoints = { tileTravel: Math.floor(tileLeft - restTileLeft), labelTravel: Math.floor(labelLeft - restLabelLeft), rotation: 45 };
-  btn._launchEndpoints = endpoints;
-
-  // One WAAPI controller owns each transform; cancelling samples the rendered
-  // transform, so rapid reversals continue from the current frame.
-  if (!btn._launchMotionBound) {
-    btn._launchMotionBound = true;
-    let animations = [];
-    let active = null;
-    const readTransform = (el) => getComputedStyle(el).transform;
-    const run = (next) => {
-      if (active === next) return;
-      active = next;
-      const tileTransform = readTransform(arrow);
-      const iconTransform = readTransform(arrowIcon);
-      animations.forEach((animation) => animation.cancel());
-      animations = [];
-      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches && !document.body.classList.contains('force-motion');
-      const duration = reduced ? 1 : 460;
-      const ease = 'cubic-bezier(0.22, 1, 0.36, 1)';
-      const tileFrom = tileTransform === 'none' ? 'translateX(0px)' : tileTransform;
-      const iconFrom = iconTransform === 'none' ? 'rotate(0deg)' : iconTransform;
-      const labelTransform = readTransform(label);
-      const labelFrom = labelTransform === 'none' ? 'translateX(0px)' : labelTransform;
-      const tileTo = `translateX(${next ? endpoints.tileTravel : 0}px)`;
-      const labelTo = `translateX(${next ? endpoints.labelTravel : 0}px)`;
-      const iconTo = `rotate(${next ? endpoints.rotation : 0}deg)`;
-      const labelOpacity = getComputedStyle(label).opacity;
-      animations = [
-        arrow.animate([{ transform: tileFrom, offset: 0 }, { transform: tileFrom, offset: 0.18 }, { transform: tileTo, offset: 0.82 }, { transform: tileTo, offset: 1 }], { duration, easing: ease, fill: 'forwards' }),
-        arrowIcon.animate([{ transform: iconFrom, offset: 0 }, { transform: iconFrom, offset: 0.18 }, { transform: iconTo, offset: 0.82 }, { transform: iconTo, offset: 1 }], { duration, easing: ease, fill: 'forwards' }),
-        label.animate([
-          { transform: labelFrom, opacity: labelOpacity, offset: 0 },
-          { transform: labelFrom, opacity: 0, offset: 0.18 },
-          { transform: labelTo, opacity: 0, offset: 0.82 },
-          { transform: labelTo, opacity: 1, offset: 1 }
-        ], { duration, easing: ease, fill: 'forwards' })
-      ];
-    };
-    btn.addEventListener('pointerenter', () => run(true));
-    btn.addEventListener('pointerleave', () => { if (!btn.matches(':focus-visible') && !btn.classList.contains('hold-midpoint')) run(false); });
-    btn.addEventListener('focusin', () => run(true));
-    btn.addEventListener('focusout', () => { if (!btn.matches(':hover') && !btn.classList.contains('hold-midpoint')) run(false); });
-    const motionObserver = new MutationObserver(() => {
-      const engaged = btn.matches(':hover, :focus-visible') || btn.classList.contains('hold-midpoint') || btn.classList.contains('dock-focus');
-      run(engaged);
-    });
-    motionObserver.observe(btn, { attributes: true, attributeFilter: ['class'] });
-  }
-  return endpoints;
 }
 
 export function closeDetails() {
@@ -1716,6 +1636,40 @@ export function closeDetails() {
   // Back to browsing: re-attach the carousel to the focused logo, stats only.
   railSetEntered(false);
   syncRailInstant();
+}
+
+/* Game-scoped dialogs share one dismissal path.  Keyboard Escape, controller
+ * B, mouse Cancel and a game switch must all perform the same cleanup; keeping
+ * this here also prevents a restore list from outliving the game that created
+ * it. */
+const GAME_DIALOGS = [
+  ['restore-overlay', 'btn-restore-cancel'],
+  ['backup-name-overlay', 'btn-backup-name-cancel'],
+  ['uninstall-overlay', 'btn-uninstall-cancel'],
+];
+
+export function hasActiveGameDialog() {
+  return GAME_DIALOGS.some(([overlayId]) => {
+    const overlay = document.getElementById(overlayId);
+    return overlay && !overlay.classList.contains('hidden');
+  });
+}
+
+export function closeActiveGameDialog({ restoreFocus = true } = {}) {
+  for (const [overlayId, cancelId] of GAME_DIALOGS) {
+    const overlay = document.getElementById(overlayId);
+    if (!overlay || overlay.classList.contains('hidden')) continue;
+    const opener = overlay._siloOpener;
+    document.getElementById(cancelId)?.click();
+    // A dialog handler may be asynchronous or may have been replaced during a
+    // re-render.  The overlay is the source of truth, so always close it too.
+    overlay.classList.add('hidden');
+    overlay._siloGameId = null;
+    overlay._siloOpener = null;
+    if (restoreFocus) opener?.focus?.({ preventScroll: true });
+    return true;
+  }
+  return false;
 }
 
 /* ── Action dock focus (controller / keyboard) ─────────────────────────────
@@ -1793,6 +1747,26 @@ export function activateDockFocus() {
     return;
   }
   dockFocusEl.click();
+}
+
+/* Right-stick navigation inside the opened details. The stats row is the
+   vertical rail: every step focuses the next interactive stat (or the stage
+   select) and scrolls it into view, so a pad can read the details without
+   leaving the dock's horizontal focus alone. */
+export function focusDetailsStat(delta) {
+  const stats = document.getElementById('details-stats');
+  if (!stats || !detailsOpen) return false;
+  const blocks = [...stats.querySelectorAll('.stat-hover, #details-status-select')]
+    .filter((el) => el.offsetParent !== null);
+  if (!blocks.length) return false;
+  const current = blocks.indexOf(document.activeElement);
+  const next = current < 0
+    ? (delta < 0 ? blocks.length - 1 : 0)
+    : (current + delta + blocks.length) % blocks.length;
+  blocks[next].focus({ preventScroll: true });
+  blocks[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  // Focus must not leak out of the details into the library behind it.
+  return true;
 }
 
 
@@ -1961,6 +1935,9 @@ export function renderDetails(g) {
       }).join('');
       
       document.getElementById('restore-overlay').classList.remove('hidden');
+      const restoreOverlay = document.getElementById('restore-overlay');
+      restoreOverlay._siloGameId = g.id;
+      restoreOverlay._siloOpener = restoreBtn;
       const firstCtl = listEl.querySelector('button') || document.getElementById('btn-restore-cancel');
       firstCtl?.focus();
     };
@@ -1977,6 +1954,8 @@ export function renderDetails(g) {
       const btnOk = document.getElementById('btn-backup-name-ok');
       
       input.value = '';
+      overlay._siloGameId = g.id;
+      overlay._siloOpener = backupBtn;
       overlay.classList.remove('hidden');
       input.focus();
       
@@ -2004,15 +1983,33 @@ export function renderDetails(g) {
     };
   }
 
+  const deleteBtn = document.getElementById('btn-delete-game');
   setupHoldButton('btn-launch', 3000, () => doLaunch(g.id));
   setupHoldButton('btn-edit-game', 3000, () => openEditModal(g));
+  // The pad's X has to be held so a stray press cannot reach a destructive
+  // control; the mouse does not, because it already points at one button and
+  // the options dialog is the confirmation step.
+  setupHoldButton('btn-delete-game', 900, () => {
+    deleteBtn._holdCompleted = true;
+    deleteBtn.click();
+  }, { requireHold: true });
 
   clearDockFocus();
 
-  const deleteBtn = document.getElementById('btn-delete-game');
   deleteBtn.onclick = async () => {
+    // The dialog is itself the guard: a click, keyboard activation or a
+    // completed pad hold all land here and none of them changes anything yet.
+    // A second click while the dialog is already open must not re-open it.
+    const openOverlay = document.getElementById('uninstall-overlay');
+    if (openOverlay && !openOverlay.classList.contains('hidden')) {
+      deleteBtn._holdCompleted = false;
+      return;
+    }
+    deleteBtn._holdCompleted = false;
     // Check if uninstaller exists
     const uninstallOverlay = document.getElementById('uninstall-overlay');
+    uninstallOverlay._siloGameId = g.id;
+    uninstallOverlay._siloOpener = deleteBtn;
     
     const runRow = document.getElementById('uninstall-action-row-run');
     if (runRow) runRow.hidden = false;
@@ -2041,6 +2038,12 @@ export function renderDetails(g) {
     };
 
     document.getElementById('uninstall-action-row-remove').onclick = async () => {
+      const { ask } = window.__TAURI__.dialog;
+      const confirmed = await ask(
+        `Remove ${g.name} from SILO? Its game files will be left untouched.`,
+        { title: 'Remove from SILO', kind: 'warning' },
+      );
+      if (!confirmed) return;
       uninstallOverlay.classList.add('hidden');
       if (await finishRemoval(g)) {
         showToast('success', 'Removed', `${g.name} has been removed from Launcher.`);
@@ -2164,6 +2167,7 @@ export function renderDetails(g) {
     };
 
     uninstallOverlay.classList.remove('hidden');
+    document.getElementById('uninstall-action-row-run')?.focus({ preventScroll: true });
   };
 
   async function finishRemoval(game) {
@@ -2202,7 +2206,7 @@ function fmtBackupTime(iso) {
   return `${months[d.getMonth()]} ${d.getDate()}, ${h}:${mm} ${ampm}`;
 }
 
-function setupHoldButton(id, duration, onComplete) {
+function setupHoldButton(id, duration, onComplete, { requireHold = false } = {}) {
   const btn = document.getElementById(id);
   if (!btn) return;
   // Clear old listeners
@@ -2212,8 +2216,9 @@ function setupHoldButton(id, duration, onComplete) {
   // two can never disagree about how long "hold" is.
   btn._holdMs = duration;
 
-  btn.onclick = onComplete;
-  btn.classList.remove('hold-midpoint');
+  // Actions such as Edit still support an ordinary mouse click; destructive
+  // Delete is the exception and only fires from the completed hold below.
+  btn.onclick = requireHold ? (event) => event.preventDefault() : onComplete;
   
   const startHold = () => {
     if (actionHoldStart) return;
@@ -2223,9 +2228,9 @@ function setupHoldButton(id, duration, onComplete) {
 
     actionHoldInterval = setInterval(() => {
       const elapsed = Date.now() - actionHoldStart;
-      if (id === 'btn-launch' && elapsed >= duration / 2) {
-        btn.classList.add('hold-midpoint');
-      }
+      // Visible progress for a deliberate hold (900 ms delete): the button fills
+      // a ring in place instead of changing size, so the dock never shifts.
+      btn.style.setProperty('--hold-progress', String(Math.min(1, elapsed / duration)));
       if (elapsed >= duration) {
         clearInterval(actionHoldInterval);
         resetHold();
@@ -2240,7 +2245,7 @@ function setupHoldButton(id, duration, onComplete) {
     actionHoldTarget = null;
     clearInterval(actionHoldInterval);
     btn.classList.remove('holding');
-    if (id === 'btn-launch') btn.classList.remove('hold-midpoint');
+    btn.style.setProperty('--hold-progress', '0');
   };
   
   btn._startGamepadHold = startHold;

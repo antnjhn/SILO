@@ -32,7 +32,7 @@ Unicode true
 
 ; --- Identity --------------------------------------------------------------
 !define APP_NAME    "SILO"
-!define APP_VERSION "0.5.4"
+!define APP_VERSION "0.5.5"
 !define APP_ID      "com.silo.launcher"
 !define APP_EXE     "silo.exe"
 !define SRC_EXE     "..\src-tauri\target\release\silo.exe"
@@ -84,7 +84,7 @@ Icon "${SETUP_ICO}"
 UninstallIcon "${UNINST_ICO}"
 WindowIcon on
 
-VIProductVersion "0.5.4.0"
+VIProductVersion "0.5.5.0"
 VIAddVersionKey /LANG=1033 "ProductName"     "${APP_NAME}"
 VIAddVersionKey /LANG=1033 "FileDescription" "${APP_NAME} Setup"
 VIAddVersionKey /LANG=1033 "FileVersion"     "${APP_VERSION}"

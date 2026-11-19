@@ -108,6 +108,28 @@ function press(key) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+/* The panel is bottom-anchored, so a field near the bottom of the page would be
+   typed into blind. Scroll the field's own container until it clears the panel;
+   the page also reserves room for the panel (body.osk-open) so the scroll can
+   always go far enough. */
+function keepInputVisible() {
+  if (!state) return;
+  const { input, panel } = state;
+  const limit = panel.getBoundingClientRect().top - 16;
+  const overflow = input.getBoundingClientRect().bottom - limit;
+  if (overflow <= 0.5) return;
+
+  let box = input.parentElement;
+  while (box && box !== document.body) {
+    const style = getComputedStyle(box);
+    const scrolls = /(auto|scroll)/.test(style.overflowY) && box.scrollHeight > box.clientHeight + 1;
+    if (scrolls) break;
+    box = box.parentElement;
+  }
+  if (box && box !== document.body) box.scrollTop += overflow;
+  else window.scrollBy(0, overflow);
+}
+
 export function openKeyboard(input) {
   if (!input) return;
   closeKeyboard();
@@ -115,7 +137,9 @@ export function openKeyboard(input) {
   document.body.append(parts.overlay);
   document.body.classList.add('osk-open');
   state = { input, index: 0, ...parts };
+  document.body.style.setProperty('--osk-h', `${parts.panel.offsetHeight}px`);
   paint();
+  requestAnimationFrame(keepInputVisible);
 }
 
 export function closeKeyboard() {
@@ -123,6 +147,7 @@ export function closeKeyboard() {
   const { overlay, input } = state;
   overlay.remove();
   document.body.classList.remove('osk-open');
+  document.body.style.removeProperty('--osk-h');
   state = null;
   input?.focus({ preventScroll: true });
 }

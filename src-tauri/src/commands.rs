@@ -4300,25 +4300,6 @@ fn expand_env_vars(input: &str) -> String {
     out
 }
 
-/// Library exports skip nested archives — the per-game snapshots under
-/// `backups/` and `saves/` — so the export stays a library + settings bundle
-/// instead of ballooning into a zip of zips. Note this means save snapshots do
-/// not travel with an exported library; the games, their settings, cover art and
-/// session history do.
-fn is_nested_archive(rel_path: &Path) -> bool {
-    let mut components = rel_path.components();
-    let Some(first) = components.next() else {
-        return false;
-    };
-    let folder = first.as_os_str().to_string_lossy().to_lowercase();
-    (folder == "backups" || folder == "saves")
-        && rel_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("zip"))
-            .unwrap_or(false)
-}
-
 fn zip_dir(src_dir: &Path, dest_zip: &Path) -> Result<(), String> {
     zip_dir_filtered(src_dir, dest_zip, |_| false)
 }
@@ -5370,11 +5351,10 @@ pub async fn backup_library(app: AppHandle) -> Result<String, String> {
             app_data_dir,
             dest_path
         );
-        let result = zip_dir_filtered(
-            &app_data_dir,
-            std::path::Path::new(&dest_path.to_string()),
-            is_nested_archive,
-        );
+        // A library backup must contain the actual per-game save snapshots,
+        // not just games.json and settings. Keep their original paths so the
+        // restore operation can put each game's data back in its own folder.
+        let result = zip_dir(&app_data_dir, std::path::Path::new(&dest_path.to_string()));
         match &result {
             Ok(()) => log::info!("Library backup completed successfully"),
             Err(e) => log::error!("Library backup failed: {}", e),
@@ -5399,6 +5379,32 @@ fn archive_library_schema(path: &Path) -> Option<u32> {
         .map(|version| version as u32)
 }
 
+/// Validate the archive before extraction so malformed or unrelated ZIP files
+/// cannot partially overwrite the active library. Older exports without a
+/// schema version remain accepted as long as they contain the library index.
+fn validate_library_archive(path: &Path) -> Result<(), String> {
+    let file = File::open(path).map_err(|e| format!("could not open backup: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("backup is not a readable ZIP archive: {e}"))?;
+    let mut has_library = false;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| format!("backup contains a corrupt entry: {e}"))?;
+        let name = entry.name().replace('\\', "/");
+        if name == "games.json" || name.ends_with("/games.json") {
+            has_library = true;
+        }
+    }
+    if !has_library {
+        return Err("backup does not contain a SILO games.json library index".into());
+    }
+    if archive.len() == 0 {
+        return Err("backup contains no recognizable SILO data".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn restore_library(app: AppHandle) -> Result<String, String> {
     let file_path = app
@@ -5421,6 +5427,7 @@ pub async fn restore_library(app: AppHandle) -> Result<String, String> {
                 ));
             }
         }
+        validate_library_archive(std::path::Path::new(&src_path.to_string()))?;
         log::info!("Starting library restore: src={:?}, dest={:?}", src_path, app_data_dir);
         let result = unzip_file(std::path::Path::new(&src_path.to_string()), &app_data_dir);
         match &result {
@@ -6447,7 +6454,7 @@ mod tests {
 
         let zip_path = TempDir::new("lib_export_zip");
         let archive_path = zip_path.path().join("silo_backup.zip");
-        zip_dir_filtered(src.path(), &archive_path, is_nested_archive).unwrap();
+        zip_dir(src.path(), &archive_path).unwrap();
 
         // Importing is exactly `restore_library`: unzip into a (fresh) data dir.
         let restored = TempDir::new("lib_import");
@@ -6470,24 +6477,20 @@ mod tests {
             fs::read_to_string(restored.path().join("saves").join("game-1").join("notes.txt")).unwrap(),
             "keep me"
         );
-        // Save snapshots are deliberately left out of the library bundle.
-        assert!(!restored
+        // Save snapshots are part of the library bundle and retain their path.
+        assert!(restored
             .path()
             .join("backups")
             .join("game-1")
             .join("auto_20240101_120000.zip")
             .exists());
-        assert!(is_nested_archive(Path::new("backups/game-1/auto_20240101_120000.zip")));
-        assert!(is_nested_archive(Path::new("saves/game-1/auto_20240101_120000.ZIP")));
-        assert!(!is_nested_archive(Path::new("games.json")));
-        assert!(!is_nested_archive(Path::new("saves/game-1/notes.txt")));
     }
 
     #[test]
     fn empty_library_export_fails_loudly_instead_of_writing_an_empty_zip() {
         let src = TempDir::new("lib_export_empty");
         let archive = TempDir::new("lib_export_empty_zip");
-        let err = zip_dir_filtered(src.path(), &archive.path().join("empty.zip"), is_nested_archive).unwrap_err();
+        let err = zip_dir(src.path(), &archive.path().join("empty.zip")).unwrap_err();
         assert!(err.contains("No files could be read"), "unexpected error: {err}");
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "silo"
-version = "0.5.4"
+version = "0.5.5"
 default-run = "silo"
 description = "SILO - A fast, aesthetic game launcher with controller support and save management"
 authors = ["anthn"]

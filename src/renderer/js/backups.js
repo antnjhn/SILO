@@ -41,36 +41,6 @@ window.doRestore = async (gameId, backupName) => {
   }
 };
 
-/* ── Dialog keyboard: Esc closes each dialog; Tab stays inside. ─────────── */
-function trapFocus(overlayEl, e) {
-  const focusables = overlayEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-  if (!focusables.length) return;
-  const list = Array.from(focusables).filter(el => !el.hasAttribute('hidden'));
-  if (!list.length) return;
-  const first = list[0];
-  const last = list[list.length - 1];
-  const active = document.activeElement;
-  if (e.shiftKey) {
-    if (active === first || !overlayEl.contains(active)) { e.preventDefault(); last.focus(); }
-  } else if (active === last || !overlayEl.contains(active)) {
-    e.preventDefault(); first.focus();
-  }
-}
-document.addEventListener('keydown', (e) => {
-  const restoreOv = document.getElementById('restore-overlay');
-  if (restoreOv && !restoreOv.classList.contains('hidden')) {
-    if (e.key === 'Escape') { restoreOv.classList.add('hidden'); return; }
-    if (e.key === 'Tab') trapFocus(restoreOv, e);
-    return;
-  }
-  const backupOv = document.getElementById('backup-name-overlay');
-  if (backupOv && !backupOv.classList.contains('hidden')) {
-    if (e.key === 'Escape') { document.getElementById('btn-backup-name-cancel')?.click(); return; }
-    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('btn-backup-name-ok')?.click(); return; }
-    if (e.key === 'Tab') trapFocus(backupOv, e);
-  }
-});
-
 /* ── Backup manager ─────────────────────────────────────────────────────────*/
 document.getElementById('btn-backup-manager').addEventListener('click', () => {
   showPage('home');

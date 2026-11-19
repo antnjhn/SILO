@@ -11,8 +11,12 @@ import {
   selectGame, railEnterGame, railExitGame,
   toggleFilterPanel, isFilterPanelOpen,
   closeDetails, openDetails, detailsOpen, railEntered, categoriesOpen,
-  forceMotion, focusDock, activateDockFocus,
+  forceMotion, focusDock, hasDockFocus, activateDockFocus,
 } from './library.js';
+import {
+  getActiveModalScope, getPageNavigationScope, moveFocusInScope, trapTabInScope,
+  dismissActiveModal, submitActiveModal,
+} from './navigation.js';
 import { closeMetadataPicker, closeOnlineArtPicker } from './modals.js';
 // Side-effect module: binds Backup Manager and the library export / restore
 // buttons. It has no named exports, so it is loaded for its handlers alone.
@@ -323,13 +327,67 @@ function isTextField(el) {
   return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || !!el.isContentEditable;
 }
 
-document.addEventListener('keydown', e => {
+// Listen at the window boundary so library input works as soon as the WebView
+// has focus, including when no individual control has received a mouse click.
+window.addEventListener('keydown', e => {
   // First-run setup owns the keyboard while it is on screen: nothing behind it
   // should scroll, select or close.
   const onboarding = document.getElementById('onboarding-overlay');
   if (onboarding && !onboarding.classList.contains('hidden')) return;
 
   const isEscape = e.key === 'Escape';
+
+  // Any top-level dialog owns the keyboard while it is visible: Tab cycles
+  // inside it, arrows move between its controls, and Escape dismisses only the
+  // topmost one. The bg interface can never receive input through it. This is
+  // the same scope the controller uses, so the two can not disagree.
+  const modalScope = getActiveModalScope();
+  if (modalScope) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      trapTabInScope(e, modalScope);
+      return;
+    }
+    if (isEscape) {
+      e.preventDefault();
+      dismissActiveModal(modalScope);
+      return;
+    }
+    if (e.key.startsWith('Arrow') && !isTextField(document.activeElement)) {
+      e.preventDefault();
+      moveFocusInScope(modalScope, e.key);
+      return;
+    }
+    // Enter in a text field confirms the dialog, the way the dialog's own
+    // handler used to. On any other focused control the browser's default
+    // activation runs; nothing behind the dialog may hear the key.
+    const active = document.activeElement;
+    const typing = active && (active.tagName === 'TEXTAREA'
+      || (active.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'range', 'file'].includes(active.type)));
+    if (e.key === 'Enter' && typing) {
+      e.preventDefault();
+      submitActiveModal(modalScope);
+    }
+    return;
+  }
+
+  // Settings and Import are routed pages rather than overlays. While one is on
+  // screen the arrows walk its controls and Escape returns to the library; the
+  // library's own arrow keys must not change the selection behind the page.
+  // Statistics keeps its own left/right view switch further down.
+  const pageId = currentPage();
+  const pageScope = (pageId === 'settings' || pageId === 'import')
+    ? getPageNavigationScope(pageId) : null;
+  if (pageScope) {
+    if (isEscape && !isTextField(document.activeElement)) {
+      e.preventDefault(); showPage('home'); return;
+    }
+    if (e.key.startsWith('Arrow') && !isTextField(document.activeElement)) {
+      e.preventDefault();
+      moveFocusInScope(pageScope, e.key);
+      return;
+    }
+  }
 
   // ── The back hierarchy ───────────────────────────────────────────────────
   // Escape closes the topmost transient thing first: a picker, a manager, a
@@ -471,6 +529,7 @@ document.addEventListener('keydown', e => {
     // back out. A / Enter still opens the full details view.
     case 'ArrowUp':
       e.preventDefault();
+      if (detailsOpen) break;
       // Up from the topmost game reveals navigation and focuses it; from any
       // other game it moves to the previous game without touching the nav.
       if (!isNavRevealed()) {
@@ -485,23 +544,30 @@ document.addEventListener('keydown', e => {
       break;
     case 'ArrowDown':
       e.preventDefault();
+      if (detailsOpen) break;
       if (!detailsOpen && selectedIndex < games.length - 1) selectGame(selectedIndex + 1);
       break;
     case 'ArrowRight':
       e.preventDefault();
-      // Inside the details the dock owns the horizontal arrows; browsing, RIGHT
-      // steps into the focused game.
+      // Controller and keyboard deliberately share this exact transition:
+      // RIGHT from browsing opens details; once open it only walks the dock.
       if (detailsOpen) focusDock(1);
-      else railEnterGame();
+      else openDetails();
       break;
     case 'ArrowLeft':
       e.preventDefault();
-      if (detailsOpen) focusDock(-1);           // LEFT walks the action dock
+      if (detailsOpen) {
+        // With an active dock item LEFT navigates the dock.  From the details
+        // composition itself it is the matching back transition to browsing.
+        if (hasDockFocus()) focusDock(-1);
+        else closeDetails();
+      }
       else if (railEntered) railExitGame();     // LEFT steps back out first...
       else if (isFilterPanelOpen()) toggleFilterPanel(false);
       else openCategories();                    // ...then reveals the category wheel
       break;
-    case 'Enter':      e.preventDefault();
+    case 'Enter':
+    case ' ':          e.preventDefault();
       if (detailsOpen) activateDockFocus();
       else if (games.length) openDetails();
       break;
@@ -513,7 +579,7 @@ document.addEventListener('keydown', e => {
       if (detailsOpen) closeDetails();
       break;
   }
-});
+}, { capture: true });
 
 /* ── Go ────────────────────────────────────────────────────────────────────*/
 init();

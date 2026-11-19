@@ -4,14 +4,15 @@ import {
   getCategories, changeCategorySelection, openCategories, closeCategories,
   selectGame, railEnterGame, railExitGame, closeDetails, openDetails,
   categorySelectedIndex, categoriesOpen, detailsOpen, railEntered, actionHoldTarget,
-  focusDock, hasDockFocus, activateDockFocus,
+  focusDock, hasDockFocus, activateDockFocus, focusDetailsStat,
 } from './library.js';
+import { getActiveModalScope, getPageNavigationScope, moveFocusInScope, dismissActiveModal, focusInView } from './navigation.js';
 import { openAddModal } from './modals.js';
-import { navigateStatsFocus } from './stats.js';
+
 import {
   revealNavFromController, revealNavAndFocus, isNavRevealed, hideNavNow, moveNavFocus, activateNavItem, toggleNav,
 } from './nav.js';
-import { showPage } from './pages.js';
+import { showPage, currentPage } from './pages.js';
 import { isKeyboardOpen, openKeyboard, handleKeyboardPad } from './osk.js';
 
 // Gamepad
@@ -60,14 +61,21 @@ export function vibrateVertical() {
 
 /* ── Hold buttons ────────────────────────────────────────────────────────────
    The press starts the ring, the release cancels it. Starting is skipped while
-   another hold owns the target, exactly like the previous per-frame helper. */
+   another hold owns the target. The poll may only cancel a hold it started:
+   otherwise every frame with a connected controller would reset a hold the
+   mouse began on the same button. */
+let gamepadHoldTarget = null;
 function hold(id, isPressed) {
   const btn = document.getElementById(id);
   if (!btn) return;
   if (isPressed) {
-    if (!actionHoldTarget && btn._startGamepadHold) btn._startGamepadHold();
-  } else if (actionHoldTarget === id && btn._resetGamepadHold) {
+    if (!actionHoldTarget && btn._startGamepadHold) {
+      btn._startGamepadHold();
+      gamepadHoldTarget = id;
+    }
+  } else if (gamepadHoldTarget === id && btn._resetGamepadHold) {
     btn._resetGamepadHold();
+    gamepadHoldTarget = null;
   }
 }
 
@@ -128,9 +136,10 @@ function cancelTimer() {
 /// button, phantom press, or accidental launch.
 function resetInputState() {
   buttonWas = {};
-  prevAxes = { right: false, left: false, up: false, down: false };
+  prevAxes = { right: false, left: false, up: false, down: false, rUp: false, rDown: false };
   bDownAt = 0;
   hold('btn-launch', false);
+  gamepadHoldTarget = null;
 }
 
 /// Stops high-frequency polling. Callers own `controllerConnected`; this only
@@ -252,6 +261,10 @@ function handlePad(pad) {
 
   const ly = pad.axes[1];
   const lx = pad.axes[0];
+  // The right stick is the second vertical rail: it scrolls the details stats
+  // and the controls of settings, import and the edit dialog, while the left
+  // stick keeps its existing job. Both describe the same UP/DOWN intent.
+  const ry = pad.axes[3];
   const dUp    = pad.buttons[12]?.pressed;
   const dDown  = pad.buttons[13]?.pressed;
   const dLeft  = pad.buttons[14]?.pressed;
@@ -261,8 +274,11 @@ function handlePad(pad) {
   const down  = !!(dDown  || ly >  DEADZONE);
   const right = !!(dRight || lx >  DEADZONE);
   const left  = !!(dLeft  || lx < -DEADZONE);
+  const rUp   = !!(ry < -DEADZONE);
+  const rDown = !!(ry >  DEADZONE);
 
   const bHeld = !!pad.buttons[1]?.pressed;
+  const xHeld = !!pad.buttons[2]?.pressed;
   const yHeld = !!pad.buttons[3]?.pressed;
 
   /* Every edge is sampled exactly once per frame, here, before any branch can
@@ -274,6 +290,7 @@ function handlePad(pad) {
     x: btnPressed(pad, 2, 'X'),
     y: btnPressed(pad, 3, 'Y'),
     lb: btnPressed(pad, 4, 'LB'),
+    rb: btnPressed(pad, 5, 'RB'),
     start: btnPressed(pad, 9, 'START'),
   };
 
@@ -284,7 +301,39 @@ function handlePad(pad) {
     prevAxes.right = right;
     prevAxes.up = up;
     prevAxes.down = down;
+    prevAxes.rUp = rUp;
+    prevAxes.rDown = rDown;
   };
+
+  // The topmost visible dialog owns the pad. A dismisses nothing and confirms
+  // the focused control, B cancels it (and any in-flight hold), the d-pad walks
+  // its controls, and the interface beneath it never hears any input. The
+  // keyboard runs the exact same scope through navigation.js.
+  const modalScope = getActiveModalScope();
+  if (modalScope) {
+    if (pressed.b) {
+      if (actionHoldTarget) document.getElementById(actionHoldTarget)?._resetGamepadHold?.();
+      dismissActiveModal(modalScope);
+    }
+    if ((right && !prevAxes.right) || (down && !prevAxes.down)) {
+      moveFocusInScope(modalScope, right ? 'ArrowRight' : 'ArrowDown');
+    }
+    if ((left && !prevAxes.left) || (up && !prevAxes.up)) {
+      moveFocusInScope(modalScope, left ? 'ArrowLeft' : 'ArrowUp');
+    }
+    if (rDown && !prevAxes.rDown) moveFocusInScope(modalScope, 'ArrowDown');
+    if (rUp && !prevAxes.rUp) moveFocusInScope(modalScope, 'ArrowUp');
+    if (pressed.a) {
+      const active = document.activeElement;
+      if (active?.matches('input[type="text"], input[type="password"], input[type="number"], textarea')) {
+        openKeyboard(active);
+      } else {
+        active?.click?.();
+      }
+    }
+    commitAxes();
+    return;
+  }
 
   /* The keyboard owns the pad while it is up, wherever it was opened from. */
   if (isKeyboardOpen()) {
@@ -320,18 +369,77 @@ function handlePad(pad) {
     return;
   }
 
-  /* ── 1. Statistics page ──────────────────────────────────────────────────── */
-  if (statsOpen) {
-    if (pressed.b) document.getElementById('btn-stats-close').click();
-    if (right && !prevAxes.right) document.getElementById('btn-stats-games').click();
-    if (left && !prevAxes.left) document.getElementById('btn-stats-overall').click();
-    if (up && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; navigateStatsFocus(-1); }
-    if (down && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; navigateStatsFocus(1); }
+  /* ── The bar's shoulders ───────────────────────────────────────────────────
+     LB/RB walk the navigation row wherever the bar is on screen, including
+     over the Settings, Import and Statistics pages. They only move its cursor,
+     so the d-pad, A and B keep driving the page underneath. */
+  if (isNavRevealed() && (pressed.lb || pressed.rb)) {
+    moveNavFocus(pressed.rb ? 1 : -1);
     commitAxes();
     return;
   }
 
-  /* ── 2. Overlays: import, settings, metadata, online art, backup manager ──── */
+  /* ── 1. Statistics page ──────────────────────────────────────────────────── */
+  if (statsOpen) {
+    // The whole page is the scope, not just the chart buttons: the tab row and
+    // Back are controls the player expects to reach, and every step scrolls
+    // the focused control into view. UP/DOWN walk the page in reading order so
+    // each control is certain to be met; LEFT/RIGHT keep switching the tab.
+    const scope = getPageNavigationScope('stats');
+    const stepFocus = (dir) => {
+      const controls = scope?.controls || [];
+      if (!controls.length) return;
+      const at = controls.indexOf(document.activeElement);
+      const next = at < 0 ? (dir > 0 ? 0 : controls.length - 1) : (at + dir + controls.length) % controls.length;
+      focusInView(controls[next]);
+    };
+    if (pressed.b) document.getElementById('btn-stats-close').click();
+    if (right && !prevAxes.right) document.getElementById('btn-stats-games').click();
+    if (left && !prevAxes.left) document.getElementById('btn-stats-overall').click();
+    if ((up || rUp) && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; stepFocus(-1); }
+    if ((down || rDown) && now - lastNavTime > NAV_REPEAT) { lastNavTime = now; stepFocus(1); }
+    if (pressed.a) {
+      const active = document.activeElement;
+      if (active?.matches('input[type="text"], input[type="password"], input[type="number"], textarea')) {
+        openKeyboard(active);
+      } else {
+        (scope?.root.contains(active) ? active : scope?.controls?.[0])?.click?.();
+      }
+    }
+    commitAxes();
+    return;
+  }
+
+  /* ── 2. Settings and Import: routed pages walked like a dialog ────────────
+     The d-pad moves between the page's controls, A activates the focused one
+     (or opens the on-screen keyboard for a text field), and B returns to the
+     library. Settings used to reach only its text fields with a pad, so its
+     toggles and Back button were unreachable. */
+  const pageId = currentPage();
+  if (pageId === 'settings' || pageId === 'import') {
+    const scope = getPageNavigationScope(pageId);
+    if ((right && !prevAxes.right) || (down && !prevAxes.down)) {
+      moveFocusInScope(scope, right ? 'ArrowRight' : 'ArrowDown');
+    }
+    if ((left && !prevAxes.left) || (up && !prevAxes.up)) {
+      moveFocusInScope(scope, left ? 'ArrowLeft' : 'ArrowUp');
+    }
+    if (rDown && !prevAxes.rDown) moveFocusInScope(scope, 'ArrowDown');
+    if (rUp && !prevAxes.rUp) moveFocusInScope(scope, 'ArrowUp');
+    if (pressed.a) {
+      const active = document.activeElement;
+      if (active?.matches('input[type="text"], input[type="password"], input[type="number"], textarea')) {
+        openKeyboard(active);
+      } else {
+        (scope?.root.contains(active) ? active : scope?.controls?.[0])?.click?.();
+      }
+    }
+    if (pressed.b) showPage('home');
+    commitAxes();
+    return;
+  }
+
+  /* ── 3. Overlays: metadata, online art, backup manager ───────────────────── */
   if (modalOpen || metadataOpen || onlineArtOpen || backupManagerOpen || settingsOpen) {
     // A text field in the open panel can be reached with the d-pad and typed
     // into with the on-screen keyboard. Buttons stay mouse and keyboard work, as
@@ -423,15 +531,21 @@ function handlePad(pad) {
   /* ── 7. Game view: full details, or stepped into the focused game ─────────
      The dock owns LEFT/RIGHT, A picks an action, B taps back out. */
   if (detailsOpen || railEntered) {
-    if (left && !prevAxes.left) focusDock(-1);
+    if (left && !prevAxes.left) {
+      if (detailsOpen && !hasDockFocus()) closeDetails();
+      else focusDock(-1);
+    }
     if (right && !prevAxes.right) focusDock(1);
+    // Right stick: the stats are the vertical rail of the open details.
+    if (rDown && !prevAxes.rDown) focusDetailsStat(1);
+    if (rUp && !prevAxes.rUp) focusDetailsStat(-1);
     // The first A reveals the dock's first action instead of firing it.
     if (pressed.a) {
       if (hasDockFocus()) activateDockFocus();
       else focusDock(1);
     }
     if (games[selectedIndex]) {
-      if (pressed.x) document.getElementById('btn-delete-game').click();
+      hold('btn-delete-game', xHeld);
       hold('btn-edit-game', yHeld);
     }
     if (bTap) {
@@ -459,7 +573,9 @@ function handlePad(pad) {
     selectGame(selectedIndex + 1);
     vibrateVertical();
   }
-  if (right && !prevAxes.right) railEnterGame();
+  // RIGHT opens the selected game's details. Browsing remains a clean artwork
+  // rail; the dock is only introduced after this explicit second-stage action.
+  if (right && !prevAxes.right) openDetails();
   // LEFT opens the category wheel, the way the keyboard's LEFT does.
   if (left && !prevAxes.left) openCategories();
   if (pressed.lb) openCategories();

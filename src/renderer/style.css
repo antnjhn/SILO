@@ -321,6 +321,22 @@ body.has-wallpaper::before { opacity: 0; }
   box-sizing: border-box;
 }
 
+/* A pad moves focus programmatically, which does not always match
+   :focus-visible, so the focused control on a page needs a mark of its own.
+   Keyboard focus keeps the same ring, so both inputs agree on one language. */
+.page :is(button, input, select, a[href]):focus-visible,
+body.gamepad-active .page :is(button, input, select, a[href]):focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Toggle and radio rows are the control, so the whole row is marked rather
+   than the small input inside it. */
+body.gamepad-active .page :is(.settings-toggle-row, .settings-check):has(input:focus) {
+  outline: 2px solid var(--accent);
+  outline-offset: 6px;
+  border-radius: 10px;
+}
+
 .page.entering { animation: pageIn 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 .page.leaving {
   animation: pageOut 220ms cubic-bezier(0.4, 0, 1, 1) both;
@@ -466,11 +482,36 @@ body:has(#modal-overlay:not(.hidden)) .topnav-gradient {
 
 /* The navigation group is centred in the window, not pinned to the left. */
 .topnav-items {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: clamp(26px, 3.4vw, 58px);
 }
+
+/* Shoulder keys: the pair only exists for a controller, so it is drawn only
+   while one is connected and the bar is up. Absolute placement keeps the icon
+   row's own spacing untouched. */
+.topnav-shoulder {
+  display: none;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 9px 9px 12px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.topnav-shoulder-left { right: calc(100% + 16px); }
+.topnav-shoulder-right { left: calc(100% + 16px); }
+body.gamepad-active #topnav.revealed .topnav-shoulder { display: inline-flex; }
 
 /* A thin divider between the navigation sections. */
 .topnav-divider {
@@ -1107,11 +1148,16 @@ select.topnav-tool option { background: #101012; color: #EDEDED; }
   opacity: 1;
   pointer-events: auto;
   filter: brightness(1) blur(0);
-  transform: scale(1.06);
 }
 #game-list-panel.focused {
-  /* Give the sliding logo breathing room against the details panel. */
-  --sidebar-w: 220px;
+  /* Stepping in does not shrink the rail: the focused logo keeps the exact
+     scale it had while browsing, so the game's identity stays the anchor and
+     the details sit beside it instead of squeezing it. */
+  --sidebar-w: var(--rail-w, 300px);
+}
+#game-list-panel.focused #game-list {
+  align-items: flex-start;
+  padding-left: calc(var(--rail-line-x, 64px) + var(--rail-gap, 16px));
 }
 
 /* Viewport that clips the scrolling list */
@@ -1147,12 +1193,12 @@ select.topnav-tool option { background: #101012; color: #EDEDED; }
   align-items: flex-start;
   padding-left: calc(var(--rail-line-x, 64px) + var(--rail-gap, 16px));
 }
-/* Full details keeps its compact rail: the artwork settles back onto the line
-   (the border between the focused logo and the stats stays) while the meta and
-   actions take the stage, and the indicator returns to the logo's right. */
+/* Full details keeps the browsing composition: the logo stays on the line at
+   its focused scale (a hair larger, so entering reads as a step forward) while
+   the meta and actions take the stage beside it. */
 #game-list-panel.focused .game-item img,
 #game-list-panel.focused .game-item .fallback-letter {
-  transform: none;
+  transform: translateX(var(--rail-x, 0px)) scale(calc(var(--rail-scale, 1) * 1.04));
 }
 #game-list-panel.focused .game-item.active::after {
   left: auto; right: -14px;
@@ -1341,9 +1387,6 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fallback {
   display: block;
 }
-#details-panel.is-preview #details-actions {
-  display: none;
-}
 #details-panel.is-preview #btn-close-details {
   display: none;
 }
@@ -1355,6 +1398,24 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 #details-panel:not(.is-preview) #details-inner {
   padding-right: 0;
   max-width: calc(100vw - 320px);
+}
+#details-panel:not(.is-preview) {
+  /* The rail's head is measured from the real toolbar, so offsetting the panel
+     by it makes the stats/dock/hints column centre on the logo's own centre
+     line at every window size — no fixed pixel anchor. */
+  justify-content: center;
+  padding: var(--rail-head-h, 70px) 60px 0;
+}
+#details-panel:not(.is-preview) #details-inner {
+  /* A step below the parked logo rather than level with it: a viewport-relative
+     drop keeps that relationship at every window height. */
+  transform: translateY(clamp(30px, 12vh, 112px));
+}
+#details-panel:not(.is-preview) #details-content {
+  gap: 14px;
+}
+#details-panel:not(.is-preview) #details-actions {
+  padding-top: 10px;
 }
 #details-panel:not(.is-preview).has-logo #details-game-name-fallback,
 #details-panel:not(.is-preview) #details-logo-area {
@@ -1462,9 +1523,11 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
    ACTION DOCK — new square/rectangular design with dynamic accent colours
    ═══════════════════════════════════════════════════════════════════════════ */
 #details-actions {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) auto;
+  grid-template-rows: auto auto;
+  column-gap: 12px;
+  row-gap: 0;
   align-items: center;
   justify-content: flex-start;
   padding-top: var(--rail-block-gap, 26px);
@@ -1604,8 +1667,6 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   justify-content: center;
   width: 16px;
   height: 16px;
-  transform: translate3d(0, 0, 0);
-  transition: transform 480ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .dock-launch-arrow svg {
   width: 16px;
@@ -1614,21 +1675,9 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   stroke-linecap: round;
   stroke-linejoin: round;
   fill: none;
-  transition: none;
 }
-.dock-launch:hover .dock-launch-arrow,
 .dock-launch:focus-visible .dock-launch-arrow { color: var(--accent-ink); }
-.dock-launch:hover .dock-launch-arrow-icon,
 .dock-launch:focus-visible .dock-launch-arrow-icon {
-  color: var(--accent-ink);
-}
-.dock-launch .dock-launch-arrow { transition: none; }
-
-/* Midpoint is tied to the existing 3000 ms hold. The outer carries no accent
-   under the unified model, so mid-hold Launch simply renders its rest look —
-   these rules pin the glyph ink explicitly during the hold. */
-.dock-launch.hold-midpoint:not(:hover):not(:focus-visible) .dock-launch-arrow,
-.dock-launch.hold-midpoint:not(:hover):not(:focus-visible) .dock-launch-arrow-icon {
   color: var(--accent-ink);
 }
 
@@ -1756,7 +1805,7 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   border: 1px solid var(--hairline);
   color: var(--text);
   cursor: pointer;
-  transition: background 480ms cubic-bezier(0.22, 1, 0.36, 1), border-color 480ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background 180ms ease, border-color 180ms ease, color 180ms ease;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1768,6 +1817,21 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
 .dock-delete:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Hold-to-delete progress: an accent ring that fills inside the button while X
+   (or the pointer) is held. It is painted within the existing box, so the dock
+   never changes size and no neighbouring button moves. */
+#btn-delete-game.holding { position: relative; }
+#btn-delete-game.holding::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  border-radius: inherit;
+  background: conic-gradient(var(--accent) calc(var(--hold-progress, 0) * 1turn), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 56%, #000 58%);
+  mask: radial-gradient(circle, transparent 56%, #000 58%);
+  pointer-events: none;
 }
 
 /* The symbol has no nested tile: the control itself is the hit target. */
@@ -1791,7 +1855,7 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   stroke-linejoin: round;
   transform-origin: center;
   transform: scale(1);
-  transition: color 480ms cubic-bezier(0.22, 1, 0.36, 1), transform 480ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: color 200ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
   z-index: 3;
 }
 
@@ -1801,7 +1865,7 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   width: 20px;
   height: 20px;
   transform-origin: 50% 50%;
-  transition: transform 480ms cubic-bezier(0.22, 1, 0.36, 1), fill 480ms cubic-bezier(0.22, 1, 0.36, 1), opacity 480ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1), fill 200ms ease, opacity 200ms ease;
   z-index: 2;
 }
 
@@ -1924,7 +1988,9 @@ body.show-game-titles #details-panel.is-preview.has-logo #details-game-name-fall
   display: flex;
   flex-direction: column;
   width: 400px;
-  max-width: 95vw;
+  max-width: min(95vw, 560px);
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
   min-width: 320px;
   min-height: 280px;
   padding: 32px;
@@ -3356,8 +3422,8 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 }
 /* Remove Game — same console frosted panel + typography as Settings */
 #uninstall-modal {
-  width: 520px; max-width: 94vw;
-  max-height: 90vh; overflow-y: auto;
+  width: min(520px, calc(100vw - 32px)); max-width: 94vw;
+  max-height: calc(100vh - 32px); overflow-y: auto;
   padding: 36px 40px;
   background: var(--scrim);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -4095,7 +4161,6 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
   --rail-ms: 520ms;
   --rail-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --rail-buttons-ms: 240ms;
-  --rail-exit-ms: 180ms;
   --rail-fade-ms: 260ms;   /* dim/blur settle — shorter than the travel */
   --rail-block-gap: 26px;   /* stats row → buttons row */
 }
@@ -4171,14 +4236,13 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
    never shift when they arrive. */
 #details-panel.is-preview #details-actions {
   display: flex;
-  opacity: 0;
-  transform: translateX(-14px);
-  pointer-events: none;
-  transition: opacity var(--rail-exit-ms) ease, transform var(--rail-exit-ms) ease;
 }
+/* Hidden state and both fade directions are declared once, with the other
+   controls, in the Browsing block near the end of this file. */
 #details-panel.is-preview.fx-buttons-in #details-actions {
   opacity: 1;
   transform: none;
+  visibility: visible;
   pointer-events: auto;
   transition: opacity var(--rail-buttons-ms) cubic-bezier(0.22, 1, 0.36, 1),
               transform var(--rail-buttons-ms) cubic-bezier(0.22, 1, 0.36, 1);
@@ -4189,10 +4253,12 @@ body.show-game-titles #details-panel.has-logo #details-logo-caption {
 body.rail-fx-instant {
   --rail-ms: 0ms;   /* the carousel's properties apply without interpolation */
 }
+/* The dock keeps its own fade-out transition even in instant mode: returning
+   from the full details steps the controls away instead of hard-cutting, which
+   is the seamless exit. The rail items themselves still switch instantly. */
 body.rail-fx-instant #game-list .game-item,
 body.rail-fx-instant #game-list .game-item img,
-body.rail-fx-instant #game-list .game-item .fallback-letter,
-body.rail-fx-instant #details-panel #details-actions {
+body.rail-fx-instant #game-list .game-item .fallback-letter {
   transition: none !important;
 }
 
@@ -4469,20 +4535,10 @@ body.rail-fx-instant #details-panel #details-actions {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  body:not(.force-motion) #btn-launch .dock-launch-arrow,
-  body:not(.force-motion) #btn-launch .dock-launch-arrow-icon,
-  body:not(.force-motion) #btn-launch .dock-launch-arrow svg,
-  body:not(.force-motion) #btn-launch .action-label,
   body:not(.force-motion) #btn-launch .action-icon-tile,
   body:not(.force-motion) #btn-delete-game .delete-arrow,
   body:not(.force-motion) #btn-delete-game .delete-x {
     transition: none !important;
-  }
-
-  /* Launch keeps its reduced-motion color polarity, but removes the
-     travel/diagonal transforms entirely rather than applying them instantly. */
-  body:not(.force-motion) #btn-launch .action-label {
-    transform: none !important;
   }
 
   body:not(.force-motion) #details-actions .action-dock-btn,
@@ -6469,7 +6525,6 @@ body.rail-fx-instant #details-panel #details-actions {
   letter-spacing: 0.01em;
   transition: background 160ms ease, color 160ms ease, transform 160ms ease;
 }
-#details-actions .action-bar .action-dock-btn:hover { background: var(--surface-3); }
 
 /* The labelled buttons carry a bare 18px glyph. The square accent tile belongs
    to the old roomy dock, so it is flattened here rather than in its own rules. */
@@ -6491,27 +6546,15 @@ body.rail-fx-instant #details-panel #details-actions {
 /* Launch is the primary action, so its arrow carries a heavier line than the
    icons beside it. This is the only place that weight is declared. */
 #details-actions .action-bar #btn-launch .dock-launch-arrow svg {
-  stroke-width: 2.6;
+  /* The sent design is a solid arrow, not an outlined one: the glyph is filled
+     and its stroke is dropped. Colour rides currentColor, so it turns ink on
+     the accent surface. */
+  fill: currentColor;
+  stroke: none;
 }
 
-/* Launch is the one filled control: the wallpaper accent with its ink colour,
-   so the same bar reads correctly on a purple wallpaper and on a pale one. */
-#details-actions .action-bar #btn-launch {
-  padding: 0 16px;
-  background: var(--accent);
-  color: var(--accent-ink);
-}
-#details-actions .action-bar #btn-launch:hover,
-#details-actions .action-bar #btn-launch:focus-visible {
-  background: var(--accent-strong);
-}
-#details-actions .action-bar #btn-launch .action-label { color: var(--accent-ink); }
-#details-actions .action-bar #btn-launch .action-icon-tile,
-#details-actions .action-bar #btn-launch:hover .action-icon-tile,
-#details-actions .action-bar #btn-launch:focus-visible .action-icon-tile {
-  background: transparent;
-  color: var(--accent-ink);
-}
+/* Launch needs no colour rules of its own: it inherits the shared dock
+   surface, and only its arrow is different (above). */
 
 /* Favorite is icon only, at the end of the bar past the divider. */
 #details-actions .action-bar .dock-fav {
@@ -6539,24 +6582,139 @@ body.rail-fx-instant #details-panel #details-actions {
   stroke: var(--accent);
 }
 
-/* Focus is drawn on the button: a white ring with a dark gap under it, which
-   holds up on a bright wallpaper and on a black one. The same ring marks the
-   controller's dock focus, so both inputs show the same thing. */
-#details-actions .action-bar .action-dock-btn:focus-visible,
-#details-actions .action-bar .action-dock-btn.dock-focus {
-  outline: 2px solid #ffffff;
-  outline-offset: 2px;
-  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.85);
+.controller-instructions {
+  grid-column: 1;
+  grid-row: 2;
+  display: none;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  line-height: 1;
 }
+#details-panel:not(.is-preview) .controller-instructions {
+  display: flex;
+}
+.controller-instructions kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  margin-right: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.72);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+#details-actions > .action-bar { grid-column: 1; grid-row: 1; }
+#details-actions > .dock-delete { grid-column: 2; grid-row: 1; }
 
 /* Controller: the bar steps up about 14% so the hit areas read at distance,
    and the focused button grows inside it. */
 body.gamepad-active .action-bar {
-  transform: scale(1.14);
+  transform: none;
   transform-origin: left center;
 }
 body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
-  transform: scale(1.06);
+  transform: none;
+}
+
+/* Focus is an accent surface that expands inside the button. The ::after layer
+   is the fill: it grows from 92% to full size and fades in, so selection reads
+   through the accent itself. There is no ring, outline or shadow, and the
+   button's own box never changes, so neighbours cannot move. */
+#details-actions .action-bar .action-dock-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 90%, var(--surface-1));
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+#details-actions .action-bar .action-dock-btn > * {
+  position: relative;
+  z-index: 1;
+}
+#details-actions .action-bar .action-dock-btn:focus-visible,
+#details-actions .action-bar .action-dock-btn.dock-focus {
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent-ink);
+  outline: none;
+  box-shadow: none;
+}
+/* Only selection fills: a pointer hover lifts the button off the bar instead
+   (see the lifted-surface rule below), so hovering never reads as a choice. */
+#details-actions .action-bar .action-dock-btn:focus-visible::after,
+#details-actions .action-bar .action-dock-btn.dock-focus::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* The fill is only half the state: on the accent surface every label, glyph and
+   arrow must ride the ink token, otherwise the resting white sits on the fill.
+   One rule for the button, one for the things inside it. */
+#details-actions .action-dock-btn:is(:focus-visible, .dock-focus) {
+  color: var(--accent-ink);
+}
+#details-actions .action-dock-btn:is(:focus-visible, .dock-focus)
+  :is(.action-label, .action-icon-tile, .action-icon-tile svg, .dock-launch-arrow, .dock-launch-arrow-icon) {
+  color: var(--accent-ink);
+}
+
+/* Delete keeps its own hover language: the tile stays dark and only the
+   converge animation plays (the four arrowheads travel inward while the X
+   grows, see the cardinal rules above). The accent surface belongs to
+   controller focus, so a pointer hover never reads as a selection. */
+#details-actions .dock-delete:hover {
+  background: var(--surface-3);
+  border-color: var(--hairline-strong);
+  color: var(--text);
+}
+#details-actions .dock-delete:hover .delete-x { color: var(--text); }
+#details-actions .dock-delete:hover .delete-arrow path { fill: var(--accent); }
+
+#details-actions .dock-delete:is(:focus-visible, .dock-focus) {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-ink);
+}
+#details-actions .dock-delete:is(:focus-visible, .dock-focus) .delete-x { color: var(--accent-ink); }
+#details-actions .dock-delete:is(:focus-visible, .dock-focus) .delete-arrow path { fill: var(--accent-ink); }
+
+/* Browsing exposes identity/artwork only. */
+/* Browsing exposes identity/artwork only. The controls fade and drop instead
+   of vanishing, so leaving the details reads as one continuous move. */
+#details-panel #details-stats,
+#details-panel #save-path-status,
+#details-panel #details-actions,
+#details-panel .controller-instructions {
+  transition: opacity 280ms ease,
+              transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+              visibility 0s;
+}
+#details-panel.is-preview #details-stats,
+#details-panel.is-preview #save-path-status,
+#details-panel.is-preview #details-actions,
+#details-panel.is-preview .controller-instructions {
+  opacity: 0;
+  transform: translateY(10px);
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 240ms ease,
+              transform 300ms cubic-bezier(0.22, 1, 0.36, 1),
+              visibility 0s linear 300ms;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6581,16 +6739,44 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
    back into the bar. */
 #details-actions .action-bar .action-dock-btn:hover,
 #details-actions .action-bar .dock-fav:hover { background: rgba(255, 255, 255, 0.09); }
-#details-actions .dock-delete:hover { background: rgba(255, 255, 255, 0.09); }
+@media (max-width: 1100px) {
+  #details-panel:not(.is-preview) {
+    padding-left: 0;
+    padding-right: 16px;
+  }
+  #details-panel:not(.is-preview) #details-inner {
+    width: 100%;
+    max-width: calc(100vw - var(--rail-w, 300px) - 24px);
+    min-width: 0;
+    gap: 16px;
+  }
+  #details-panel:not(.is-preview) #details-content {
+    width: 100%;
+    min-width: 0;
+  }
+  #details-panel:not(.is-preview) #details-actions {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
 
-/* The old hover inverted the control to ivory, and the glyphs were recoloured
-   for that surface. On the lifted surface the glyphs keep their resting colours,
-   so delete lifts exactly like the bar buttons and stays legible. The converge
-   animation is untouched. */
-#details-actions .dock-delete:hover .delete-x,
-#details-actions .dock-delete:focus-visible .delete-x { color: var(--text); }
-#details-actions .dock-delete:hover .delete-arrow path,
-#details-actions .dock-delete:focus-visible .delete-arrow path { fill: var(--accent); }
+@media (max-width: 1200px) {
+  #details-panel:not(.is-preview) #details-stats {
+    gap: clamp(16px, 2.5vw, 30px);
+  }
+}
+
+@media (max-width: 850px) {
+  #details-panel:not(.is-preview) #details-stats { gap: 8px; }
+  #details-panel:not(.is-preview) #stat-block-status { max-width: 140px; }
+  #details-panel:not(.is-preview) .stat-install-value-wrap { gap: 3px; }
+}
+
+@media (max-height: 620px) {
+  #details-panel:not(.is-preview) #details-content { gap: 10px; }
+  #details-panel:not(.is-preview) #details-actions { padding-top: 6px; }
+  #details-panel:not(.is-preview) .controller-instructions { margin-top: 6px; }
+}
 
 /* The pad's cursor in first run setup. A ring on the focused control, the same
    one the action bar uses, so the two never disagree about what focus is. */
@@ -6669,6 +6855,13 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
   color: rgba(255, 255, 255, 0.45);
 }
 
+/* While the keyboard is up the page keeps room to scroll, so the field being
+   edited can be scrolled clear of the panel instead of hiding behind it. The
+   panel height is published by osk.js as --osk-h. */
+body.osk-open .page {
+  padding-bottom: calc(var(--osk-h, 280px) + 32px);
+}
+
 /* ── Library snapshots (Settings) ───────────────────────────────────────── */
 .snapshot-block { margin-top: 14px; }
 
@@ -6720,3 +6913,70 @@ body.gamepad-active #details-actions .action-bar .action-dock-btn.dock-focus {
   margin-top: 2px;
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DIALOG CONTAINMENT — a dialog is always inside the window, never pushed
+   past its edge by its own content. The overlay supplies the gutter; the panel
+   caps itself against the viewport and scrolls instead of overflowing.
+   ═══════════════════════════════════════════════════════════════════════════ */
+#uninstall-overlay, #restore-overlay, #backup-name-overlay, #gif-policy-overlay,
+#migrate-overlay, #scan-results-overlay, #backup-manager-overlay,
+#close-confirm-overlay, #discovery-overlay {
+  padding: 16px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+#uninstall-overlay > .glass-panel, #restore-overlay > .glass-panel,
+#backup-name-overlay > .glass-panel, #gif-policy-overlay > .glass-panel,
+#migrate-overlay > .glass-panel, #scan-results-overlay > .glass-panel,
+#backup-manager-overlay > .glass-panel, #close-confirm-overlay > .glass-panel,
+#discovery-overlay > .glass-panel {
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+/* The removal dialog scrolls its action list, so the header and Cancel stay
+   reachable even when the three options do not fit. */
+#uninstall-modal.uninstall-dialog {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#uninstall-modal .uninstall-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+#uninstall-modal .uninstall-dialog-footer {
+  align-items: center;
+  gap: 12px;
+}
+
+/* ── In-dialog key hints: the same restrained keycaps as the dock strip ──── */
+.dialog-hints {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-right: auto;
+  color: rgba(255, 255, 255, 0.48);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  line-height: 1;
+}
+.dialog-hints kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  margin-right: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.72);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
